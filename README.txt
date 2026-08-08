@@ -181,37 +181,13 @@ NEW IN v16 — EARNINGS HISTORY FIX
 - Historical profile requests remain one ticker at a time, preserving the fast
   v15 main-scan architecture.
 
-NEW IN v17 — AUTO HISTORICAL MOVER
-- Historical Mover now loads automatically after the post-earnings scan.
-- Earnings History remains collapsed and is used only to reveal the deeper
-  event-by-event 1D/3D/5D/10D/14D excursion statistics.
-- Profiles load progressively with up to 4 concurrent workers so the initial
-  scan remains responsive instead of waiting for every historical profile.
-- Historical Mover shows QUEUED / LOADING / UNAVAILABLE while background work
-  is in progress.
-
-v18 HOTFIX — AUTO HISTORICAL MOVER
-- Corrected v17 packaging issue: the auto-loader code was not actually present.
-- Historical Mover now transitions QUEUED -> LOADING -> HIGH/MODERATE/LOW
-  automatically after the main scan.
-- Earnings History no longer initiates the calculation; it only expands the
-  detailed historical excursion table.
-- Uses at most 4 concurrent profile requests to protect Render responsiveness.
-
-v19 — RENDER STABILITY
-- Historical mover auto-loading is now strictly sequential: one ticker at a time.
-- This prevents the four Gunicorn threads from all being occupied by expensive
-  history calculations, which made the whole Render app appear frozen.
-- A 350 ms pause is inserted between historical-profile requests.
-- The Post-Earnings status shows progress such as "Historical movers 8/71".
-- Starting a new earnings scan cancels the previous background queue.
-- Main earnings scan / RRG / holdings logic is unchanged.
-
-v20 — FRONT-END FREEZE FIX
-- Historical mover completion no longer calls renderEarnings() for every ticker.
-- Each ticker updates only its own Historical Mover cell and detail row.
-- This avoids reconstructing/rebinding a 50-100+ row table dozens of times.
-- Background history requests remain strictly sequential.
-- Inter-request pause increased from 350 ms to 750 ms to reduce sustained load
-  on the free Render instance.
-- Main scan and historical calculations are otherwise unchanged.
+v21 — VIEWPORT LAZY HISTORICAL MOVERS
+- Removed full-list automatic background history processing.
+- Historical Mover loads automatically only when its row is visible or near
+  the viewport.
+- Uses IntersectionObserver and a strictly one-at-a-time history queue.
+- Adds a 1.2 second pause between history requests.
+- Scrolling naturally causes the next visible tickers to populate.
+- Unseen tickers consume zero history requests.
+- Earnings History dropdown remains for detailed statistics only.
+- Built from the stable v16 main-scan/history implementation.
