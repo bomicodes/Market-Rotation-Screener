@@ -126,3 +126,8 @@ NEW IN v13 — FULL HOLDINGS AUDIT + EXHAUSTIVE EARNINGS VALIDATION
 - After calendar-level earnings sources run, every remaining ETF holding gets
   a targeted ticker-history validation before being excluded.
 - Post-Earnings status displays source diagnostics (Finnhub / Yahoo / targeted).
+
+v13.1 HOTFIX
+- Fixed a JavaScript duplicate-variable declaration in runEarnings().
+- The error prevented the browser from initializing any buttons/tabs.
+- No screening logic was otherwise changed from v13.
