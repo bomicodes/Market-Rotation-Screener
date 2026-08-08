@@ -180,3 +180,12 @@ NEW IN v16 — EARNINGS HISTORY FIX
   an explicit insufficient-data message and the dates that were found.
 - Historical profile requests remain one ticker at a time, preserving the fast
   v15 main-scan architecture.
+
+NEW IN v17 — AUTO HISTORICAL MOVER
+- Historical Mover now loads automatically after the post-earnings scan.
+- Earnings History remains collapsed and is used only to reveal the deeper
+  event-by-event 1D/3D/5D/10D/14D excursion statistics.
+- Profiles load progressively with up to 4 concurrent workers so the initial
+  scan remains responsive instead of waiting for every historical profile.
+- Historical Mover shows QUEUED / LOADING / UNAVAILABLE while background work
+  is in progress.
