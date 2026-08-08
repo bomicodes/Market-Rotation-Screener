@@ -180,14 +180,3 @@ NEW IN v16 — EARNINGS HISTORY FIX
   an explicit insufficient-data message and the dates that were found.
 - Historical profile requests remain one ticker at a time, preserving the fast
   v15 main-scan architecture.
-
-v21 — VIEWPORT LAZY HISTORICAL MOVERS
-- Removed full-list automatic background history processing.
-- Historical Mover loads automatically only when its row is visible or near
-  the viewport.
-- Uses IntersectionObserver and a strictly one-at-a-time history queue.
-- Adds a 1.2 second pause between history requests.
-- Scrolling naturally causes the next visible tickers to populate.
-- Unseen tickers consume zero history requests.
-- Earnings History dropdown remains for detailed statistics only.
-- Built from the stable v16 main-scan/history implementation.
