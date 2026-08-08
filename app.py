@@ -738,10 +738,16 @@ def yahoo_calendar_for_day(day):
 
 def discover_recent_earnings(tickers, recent_trading_days=10):
     """
-    Full-universe recent earnings discovery.
-    We query calendar-level sources for the date window, then intersect them
-    with ALL holdings. This avoids N per-ticker network calls and prevents a
-    top-N holdings limit from hiding valid reporters.
+    Lightweight recent-earnings discovery for the main screen.
+
+    Main scan intentionally avoids per-ticker historical earnings requests.
+    It intersects ALL ETF holdings with calendar-level sources only:
+      1) Finnhub date-range calendar
+      2) Optional Unusual Whales API
+      3) Nasdaq daily calendar
+      4) Yahoo daily calendar
+
+    Historical earnings profiles are loaded separately, on demand.
     """
     now = pd.Timestamp.now().normalize()
     calendar_days = int(recent_trading_days * 1.8) + 5
@@ -749,68 +755,77 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
     wanted = set(tickers)
     found = {}
     diag = {
-        "universe":len(tickers),"finnhub":0,"nasdaq":0,"uw":0,
-        "yahoo":0,"ticker_history":0
+        "universe": len(tickers),
+        "finnhub": 0,
+        "nasdaq": 0,
+        "uw": 0,
+        "yahoo": 0,
+        "calendar_days_checked": 0,
     }
 
-    # 1) Finnhub structured range request
+    # 1) Finnhub: one structured range request.
     if FINNHUB_API_KEY:
-        for t, meta in finnhub_earnings_calendar(start, now).items():
+        fh_key = f"finnhub-calendar:{start.date()}:{now.date()}"
+        fh_map = cached(fh_key, lambda: finnhub_earnings_calendar(start, now), ttl=1800)
+        for t, meta in fh_map.items():
             if t in wanted:
                 found[t] = meta
                 diag["finnhub"] += 1
 
-    # 2) Optional Unusual Whales paid API
+    # Build weekday list once.
+    days = [d for d in pd.date_range(start, now, freq="D") if d.weekday() < 5]
+    diag["calendar_days_checked"] = len(days)
+
+    # 2) Optional Unusual Whales paid API.
     if UW_API_TOKEN:
-        for d in pd.date_range(start, now, freq="D"):
-            if d.weekday() >= 5:
-                continue
-            for t, meta in unusual_whales_day(d).items():
+        def uw_day_cached(d):
+            k = f"uw-calendar:{pd.Timestamp(d).date()}"
+            return cached(k, lambda: unusual_whales_day(d), ttl=1800)
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futures = {ex.submit(uw_day_cached, d): d for d in days}
+            for fut in as_completed(futures):
+                try:
+                    day_map = fut.result()
+                except Exception:
+                    day_map = {}
+                for t, meta in day_map.items():
+                    if t in wanted and t not in found:
+                        found[t] = meta
+                        diag["uw"] += 1
+
+    # 3 + 4) Nasdaq and Yahoo public calendars, parallelized and cached.
+    def public_day(d):
+        ds = pd.Timestamp(d).strftime("%Y-%m-%d")
+        nkey = f"nasdaq-calendar:{ds}"
+        ykey = f"yahoo-calendar:{ds}"
+        nmap = cached(nkey, lambda: nasdaq_calendar_for_day(d), ttl=1800)
+        ymap = cached(ykey, lambda: yahoo_calendar_for_day(d), ttl=1800)
+        return nmap, ymap
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futures = {ex.submit(public_day, d): d for d in days}
+        for fut in as_completed(futures):
+            try:
+                nmap, ymap = fut.result()
+            except Exception:
+                nmap, ymap = {}, {}
+
+            for t, meta in nmap.items():
                 if t in wanted and t not in found:
                     found[t] = meta
-                    diag["uw"] += 1
+                    diag["nasdaq"] += 1
 
-    # 3) Nasdaq + Yahoo public daily calendars for gaps in Finnhub
-    for d in pd.date_range(start, now, freq="D"):
-        if d.weekday() >= 5:
-            continue
-
-        for t, meta in nasdaq_calendar_for_day(d).items():
-            if t in wanted and t not in found:
-                found[t] = meta
-                diag["nasdaq"] += 1
-
-        for t, ed in yahoo_calendar_for_day(d).items():
-            if t in wanted and t not in found:
-                found[t] = {
-                    "date":ed,"time":None,
-                    "source":"Yahoo earnings calendar"
-                }
-                diag["yahoo"] += 1
-
-    # Last-resort targeted check is intentionally limited to a small number of
-    # unresolved holdings so free hosting cannot be locked up by 100+ requests.
-    missing = [t for t in tickers if t not in found]
-    fallback_candidates = missing[:12]
-    if fallback_candidates:
-        with ThreadPoolExecutor(max_workers=3) as ex:
-            futs = {ex.submit(get_earnings_dates,t,12):t for t in fallback_candidates}
-            for fut in as_completed(futs):
-                t = futs[fut]
-                try:
-                    dates = [pd.Timestamp(d).normalize() for d in fut.result()
-                             if start <= pd.Timestamp(d).normalize() <= now]
-                    if dates:
-                        found[t] = {
-                            "date":max(dates),"time":None,
-                            "source":"Targeted ticker earnings history"
-                        }
-                        diag["ticker_history"] += 1
-                except Exception:
-                    pass
+            for t, ed in ymap.items():
+                if t in wanted and t not in found:
+                    found[t] = {
+                        "date": ed,
+                        "time": None,
+                        "source": "Yahoo earnings calendar"
+                    }
+                    diag["yahoo"] += 1
 
     diag["found"] = len(found)
-    diag["missing_after_calendar_scan"] = len(tickers) - len(found)
     return found, diag
 
 def get_earnings_dates(ticker, limit=12):
@@ -1028,89 +1043,121 @@ def api_sector(etf):
 
 @app.get("/api/postearnings/<etf>")
 def api_postearnings(etf):
-    etf=etf.upper()
+    etf = etf.upper()
     try:
-        recent_days=max(3,min(30,int(request.args.get("days","10"))))
-        holdings,_holdings_source=cached(f"holdings:{etf}",lambda:get_fund_holdings(etf),ttl=3600)
-        tickers=[h["ticker"] for h in holdings]
-        now=pd.Timestamp.now().normalize()
-        # calendar-day buffer approximates requested trading-day window
-        cutoff=now-pd.Timedelta(days=int(recent_days*1.8)+4)
+        if etf not in RRG_UNIVERSE:
+            return jsonify({"ok":False,"error":"Choose an ETF from the Layer-1 universe."}),400
 
+        recent_days = max(3, min(30, int(request.args.get("days","10"))))
+
+        # Full holdings universe, cached.
+        holdings, holdings_source = cached(
+            f"holdings:{etf}",
+            lambda:get_fund_holdings(etf),
+            ttl=3600
+        )
+        tickers = [h["ticker"] for h in holdings]
+
+        # Calendar-level discovery only.
         recent_map, earnings_diag = discover_recent_earnings(tickers, recent_days)
+        now = pd.Timestamp.now().normalize()
 
-        recent=[]
+        recent = []
         for h in holdings:
             t = h["ticker"]
-            meta_recent = recent_map.get(t)
-            if meta_recent is None:
+            meta = recent_map.get(t)
+            if not meta:
                 continue
-            d = pd.Timestamp(meta_recent["date"]).normalize()
+            d = pd.Timestamp(meta["date"]).normalize()
+            recent.append((h, d, meta))
 
-            # Prefer UW historical dates if available, otherwise yfinance.
-            uw_hist = unusual_whales_history(t) if UW_API_TOKEN else []
+        if not recent:
+            return jsonify({
+                "ok":True,
+                "sector":etf,
+                "sector_name":RRG_UNIVERSE.get(etf,etf),
+                "recent_days":recent_days,
+                "results":[],
+                "holdings_source":holdings_source,
+                "holdings_total_loaded":len(holdings),
+                "earnings_diagnostics":earnings_diag,
+                "message":"No recent earnings were found in the loaded ETF holdings using the available calendar sources."
+            })
+
+        # Batch one price request for only the recent reporters + benchmark.
+        names = [x[0]["ticker"] for x in recent]
+        prices = dl_prices([etf] + names, "18mo")
+        rrg_map = {r["ticker"]: r for r in dual_rrg_rows(prices, etf, names, 8, 8)}
+
+        results = []
+        for h, d, event_meta in recent:
+            r = rrg_map.get(h["ticker"], {})
+            results.append({
+                "ticker": h["ticker"],
+                "name": h["name"],
+                "weight": h.get("weight"),
+                "earnings_date": d.strftime("%Y-%m-%d"),
+                "calendar_days_ago": max(0,(now-d).days),
+                "earnings_time": event_meta.get("time"),
+                "earnings_source": event_meta.get("source"),
+                "eps_estimate": event_meta.get("eps_estimate"),
+                "eps_actual": event_meta.get("eps_actual"),
+                "revenue_estimate": event_meta.get("revenue_estimate"),
+                "revenue_actual": event_meta.get("revenue_actual"),
+                "profile": None,
+                "rotation": r,
+                "current_score": float(r.get("score",0)) if r else 0.0,
+            })
+
+        # Rank main screen by current rotation only; historical mover loads lazily.
+        results.sort(key=lambda x: -x.get("current_score",0))
+
+        return jsonify({
+            "ok":True,
+            "sector":etf,
+            "sector_name":RRG_UNIVERSE.get(etf,etf),
+            "recent_days":recent_days,
+            "results":results,
+            "holdings_source":holdings_source,
+            "holdings_total_loaded":len(holdings),
+            "earnings_diagnostics":earnings_diag
+        })
+
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
+@app.get("/api/earnings-history/<ticker>")
+def api_earnings_history(ticker):
+    """
+    Lazy-load a single ticker's historical earnings-move profile.
+    Called only when the user expands Earnings history.
+    """
+    ticker = ticker.upper().strip()
+    try:
+        event_date = request.args.get("event_date")
+        cache_key = f"earnings-profile:{ticker}:{event_date or 'latest'}"
+
+        def build_profile():
+            # Prefer UW history only if a token exists; otherwise yfinance history.
+            uw_hist = unusual_whales_history(ticker) if UW_API_TOKEN else []
             if uw_hist:
                 dates = [x["date"] for x in uw_hist]
             else:
-                dates = get_earnings_dates(t, 16)
+                dates = get_earnings_dates(ticker, 20)
 
-            if not any(abs((pd.Timestamp(x).normalize()-d).days) <= 1 for x in dates):
-                dates = [d] + dates
+            if event_date:
+                d = pd.Timestamp(event_date).normalize()
+                if not any(abs((pd.Timestamp(x).normalize()-d).days) <= 1 for x in dates):
+                    dates = [d] + dates
 
-            recent.append((h,d,dates,meta_recent))
+            return earnings_profile(ticker, dates)
 
-        if not recent:
-            return jsonify({"ok":True,"sector":etf,"sector_name":RRG_UNIVERSE.get(etf,etf),
-                            "results":[],"recent_days":recent_days,
-                            "holdings_source":_holdings_source,
-                            "holdings_total_loaded":len(holdings),
-                            "earnings_diagnostics":earnings_diag,
-                            "message":"No recent earnings were found after calendar scans plus targeted validation of every loaded ETF holding."})
-
-        # RRG context for recent names
-        names=[x[0]["ticker"] for x in recent]
-        prices=dl_prices([etf]+names,"18mo")
-        rrg={r["ticker"]:r for r in dual_rrg_rows(prices,etf,names,8,8)}
-
-        def build(item):
-            h,d,dates,event_meta=item
-            prof=earnings_profile(h["ticker"],dates)
-            r=rrg.get(h["ticker"],{})
-            days_ago=max(0,(now-d).days)
-            # Overall current screen score keeps historical mover quality separate but visible.
-            current_score=float(r.get("score",0))
-            return {
-                "ticker":h["ticker"],"name":h["name"],"weight":h.get("weight"),
-                "earnings_date":d.strftime("%Y-%m-%d"),"calendar_days_ago":days_ago,
-                "earnings_time":event_meta.get("time"),
-                "earnings_source":event_meta.get("source"),
-                "uw_reaction":event_meta.get("reaction"),
-                "uw_expected_move_perc":event_meta.get("expected_move_perc"),
-                "eps_estimate":event_meta.get("eps_estimate"),
-                "eps_actual":event_meta.get("eps_actual"),
-                "revenue_estimate":event_meta.get("revenue_estimate"),
-                "revenue_actual":event_meta.get("revenue_actual"),
-                "profile":prof,"rotation":r,"current_score":current_score
-            }
-
-        results=[]
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            futs=[ex.submit(build,x) for x in recent]
-            for fut in as_completed(futs):
-                try: results.append(fut.result())
-                except: pass
-
-        rank={"HIGH":3,"MODERATE":2,"LOW":1}
-        results.sort(key=lambda x:(-rank.get((x["profile"] or {}).get("label","LOW"),0),
-                                   -((x["profile"] or {}).get("score",0)),
-                                   -x.get("current_score",0)))
-        return jsonify({"ok":True,"sector":etf,"sector_name":RRG_UNIVERSE.get(etf,etf),
-                        "recent_days":recent_days,"results":results,
-                        "holdings_source":_holdings_source,
-                        "holdings_total_loaded":len(holdings),
-                        "earnings_diagnostics":earnings_diag})
+        profile = cached(cache_key, build_profile, ttl=3600)
+        return jsonify({"ok":True,"ticker":ticker,"profile":profile})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
+
 
 @app.get("/health")
 def health():
@@ -1270,7 +1317,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
       <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover labels use up to the last 8 completed earnings events. Expand any ticker for 1/3/5/10/14-day excursion stats.</div>
+    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles are loaded only when you expand a ticker. This keeps the main scan fast; details still use up to the last 8 completed earnings events.</div>
   </div>
   <div class="panel">
     <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
@@ -1329,16 +1376,52 @@ function compactRRG(r){
  if(!r)return "—";
  return `${badge(r.quadrant)}<div class="tiny">${r.rs_up?"RS↑":"RS↓"} · ${r.mom_up?"Mom↑":"Mom↓"}</div>`;
 }
-function moverHTML(p){if(!p)return'<span class="mover mLOW">UNKNOWN</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
+function moverHTML(p){if(!p)return'<span class="mover">LOAD DETAILS</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
 function renderEarnings(){
  let f=document.getElementById("moverFilter").value,arr=earnResults.filter(x=>{let l=(x.profile||{}).label||"LOW";return f==="all"||(f==="hm"&&l!=="LOW")||(f==="high"&&l==="HIGH")});
- document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
- document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>document.getElementById(b.dataset.id).classList.toggle("open")));
+ document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
+ document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>{
+   const id=b.dataset.id;
+   const row=document.getElementById(id);
+   const ticker=b.dataset.ticker;
+   const eventDate=b.dataset.event;
+   const item=earnResults.find(x=>x.ticker===ticker);
+   if(row)row.classList.toggle("open");
+   if(item && !item.profile){
+      loadHistory(ticker,eventDate,id);
+   }
+ }));
 }
-function detailHTML(x){let p=x.profile;if(!p)return'<span class="note">Not enough usable historical earnings events for a profile.</span>';let ev=p.events||[];return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`}
+function detailHTML(x){
+ let p=x.profile;
+ if(!p)return `<div class="note" id="histbody-${x.ticker.replace(/[^A-Z0-9]/g,"")}">Historical profile has not been loaded yet.</div>`;
+ let ev=p.events||[];
+ return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`;
+}
+
+async function loadHistory(ticker,eventDate,rowId){
+ const body=document.getElementById(`histbody-${ticker.replace(/[^A-Z0-9]/g,"")}`);
+ if(body)body.textContent="Loading historical earnings profile…";
+ try{
+   const params=new URLSearchParams({event_date:eventDate});
+   const response=await fetch(`/api/earnings-history/${encodeURIComponent(ticker)}?${params.toString()}`);
+   const raw=await response.text();
+   let j;
+   try{j=JSON.parse(raw)}catch(e){throw Error(`Unreadable history response (${response.status})`)}
+   if(!response.ok||!j.ok)throw Error(j.error||"History request failed");
+   const item=earnResults.find(x=>x.ticker===ticker);
+   if(item)item.profile=j.profile;
+   renderEarnings();
+   const det=document.getElementById(rowId);
+   if(det)det.classList.add("open");
+ }catch(e){
+   if(body)body.innerHTML=`<span class="error">${e.message}</span>`;
+ }
+}
+
 async function runEarnings(){
  let st=document.getElementById("estatus");
- st.textContent="Scanning the full ETF holdings list for recent earnings…";
+ st.textContent="Finding recent reporters and calculating current rotation…";
  try{
    const s=document.getElementById("earnSector").value;
    const days=document.getElementById("earnDays").value;

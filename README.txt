@@ -149,3 +149,21 @@ NEW IN v14 — FULL POST-EARNINGS UNIVERSE + CALENDAR FALLBACKS
   pattern" failure caused by the prior scan-size path.
 - Holdings Audit now labels Yahoo TOP-holdings fallbacks as PARTIAL instead of
   showing them as fully valid.
+
+NEW IN v15 — FAST POST-EARNINGS ARCHITECTURE
+- Main Post-Earnings scan no longer calculates historical earnings profiles.
+- Main scan now does only:
+    full ETF holdings
+    calendar-level earnings discovery
+    one batch price download for recent reporters
+    Fast + Trend RRG
+- Historical 1/3/5/10/14-day mover profiles load only when the user taps
+  "Earnings history" for a specific ticker.
+- Added /api/earnings-history/<ticker> lazy-loading endpoint.
+- Daily Nasdaq/Yahoo calendar calls are cached and parallelized.
+- Removed per-ticker earnings-history requests from the main scan.
+- Main table ranks recent reporters by current rotation score first.
+- Historical mover label changes from LOAD DETAILS to HIGH/MODERATE/LOW after
+  the user opens that ticker's history.
+- This architecture is intended to avoid Render free-tier 502 timeouts on
+  large ETFs such as IGV/IBB/KRE.
