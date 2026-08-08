@@ -206,3 +206,12 @@ v19 — RENDER STABILITY
 - The Post-Earnings status shows progress such as "Historical movers 8/71".
 - Starting a new earnings scan cancels the previous background queue.
 - Main earnings scan / RRG / holdings logic is unchanged.
+
+v20 — FRONT-END FREEZE FIX
+- Historical mover completion no longer calls renderEarnings() for every ticker.
+- Each ticker updates only its own Historical Mover cell and detail row.
+- This avoids reconstructing/rebinding a 50-100+ row table dozens of times.
+- Background history requests remain strictly sequential.
+- Inter-request pause increased from 350 ms to 750 ms to reduce sustained load
+  on the free Render instance.
+- Main scan and historical calculations are otherwise unchanged.

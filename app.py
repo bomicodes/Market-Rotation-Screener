@@ -1418,7 +1418,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
       <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles populate automatically after the fast earnings scan. Earnings history stays collapsed and is only for the deeper 1/3/5/10/14-day excursion statistics and prior events.</div>
+    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles populate automatically after the fast earnings scan. Each ticker now updates in place without rebuilding the full table, keeping the browser responsive. Earnings history remains for deeper excursion statistics and prior events.</div>
   </div>
   <div class="panel">
     <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
@@ -1487,7 +1487,7 @@ function moverHTML(p,x){
 }">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
 function renderEarnings(){
  let f=document.getElementById("moverFilter").value,arr=earnResults.filter(x=>{let l=(x.profile||{}).label||"UNKNOWN";return f==="all"||(f==="hm"&&(l==="HIGH"||l==="MODERATE"))||(f==="high"&&l==="HIGH")});
- document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p,x)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
+ document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td id="mover-${x.ticker.replace(/[^A-Z0-9]/g,"")}">${moverHTML(p,x)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>{
    const id=b.dataset.id;
    const row=document.getElementById(id);
@@ -1510,47 +1510,64 @@ function detailHTML(x){
  return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior completed earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`;
 }
 
+
+function historyDomKey(ticker){
+ return ticker.replace(/[^A-Z0-9]/g,"");
+}
+
+function updateHistoryUI(item,rowId,openAfter=false){
+ if(!item)return;
+
+ const mover=document.getElementById(`mover-${historyDomKey(item.ticker)}`);
+ if(mover){
+   mover.innerHTML=moverHTML(item.profile,item);
+ }
+
+ const detailRow=document.getElementById(rowId);
+ if(detailRow){
+   const cell=detailRow.querySelector("td");
+   if(cell)cell.innerHTML=detailHTML(item);
+   if(openAfter)detailRow.classList.add("open");
+ }
+}
+
 async function loadHistory(ticker,eventDate,rowId,openAfter=false){
  const item=earnResults.find(x=>x.ticker===ticker);
  if(!item)return;
+
  item.historyLoading=true;
  item.historyError=null;
- renderEarnings();
- const openRow=document.getElementById(rowId);
- if(openAfter && openRow)openRow.classList.add("open");
+ updateHistoryUI(item,rowId,openAfter);
 
  try{
    const params=new URLSearchParams({event_date:eventDate});
    const response=await fetch(`/api/earnings-history/${encodeURIComponent(ticker)}?${params.toString()}`);
    const raw=await response.text();
    let j;
+
    try{
-      j=JSON.parse(raw);
+     j=JSON.parse(raw);
    }catch(e){
-      throw Error(`History service returned an unreadable response (${response.status}).`);
+     throw Error(`History service returned an unreadable response (${response.status}).`);
    }
 
    if(!response.ok || !j.ok){
-      const err=new Error(j.error||`History request failed (${response.status})`);
-      err.historyDates=j.dates||[];
-      throw err;
+     const err=new Error(j.error||`History request failed (${response.status})`);
+     err.historyDates=j.dates||[];
+     throw err;
    }
 
    item.profile=j.profile;
    item.historyLoading=false;
    item.historyError=null;
    item.historyDates=j.dates||[];
-   renderEarnings();
-   const det=document.getElementById(rowId);
-   if(openAfter && det)det.classList.add("open");
+   updateHistoryUI(item,rowId,openAfter);
 
  }catch(e){
    item.historyLoading=false;
    item.historyError=e.message||"Historical profile could not be loaded.";
    item.historyDates=e.historyDates||[];
-   renderEarnings();
-   const det=document.getElementById(rowId);
-   if(openAfter && det)det.classList.add("open");
+   updateHistoryUI(item,rowId,openAfter);
  }
 }
 
@@ -1582,7 +1599,7 @@ async function autoLoadHistoricalMovers(){
    await loadHistory(x.ticker,x.earnings_date,rowId,false);
 
    // Yield between requests so the UI/server stay responsive.
-   await sleepMs(350);
+   await sleepMs(750);
  }
 
  const st=document.getElementById("estatus");
