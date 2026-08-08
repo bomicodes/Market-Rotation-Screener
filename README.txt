@@ -189,3 +189,11 @@ NEW IN v17 — AUTO HISTORICAL MOVER
   scan remains responsive instead of waiting for every historical profile.
 - Historical Mover shows QUEUED / LOADING / UNAVAILABLE while background work
   is in progress.
+
+v18 HOTFIX — AUTO HISTORICAL MOVER
+- Corrected v17 packaging issue: the auto-loader code was not actually present.
+- Historical Mover now transitions QUEUED -> LOADING -> HIGH/MODERATE/LOW
+  automatically after the main scan.
+- Earnings History no longer initiates the calculation; it only expands the
+  detailed historical excursion table.
+- Uses at most 4 concurrent profile requests to protect Render responsiveness.
