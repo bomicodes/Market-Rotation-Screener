@@ -1,0 +1,7 @@
+Flask>=3.0,<4
+gunicorn>=22,<24
+yfinance>=0.2.65
+pandas>=2.2
+numpy>=1.26
+requests>=2.31
+openpyxl>=3.1
