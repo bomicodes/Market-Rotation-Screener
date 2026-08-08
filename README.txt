@@ -180,3 +180,14 @@ NEW IN v16 — EARNINGS HISTORY FIX
   an explicit insufficient-data message and the dates that were found.
 - Historical profile requests remain one ticker at a time, preserving the fast
   v15 main-scan architecture.
+
+v16.1 — HOLDINGS REFRESH ONLY (stable v16 base)
+- Earnings and historical-mover behavior is unchanged from v16.
+- Rebuilt holdings source priority across the Layer-1 universe:
+    Official issuer feed -> Finnhub FULL ETF holdings -> Yahoo TOP 10 partial.
+- VanEck SMH/OIH now use the official downloadable holdings XLS workbook.
+- Finnhub ETF holdings is the universal full-universe fallback and uses the
+  existing FINNHUB_API_KEY already configured in Render.
+- Yahoo top holdings is retained only as a last-resort PARTIAL fallback.
+- This specifically prevents SMH/OIH/TAN/PBW from silently becoming 10-name
+  universes when their issuer page parser fails.

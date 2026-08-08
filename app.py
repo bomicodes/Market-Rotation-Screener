@@ -418,46 +418,76 @@ def invesco_holdings(etf):
     return candidates
 
 def vaneck_holdings(etf):
-    """Pull current VanEck holdings from the official fund page HTML."""
+    """
+    Official VanEck holdings workbook.
+    VanEck exposes an XLSX download at each fund's /downloads/holdings/ URL.
+    """
     etf = etf.upper()
     fund_urls = {
-        "SMH":"https://www.vaneck.com/us/en/investments/semiconductor-etf-smh/",
-        "OIH":"https://www.vaneck.com/us/en/investments/oil-services-etf-oih/",
+        "SMH":"https://www.vaneck.com/us/en/investments/semiconductor-etf-smh/downloads/holdings/",
+        "OIH":"https://www.vaneck.com/us/en/investments/oil-services-etf-oih/downloads/holdings/",
     }
     url = fund_urls.get(etf)
     if not url:
-        raise RuntimeError(f"No VanEck holdings parser configured for {etf}.")
-    headers = {"User-Agent":"Mozilla/5.0"}
-    resp = requests.get(url, timeout=25, headers=headers)
+        raise RuntimeError(f"No VanEck holdings workbook configured for {etf}.")
+
+    headers = {
+        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,*/*",
+        "Referer":url.rsplit("/downloads/holdings/",1)[0] + "/",
+    }
+    resp = requests.get(url, timeout=30, headers=headers)
     resp.raise_for_status()
-    tables = pd.read_html(io.StringIO(resp.text))
-    best = []
-    for df in tables:
-        cols = {str(c).strip().lower(): c for c in df.columns}
-        tcol = next((orig for low,orig in cols.items() if low == "ticker" or "ticker" in low), None)
-        if tcol is None:
+    if len(resp.content) < 1000:
+        raise RuntimeError("VanEck holdings download returned an unexpectedly small response.")
+
+    # VanEck workbooks may have title rows before the actual holdings header.
+    raw = pd.read_excel(io.BytesIO(resp.content), header=None)
+    header_idx = None
+    for i in range(min(30, len(raw))):
+        vals = [str(v).strip().lower() for v in raw.iloc[i].tolist()]
+        joined = " | ".join(vals)
+        if "ticker" in joined and ("holding name" in joined or "security name" in joined or "% of net assets" in joined):
+            header_idx = i
+            break
+    if header_idx is None:
+        raise RuntimeError("Could not locate the VanEck holdings header.")
+
+    df = pd.read_excel(io.BytesIO(resp.content), header=header_idx)
+    cols = {str(c).strip().lower(): c for c in df.columns}
+
+    tcol = next((orig for low,orig in cols.items() if low == "ticker" or "ticker" in low), None)
+    ncol = next((orig for low,orig in cols.items() if "holding name" in low or "security name" in low or low == "name"), None)
+    wcol = next((orig for low,orig in cols.items() if "% of net assets" in low or "net assets" in low or "weight" in low), None)
+
+    if tcol is None:
+        raise RuntimeError("VanEck workbook did not contain a ticker column.")
+
+    rows = []
+    for _, row in df.iterrows():
+        ticker = str(row.get(tcol,"")).strip()
+        if not ticker:
             continue
-        ncol = next((orig for low,orig in cols.items() if "holding name" in low or low == "name"), None)
-        wcol = next((orig for low,orig in cols.items() if "net assets" in low or "weight" in low), None)
-        rows = []
-        for _, row in df.iterrows():
-            weight = None
-            if wcol is not None:
-                try:
-                    weight = float(str(row.get(wcol,"")).replace("%","").replace(",",""))
-                except Exception:
-                    pass
-            rows.append({
-                "ticker": row.get(tcol,""),
-                "name": row.get(ncol,row.get(tcol,"")) if ncol is not None else row.get(tcol,""),
-                "weight": weight,
-            })
-        rows = clean_equity_holdings(rows)
-        if len(rows) > len(best):
-            best = rows
-    if len(best) < 5:
-        raise RuntimeError("Could not find a complete VanEck holdings table.")
-    return best
+        weight = None
+        if wcol is not None:
+            try:
+                weight = float(str(row.get(wcol,"")).replace("%","").replace(",","").strip())
+                # Excel sometimes stores percentage as decimal fraction.
+                if 0 < weight <= 1:
+                    weight *= 100
+            except Exception:
+                pass
+        rows.append({
+            "ticker": ticker,
+            "name": row.get(ncol,ticker) if ncol is not None else ticker,
+            "weight": weight
+        })
+
+    rows = clean_equity_holdings(rows)
+    if len(rows) < 15:
+        raise RuntimeError(f"VanEck returned only {len(rows)} usable holdings for {etf}.")
+    return rows
+
 
 def yahoo_fund_holdings(etf):
     """Generic fallback using yfinance/Yahoo fund top-holdings data."""
@@ -497,8 +527,85 @@ def yahoo_fund_holdings(etf):
     except Exception as e:
         raise RuntimeError(f"Could not retrieve holdings for {etf}: {e}")
 
+
+def finnhub_etf_holdings(etf):
+    """
+    Full ETF holdings/constituents from Finnhub.
+    Used as a universal full-universe fallback when an issuer feed is unavailable.
+    Requires the FINNHUB_API_KEY already used by the earnings calendar.
+    """
+    if not FINNHUB_API_KEY:
+        raise RuntimeError("FINNHUB_API_KEY is not configured.")
+
+    etf = etf.upper()
+    url = "https://finnhub.io/api/v1/etf/holdings"
+    all_rows = []
+    seen_assets = set()
+
+    # Finnhub documents skip pagination and up to 100 holdings per call.
+    for skip in (0, 100, 200, 300, 400):
+        params = {"symbol":etf, "skip":skip, "token":FINNHUB_API_KEY}
+        resp = requests.get(url, params=params, timeout=25, headers={"User-Agent":"MarketRotationScreener/1.0"})
+        resp.raise_for_status()
+        payload = resp.json() or {}
+
+        rows = payload.get("holdings") if isinstance(payload, dict) else None
+        if rows is None and isinstance(payload, list):
+            rows = payload
+        rows = rows or []
+        if not rows:
+            break
+
+        new_count = 0
+        for r in rows:
+            ticker = (
+                r.get("symbol")
+                or r.get("asset")
+                or r.get("ticker")
+                or r.get("code")
+                or ""
+            )
+            ticker = str(ticker).strip().upper().replace(".","-")
+            if not ticker or ticker in seen_assets:
+                continue
+            seen_assets.add(ticker)
+            new_count += 1
+
+            name = r.get("name") or r.get("description") or ticker
+            weight = (
+                r.get("percent")
+                if r.get("percent") is not None
+                else r.get("weight")
+            )
+            try:
+                weight = float(weight) if weight is not None else None
+                if weight is not None and 0 < weight <= 1:
+                    weight *= 100
+            except Exception:
+                weight = None
+
+            all_rows.append({
+                "ticker":ticker,
+                "name":name,
+                "weight":weight
+            })
+
+        if new_count == 0 or len(rows) < 100:
+            break
+
+    all_rows = clean_equity_holdings(all_rows)
+    if len(all_rows) < 10:
+        raise RuntimeError(f"Finnhub returned only {len(all_rows)} usable holdings for {etf}.")
+    return all_rows
+
+
 def get_fund_holdings(etf):
-    """Prefer each ETF issuer's official holdings; Yahoo is last-resort only."""
+    """
+    Holdings source priority:
+      1) Official issuer feed
+      2) Finnhub FULL ETF holdings
+      3) Yahoo TOP holdings only as a last-resort partial fallback
+    """
     etf = etf.upper()
     attempts = []
 
@@ -519,24 +626,34 @@ def get_fund_holdings(etf):
     if etf in VANECK_FUNDS:
         try:
             h = vaneck_holdings(etf)
-            return h, "VanEck official current holdings"
+            return h, "VanEck official holdings XLS"
         except Exception as e:
             attempts.append(f"VanEck: {e}")
 
     if etf in INVESCO_FUNDS:
         try:
             h = invesco_holdings(etf)
-            return h, "Invesco official product holdings"
+            # Invesco pages can be role/cookie-gated. Only accept a meaningful list.
+            if len(h) >= 15:
+                return h, "Invesco official product holdings"
+            attempts.append(f"Invesco: only {len(h)} usable rows")
         except Exception as e:
             attempts.append(f"Invesco: {e}")
 
+    # Universal full-universe fallback. This is preferred over Yahoo's top 10.
+    try:
+        h = finnhub_etf_holdings(etf)
+        return h, "Finnhub FULL ETF holdings fallback"
+    except Exception as e:
+        attempts.append(f"Finnhub: {e}")
+
+    # Last resort only.
     try:
         holdings = yahoo_fund_holdings(etf)
-        return holdings, "Yahoo Finance TOP holdings fallback"
+        return holdings, "Yahoo Finance TOP holdings fallback (PARTIAL)"
     except Exception as e:
         attempts.append(f"Yahoo: {e}")
         raise RuntimeError(f"Could not retrieve holdings for {etf}. " + " | ".join(attempts))
-
 
 
 
