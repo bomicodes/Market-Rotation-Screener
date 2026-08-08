@@ -167,3 +167,16 @@ NEW IN v15 — FAST POST-EARNINGS ARCHITECTURE
   the user opens that ticker's history.
 - This architecture is intended to avoid Render free-tier 502 timeouts on
   large ETFs such as IGV/IBB/KRE.
+
+NEW IN v16 — EARNINGS HISTORY FIX
+- Fixed the lazy Earnings history UI so loading/error/success states persist.
+- A null profile no longer silently redraws the same placeholder.
+- Historical earnings dates now merge:
+    yfinance ticker earnings dates
+    Nasdaq one-request earnings-surprise history fallback
+    optional Unusual Whales history if configured
+- No approximate earnings dates are fabricated.
+- If fewer than 3 completed historical events are available, the row displays
+  an explicit insufficient-data message and the dates that were found.
+- Historical profile requests remain one ticker at a time, preserving the fast
+  v15 main-scan architecture.

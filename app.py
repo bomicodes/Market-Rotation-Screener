@@ -828,6 +828,96 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
     diag["found"] = len(found)
     return found, diag
 
+
+def nasdaq_earnings_history_dates(ticker):
+    """
+    One-request fallback for historical reported earnings dates from Nasdaq.
+    Returns a list of normalized timestamps. If Nasdaq changes the endpoint,
+    this safely returns an empty list and yfinance remains available.
+    """
+    ticker = ticker.upper().strip()
+    url = f"https://api.nasdaq.com/api/company/{ticker}/earnings-surprise"
+    headers = {
+        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept":"application/json, text/plain, */*",
+        "Accept-Language":"en-US,en;q=0.9",
+        "Origin":"https://www.nasdaq.com",
+        "Referer":f"https://www.nasdaq.com/market-activity/stocks/{ticker.lower()}/earnings",
+    }
+    try:
+        resp = requests.get(url, timeout=20, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        data = payload.get("data") or {}
+        rows = data.get("earningsSurpriseTable") or data.get("rows") or []
+        if isinstance(rows, dict):
+            rows = rows.get("rows") or []
+        dates = []
+        for r in rows:
+            raw = (
+                r.get("dateReported")
+                or r.get("date")
+                or r.get("reportedDate")
+                or r.get("reportDate")
+            )
+            if not raw:
+                continue
+            try:
+                d = pd.to_datetime(raw, errors="coerce")
+                if pd.notna(d):
+                    dates.append(pd.Timestamp(d).normalize())
+            except Exception:
+                pass
+        return sorted(list(dict.fromkeys(dates)), reverse=True)
+    except Exception:
+        return []
+
+def merged_historical_earnings_dates(ticker, current_event_date=None):
+    """
+    Merge multiple date sources for one ticker. No approximate/fabricated
+    earnings dates are created.
+    """
+    dates = []
+    # yfinance first
+    try:
+        dates.extend(get_earnings_dates(ticker, 24))
+    except Exception:
+        pass
+
+    # Nasdaq one-request history fallback
+    try:
+        dates.extend(nasdaq_earnings_history_dates(ticker))
+    except Exception:
+        pass
+
+    # Optional UW history if user ever configures a token
+    if UW_API_TOKEN:
+        try:
+            dates.extend([x["date"] for x in unusual_whales_history(ticker)])
+        except Exception:
+            pass
+
+    if current_event_date:
+        try:
+            dates.append(pd.Timestamp(current_event_date).normalize())
+        except Exception:
+            pass
+
+    cleaned = []
+    for d in dates:
+        try:
+            td = pd.Timestamp(d)
+            if getattr(td, "tzinfo", None) is not None:
+                try:
+                    td = td.tz_convert(None)
+                except Exception:
+                    td = td.tz_localize(None)
+            cleaned.append(td.normalize())
+        except Exception:
+            pass
+
+    return sorted(list(dict.fromkeys(cleaned)), reverse=True)
+
 def get_earnings_dates(ticker, limit=12):
     try:
         ed = yf.Ticker(ticker).get_earnings_dates(limit=limit)
@@ -1130,31 +1220,42 @@ def api_postearnings(etf):
 @app.get("/api/earnings-history/<ticker>")
 def api_earnings_history(ticker):
     """
-    Lazy-load a single ticker's historical earnings-move profile.
-    Called only when the user expands Earnings history.
+    Lazy-load one ticker's historical earnings-move profile.
+    Returns explicit diagnostics instead of silently returning profile:null.
     """
     ticker = ticker.upper().strip()
     try:
         event_date = request.args.get("event_date")
-        cache_key = f"earnings-profile:{ticker}:{event_date or 'latest'}"
+        cache_key = f"earnings-profile-v16:{ticker}:{event_date or 'latest'}"
 
-        def build_profile():
-            # Prefer UW history only if a token exists; otherwise yfinance history.
-            uw_hist = unusual_whales_history(ticker) if UW_API_TOKEN else []
-            if uw_hist:
-                dates = [x["date"] for x in uw_hist]
-            else:
-                dates = get_earnings_dates(ticker, 20)
+        def build():
+            dates = merged_historical_earnings_dates(ticker, event_date)
+            profile = earnings_profile(ticker, dates)
+            return {
+                "profile": profile,
+                "dates_found": len(dates),
+                "dates": [pd.Timestamp(d).strftime("%Y-%m-%d") for d in dates[:12]],
+            }
 
-            if event_date:
-                d = pd.Timestamp(event_date).normalize()
-                if not any(abs((pd.Timestamp(x).normalize()-d).days) <= 1 for x in dates):
-                    dates = [d] + dates
+        payload = cached(cache_key, build, ttl=3600)
+        profile = payload.get("profile")
+        if profile is None:
+            return jsonify({
+                "ok":False,
+                "ticker":ticker,
+                "error":f"Not enough completed historical earnings events were available to build a profile for {ticker}.",
+                "dates_found":payload.get("dates_found",0),
+                "dates":payload.get("dates",[])
+            }),422
 
-            return earnings_profile(ticker, dates)
+        return jsonify({
+            "ok":True,
+            "ticker":ticker,
+            "profile":profile,
+            "dates_found":payload.get("dates_found",0),
+            "dates":payload.get("dates",[])
+        })
 
-        profile = cached(cache_key, build_profile, ttl=3600)
-        return jsonify({"ok":True,"ticker":ticker,"profile":profile})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
@@ -1317,7 +1418,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
       <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles are loaded only when you expand a ticker. This keeps the main scan fast; details still use up to the last 8 completed earnings events.</div>
+    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles are loaded on demand when you tap Earnings history. If a free source cannot provide enough completed prior events, the row will now say so explicitly instead of appearing stuck.</div>
   </div>
   <div class="panel">
     <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
@@ -1378,7 +1479,7 @@ function compactRRG(r){
 }
 function moverHTML(p){if(!p)return'<span class="mover">LOAD DETAILS</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
 function renderEarnings(){
- let f=document.getElementById("moverFilter").value,arr=earnResults.filter(x=>{let l=(x.profile||{}).label||"LOW";return f==="all"||(f==="hm"&&l!=="LOW")||(f==="high"&&l==="HIGH")});
+ let f=document.getElementById("moverFilter").value,arr=earnResults.filter(x=>{let l=(x.profile||{}).label||"UNKNOWN";return f==="all"||(f==="hm"&&(l==="HIGH"||l==="MODERATE"))||(f==="high"&&l==="HIGH")});
  document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>{
    const id=b.dataset.id;
@@ -1387,35 +1488,65 @@ function renderEarnings(){
    const eventDate=b.dataset.event;
    const item=earnResults.find(x=>x.ticker===ticker);
    if(row)row.classList.toggle("open");
-   if(item && !item.profile){
+   if(item && !item.profile && !item.historyLoading && !item.historyError){
       loadHistory(ticker,eventDate,id);
    }
  }));
 }
 function detailHTML(x){
+ if(x.historyLoading){
+   return `<div class="note">Loading historical earnings profile…</div>`;
+ }
+ if(x.historyError){
+   return `<div class="error">${x.historyError}</div>${x.historyDates&&x.historyDates.length?`<div class="tiny" style="margin-top:6px">Dates found: ${x.historyDates.join(", ")}</div>`:""}`;
+ }
  let p=x.profile;
- if(!p)return `<div class="note" id="histbody-${x.ticker.replace(/[^A-Z0-9]/g,"")}">Historical profile has not been loaded yet.</div>`;
+ if(!p)return `<div class="note">Tap Earnings history to load this ticker's historical profile.</div>`;
  let ev=p.events||[];
- return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`;
+ return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior completed earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`;
 }
 
 async function loadHistory(ticker,eventDate,rowId){
- const body=document.getElementById(`histbody-${ticker.replace(/[^A-Z0-9]/g,"")}`);
- if(body)body.textContent="Loading historical earnings profile…";
+ const item=earnResults.find(x=>x.ticker===ticker);
+ if(!item)return;
+ item.historyLoading=true;
+ item.historyError=null;
+ renderEarnings();
+ const openRow=document.getElementById(rowId);
+ if(openRow)openRow.classList.add("open");
+
  try{
    const params=new URLSearchParams({event_date:eventDate});
    const response=await fetch(`/api/earnings-history/${encodeURIComponent(ticker)}?${params.toString()}`);
    const raw=await response.text();
    let j;
-   try{j=JSON.parse(raw)}catch(e){throw Error(`Unreadable history response (${response.status})`)}
-   if(!response.ok||!j.ok)throw Error(j.error||"History request failed");
-   const item=earnResults.find(x=>x.ticker===ticker);
-   if(item)item.profile=j.profile;
+   try{
+      j=JSON.parse(raw);
+   }catch(e){
+      throw Error(`History service returned an unreadable response (${response.status}).`);
+   }
+
+   if(!response.ok || !j.ok){
+      const err=new Error(j.error||`History request failed (${response.status})`);
+      err.historyDates=j.dates||[];
+      throw err;
+   }
+
+   item.profile=j.profile;
+   item.historyLoading=false;
+   item.historyError=null;
+   item.historyDates=j.dates||[];
    renderEarnings();
    const det=document.getElementById(rowId);
    if(det)det.classList.add("open");
+
  }catch(e){
-   if(body)body.innerHTML=`<span class="error">${e.message}</span>`;
+   item.historyLoading=false;
+   item.historyError=e.message||"Historical profile could not be loaded.";
+   item.historyDates=e.historyDates||[];
+   renderEarnings();
+   const det=document.getElementById(rowId);
+   if(det)det.classList.add("open");
  }
 }
 
