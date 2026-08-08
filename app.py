@@ -666,6 +666,47 @@ def unusual_whales_history(ticker):
     except Exception:
         return []
 
+
+def nasdaq_calendar_for_day(day):
+    """
+    Public Nasdaq earnings calendar fallback for one date.
+    Uses Nasdaq's market-activity calendar response and returns ticker metadata.
+    """
+    ds = pd.Timestamp(day).strftime("%Y-%m-%d")
+    url = "https://api.nasdaq.com/api/calendar/earnings"
+    params = {"date": ds}
+    headers = {
+        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept":"application/json, text/plain, */*",
+        "Accept-Language":"en-US,en;q=0.9",
+        "Origin":"https://www.nasdaq.com",
+        "Referer":"https://www.nasdaq.com/",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=20, headers=headers)
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = (((payload or {}).get("data") or {}).get("rows") or [])
+        out = {}
+        for r in rows:
+            t = str(r.get("symbol","")).strip().upper().replace(".","-")
+            if not t:
+                continue
+            raw_time = str(r.get("time","") or "").lower()
+            report_time = None
+            if "pre" in raw_time or "before" in raw_time:
+                report_time = "premarket"
+            elif "after" in raw_time:
+                report_time = "afterhours"
+            out[t] = {
+                "date": pd.Timestamp(ds).normalize(),
+                "time": report_time,
+                "source": "Nasdaq earnings calendar",
+            }
+        return out
+    except Exception:
+        return {}
+
 def yahoo_calendar_for_day(day):
     """
     Public Yahoo Finance earnings-calendar fallback.
@@ -697,24 +738,29 @@ def yahoo_calendar_for_day(day):
 
 def discover_recent_earnings(tickers, recent_trading_days=10):
     """
-    Exhaustive ETF-holdings earnings scan:
-    Finnhub date-range -> optional UW -> Yahoo calendar -> targeted ticker history
-    for every holding still missing.
+    Full-universe recent earnings discovery.
+    We query calendar-level sources for the date window, then intersect them
+    with ALL holdings. This avoids N per-ticker network calls and prevents a
+    top-N holdings limit from hiding valid reporters.
     """
     now = pd.Timestamp.now().normalize()
     calendar_days = int(recent_trading_days * 1.8) + 5
     start = now - pd.Timedelta(days=calendar_days)
     wanted = set(tickers)
     found = {}
-    diag = {"universe":len(tickers),"finnhub":0,"uw":0,"yahoo":0,"ticker_history":0}
+    diag = {
+        "universe":len(tickers),"finnhub":0,"nasdaq":0,"uw":0,
+        "yahoo":0,"ticker_history":0
+    }
 
+    # 1) Finnhub structured range request
     if FINNHUB_API_KEY:
-        fh = finnhub_earnings_calendar(start, now)
-        for t, meta in fh.items():
+        for t, meta in finnhub_earnings_calendar(start, now).items():
             if t in wanted:
                 found[t] = meta
                 diag["finnhub"] += 1
 
+    # 2) Optional Unusual Whales paid API
     if UW_API_TOKEN:
         for d in pd.date_range(start, now, freq="D"):
             if d.weekday() >= 5:
@@ -724,34 +770,47 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
                     found[t] = meta
                     diag["uw"] += 1
 
+    # 3) Nasdaq + Yahoo public daily calendars for gaps in Finnhub
     for d in pd.date_range(start, now, freq="D"):
         if d.weekday() >= 5:
             continue
-        day_map = yahoo_calendar_for_day(d)
-        for t, ed in day_map.items():
+
+        for t, meta in nasdaq_calendar_for_day(d).items():
             if t in wanted and t not in found:
-                found[t] = {"date":ed,"time":None,"source":"Yahoo earnings calendar"}
+                found[t] = meta
+                diag["nasdaq"] += 1
+
+        for t, ed in yahoo_calendar_for_day(d).items():
+            if t in wanted and t not in found:
+                found[t] = {
+                    "date":ed,"time":None,
+                    "source":"Yahoo earnings calendar"
+                }
                 diag["yahoo"] += 1
 
-    # Critical completeness pass: directly validate every ETF holding not found
-    # by calendar-level sources before excluding it.
+    # Last-resort targeted check is intentionally limited to a small number of
+    # unresolved holdings so free hosting cannot be locked up by 100+ requests.
     missing = [t for t in tickers if t not in found]
-    if missing:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            futs = {ex.submit(get_earnings_dates,t,20):t for t in missing}
+    fallback_candidates = missing[:12]
+    if fallback_candidates:
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            futs = {ex.submit(get_earnings_dates,t,12):t for t in fallback_candidates}
             for fut in as_completed(futs):
                 t = futs[fut]
                 try:
                     dates = [pd.Timestamp(d).normalize() for d in fut.result()
-                             if pd.Timestamp(d).normalize() <= now and pd.Timestamp(d).normalize() >= start]
+                             if start <= pd.Timestamp(d).normalize() <= now]
                     if dates:
-                        found[t] = {"date":max(dates),"time":None,"source":"Targeted ticker earnings history"}
+                        found[t] = {
+                            "date":max(dates),"time":None,
+                            "source":"Targeted ticker earnings history"
+                        }
                         diag["ticker_history"] += 1
                 except Exception:
                     pass
 
     diag["found"] = len(found)
-    diag["missing_after_validation"] = len(tickers) - len(found)
+    diag["missing_after_calendar_scan"] = len(tickers) - len(found)
     return found, diag
 
 def get_earnings_dates(ticker, limit=12):
@@ -972,9 +1031,7 @@ def api_postearnings(etf):
     etf=etf.upper()
     try:
         recent_days=max(3,min(30,int(request.args.get("days","10"))))
-        limit=max(10,min(60,int(request.args.get("limit","30"))))
         holdings,_holdings_source=cached(f"holdings:{etf}",lambda:get_fund_holdings(etf),ttl=3600)
-        holdings=holdings[:limit]
         tickers=[h["ticker"] for h in holdings]
         now=pd.Timestamp.now().normalize()
         # calendar-day buffer approximates requested trading-day window
@@ -1071,7 +1128,7 @@ def holdings_audit():
             holdings, source = bundle
             results.append({
                 "etf":etf,"name":name,"count":len(holdings),"source":source,
-                "ok":True,"stale":stale,"error":err
+                "ok":True,"partial":("TOP holdings fallback" in source),"stale":stale,"error":err
             })
         except Exception as e:
             results.append({"etf":etf,"name":name,"count":0,"source":"—","ok":False,"error":str(e)})
@@ -1209,11 +1266,11 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <label class="note">Sector</label>
       <select id="earnSector">""" + "".join([f'<option value="{k}">{k} · {v}</option>' for k,v in RRG_UNIVERSE.items()]) + r"""</select>
       <label class="note">Reported within</label><select id="earnDays"><option>5</option><option selected>10</option><option>14</option><option>20</option></select><span class="note">trading days (approx.)</span>
-      <label class="note">Holdings scanned</label><select id="earnLimit"><option>20</option><option selected>30</option><option>50</option></select>
+      <span class="note">All ETF holdings are scanned automatically</span>
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
       <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub (free API key) → Unusual Whales API if configured → Yahoo calendar → ticker history. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover labels use up to the last 8 completed earnings events. Expand any ticker for 1/3/5/10/14-day excursion stats.</div>
+    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover labels use up to the last 8 completed earnings events. Expand any ticker for 1/3/5/10/14-day excursion stats.</div>
   </div>
   <div class="panel">
     <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
@@ -1250,7 +1307,7 @@ async function auditHoldings(){
  const p=document.getElementById("auditPanel");p.style.display="block";p.textContent="Checking issuer holdings feeds…";
  try{
    let r=await fetch("/api/holdings-audit"),j=await r.json();if(!j.ok)throw Error(j.error||"Audit failed");
-   p.innerHTML=`<div class="scroll"><table><thead><tr><th>ETF</th><th>Holdings loaded</th><th>Source</th><th>Status</th></tr></thead><tbody>${j.results.map(x=>`<tr><td><b>${x.etf}</b><div class="tiny">${x.name}</div></td><td>${x.count}</td><td>${x.source}</td><td>${x.ok?"✓":"⚠️ "+(x.error||"failed")}</td></tr>`).join("")}</tbody></table></div>`;
+   p.innerHTML=`<div class="scroll"><table><thead><tr><th>ETF</th><th>Holdings loaded</th><th>Source</th><th>Status</th></tr></thead><tbody>${j.results.map(x=>`<tr><td><b>${x.etf}</b><div class="tiny">${x.name}</div></td><td>${x.count}</td><td>${x.source}</td><td>${!x.ok?"⚠️ "+(x.error||"failed"):(x.partial?"⚠️ PARTIAL":"✓ FULL")}</td></tr>`).join("")}</tbody></table></div>`;
  }catch(e){p.innerHTML=`<span class="error">${e.message}</span>`}
 }
 async function loadMarket(force=false){
@@ -1280,8 +1337,27 @@ function renderEarnings(){
 }
 function detailHTML(x){let p=x.profile;if(!p)return'<span class="note">Not enough usable historical earnings events for a profile.</span>';let ev=p.events||[];return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`}
 async function runEarnings(){
- let st=document.getElementById("estatus");st.textContent="Scanning earnings dates and building history… this can take a minute.";
- try{let s=document.getElementById("earnSector").value,d=document.getElementById("earnDays").value,l=document.getElementById("earnLimit").value,r=await fetch(`/api/postearnings/${s}?days=${d}&limit=${l}`),j=await r.json();if(!j.ok)throw Error(j.error);earnResults=j.results||[];let diag=j.earnings_diagnostics||{};st.textContent=(earnResults.length?`${earnResults.length} recent earnings names found`:(j.message||"No recent earnings names found"))+` · ${j.holdings_total_loaded||"?"} holdings loaded · ${j.holdings_source||""} · Finnhub ${diag.finnhub||0}, Yahoo ${diag.yahoo||0}, targeted ${diag.ticker_history||0}`;renderEarnings()}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
+ let st=document.getElementById("estatus");
+ st.textContent="Scanning the full ETF holdings list for recent earnings…";
+ try{
+   const s=document.getElementById("earnSector").value;
+   const days=document.getElementById("earnDays").value;
+   const params=new URLSearchParams({days:String(days)});
+   const response=await fetch(`/api/postearnings/${encodeURIComponent(s)}?${params.toString()}`);
+   const raw=await response.text();
+   let j;
+   try{j=JSON.parse(raw)}catch(parseErr){throw Error(`Server returned an unreadable response (${response.status}). Please retry.`)}
+   if(!response.ok || !j.ok)throw Error(j.error||`Scan failed (${response.status})`);
+   earnResults=j.results||[];
+   const diag=j.earnings_diagnostics||{};
+   st.textContent=(earnResults.length?`${earnResults.length} recent earnings names found`:(j.message||"No recent earnings names found"))+
+     ` · ${j.holdings_total_loaded||"?"} holdings scanned · ${j.holdings_source||""}`+
+     ` · Finnhub ${diag.finnhub||0}, Nasdaq ${diag.nasdaq||0}, Yahoo ${diag.yahoo||0}, targeted ${diag.ticker_history||0}`;
+   renderEarnings();
+ }catch(e){
+   st.innerHTML=`<span class="error">${e.message}</span>`;
+ }
+}
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
 </script>

@@ -131,3 +131,21 @@ v13.1 HOTFIX
 - Fixed a JavaScript duplicate-variable declaration in runEarnings().
 - The error prevented the browser from initializing any buttons/tabs.
 - No screening logic was otherwise changed from v13.
+
+NEW IN v14 — FULL POST-EARNINGS UNIVERSE + CALENDAR FALLBACKS
+- Removed the 20/30/50 post-earnings holdings limit.
+- Post-Earnings now scans every holding loaded for the selected ETF.
+- Added Nasdaq public earnings calendar as a second full-calendar source.
+- Earnings discovery order:
+    Finnhub range calendar
+    optional Unusual Whales
+    Nasdaq daily calendar
+    Yahoo daily calendar
+    small targeted ticker-history fallback
+- Removed hundreds of per-ticker validation requests that could overload a
+  free Render instance.
+- Post-Earnings request URL is now built with URLSearchParams and response text
+  is parsed safely, eliminating the Safari "string did not match expected
+  pattern" failure caused by the prior scan-size path.
+- Holdings Audit now labels Yahoo TOP-holdings fallbacks as PARTIAL instead of
+  showing them as fully valid.
