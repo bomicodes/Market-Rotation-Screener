@@ -1217,7 +1217,7 @@ def api_sector(etf):
     if etf not in RRG_UNIVERSE:
         return jsonify({"ok":False,"error":"Choose an ETF from the Layer-1 RRG universe."}),400
     try:
-        limit_raw=request.args.get("limit","30").lower()
+        limit_raw=request.args.get("limit","all").lower()
         limit=None if limit_raw=="all" else max(5,min(100,int(limit_raw)))
         force_holdings = request.args.get("refresh")=="1"
         holding_bundle, holdings_stale, holdings_refresh_error = cached_refresh_safe(
@@ -1515,7 +1515,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 <option value="PBW">PBW · Clean Energy</option>
       </select>
       <span id="sectorTitle" class="note">Choose a sector</span>
-      <label class="note">Holdings</label><select id="limit"><option>20</option><option selected>30</option><option>50</option></select>
+      
       <button id="refreshSector">Refresh</button><span id="sstatus" class="status"></span>
     </div>
   </div>
@@ -1583,7 +1583,7 @@ async function loadMarket(force=false){
  }catch(e){st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`}}
 async function loadSector(){
  if(!currentSector)return;let st=document.getElementById("sstatus");st.textContent="Updating…";document.getElementById("sectorTitle").textContent=currentSector;
- try{let lim=document.getElementById("limit").value,r=await fetch(`/api/sector/${currentSector}?limit=${lim}`),j=await r.json();if(!j.ok)throw Error(j.error);st.textContent=(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;drawRRG("stockChart",j.results);document.getElementById("stockRows").innerHTML=j.results.map((x,k)=>`<tr><td>${k+1}</td><td><b>${x.ticker}</b></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("")}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
+ try{let r=await fetch(`/api/sector/${currentSector}?limit=all`),j=await r.json();if(!j.ok)throw Error(j.error);st.textContent=(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;drawRRG("stockChart",j.results);document.getElementById("stockRows").innerHTML=j.results.map((x,k)=>`<tr><td>${k+1}</td><td><b>${x.ticker}</b></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("")}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
 
 function alignBadge(a){
  if(!a)return "—";

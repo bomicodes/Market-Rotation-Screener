@@ -191,3 +191,9 @@ v16.1 — HOLDINGS REFRESH ONLY (stable v16 base)
 - Yahoo top holdings is retained only as a last-resort PARTIAL fallback.
 - This specifically prevents SMH/OIH/TAN/PBW from silently becoming 10-name
   universes when their issuer page parser fails.
+
+v16.2 — ALL HOLDINGS
+- Removed the Holdings selector from Stock Screen.
+- Stock Screen now always scans all holdings returned by the best available source.
+- Backend default is also all holdings.
+- Earnings/history behavior remains unchanged from stable v16/v16.1.
