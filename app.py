@@ -1557,26 +1557,44 @@ async function loadHistory(ticker,eventDate,rowId,openAfter=false){
 
 let historyLoadGeneration=0;
 
+function sleepMs(ms){
+ return new Promise(resolve=>setTimeout(resolve,ms));
+}
+
 async function autoLoadHistoricalMovers(){
  const generation=++historyLoadGeneration;
  const pending=earnResults.filter(x=>!x.profile && !x.historyLoading && !x.historyError);
- let cursor=0;
- const workerCount=Math.min(4,pending.length);
+ const total=pending.length;
 
- async function worker(){
-   while(generation===historyLoadGeneration){
-     const i=cursor++;
-     if(i>=pending.length)return;
-     const x=pending[i];
-     const rowId=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
-     await loadHistory(x.ticker,x.earnings_date,rowId,false);
+ // One request at a time so Render always has spare web-server capacity.
+ for(let i=0;i<total;i++){
+   if(generation!==historyLoadGeneration)return;
+
+   const x=pending[i];
+   const rowId=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
+
+   const st=document.getElementById("estatus");
+   if(st){
+     st.dataset.baseText=st.dataset.baseText||st.textContent;
+     st.textContent=`${st.dataset.baseText} · Historical movers ${i+1}/${total}`;
    }
+
+   await loadHistory(x.ticker,x.earnings_date,rowId,false);
+
+   // Yield between requests so the UI/server stay responsive.
+   await sleepMs(350);
  }
- await Promise.all(Array.from({length:workerCount},()=>worker()));
+
+ const st=document.getElementById("estatus");
+ if(st && st.dataset.baseText){
+   st.textContent=`${st.dataset.baseText} · Historical movers complete`;
+ }
 }
 
 async function runEarnings(){
+ historyLoadGeneration++;
  let st=document.getElementById("estatus");
+ st.dataset.baseText="";
  st.textContent="Finding recent reporters and calculating current rotation…";
  try{
    const s=document.getElementById("earnSector").value;
@@ -1592,6 +1610,7 @@ async function runEarnings(){
    st.textContent=(earnResults.length?`${earnResults.length} recent earnings names found`:(j.message||"No recent earnings names found"))+
      ` · ${j.holdings_total_loaded||"?"} holdings scanned · ${j.holdings_source||""}`+
      ` · Finnhub ${diag.finnhub||0}, Nasdaq ${diag.nasdaq||0}, Yahoo ${diag.yahoo||0}, targeted ${diag.ticker_history||0}`;
+   st.dataset.baseText=st.textContent;
    renderEarnings();
    autoLoadHistoricalMovers();
  }catch(e){

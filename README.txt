@@ -197,3 +197,12 @@ v18 HOTFIX — AUTO HISTORICAL MOVER
 - Earnings History no longer initiates the calculation; it only expands the
   detailed historical excursion table.
 - Uses at most 4 concurrent profile requests to protect Render responsiveness.
+
+v19 — RENDER STABILITY
+- Historical mover auto-loading is now strictly sequential: one ticker at a time.
+- This prevents the four Gunicorn threads from all being occupied by expensive
+  history calculations, which made the whole Render app appear frozen.
+- A 350 ms pause is inserted between historical-profile requests.
+- The Post-Earnings status shows progress such as "Historical movers 8/71".
+- Starting a new earnings scan cancels the previous background queue.
+- Main earnings scan / RRG / holdings logic is unchanged.
