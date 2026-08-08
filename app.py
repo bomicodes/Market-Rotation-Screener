@@ -288,61 +288,176 @@ def state_street_holdings(etf):
 STATE_STREET_FUNDS = set(SECTORS) | {"XBI","XRT","KRE","XME","XOP"}
 
 
-VANECK_FUNDS = {"SMH"}
+VANECK_FUNDS = {"SMH","OIH"}
+
+
+ISHARES_FUNDS = {
+    "IGV": ("239771", "ishares-expanded-tech-software-sector-etf"),
+    "IBB": ("239699", "ishares-biotechnology-etf"),
+    "ITB": ("239512", "ishares-us-home-construction-etf"),
+    "IYT": ("239501", "ishares-transportation-average-etf"),
+    "ITA": ("239502", "ishares-us-aerospace-defense-etf"),
+}
+
+INVESCO_FUNDS = {
+    "TAN": "https://www.invesco.com/us/en/financial-products/etfs/invesco-solar-etf.html",
+    "PBW": "https://www.invesco.com/us/en/financial-products/etfs/invesco-wilderhill-clean-energy-etf.html",
+}
+
+def clean_equity_holdings(rows):
+    seen = set()
+    out = []
+    for r in rows:
+        t = str(r.get("ticker","")).strip().upper().replace(".","-")
+        if not t or t in ("NAN","-","--","CASH","CASH_USD","USD") or len(t) > 15:
+            continue
+        # Reject obvious non-ticker labels and many foreign/local exchange codes.
+        if " " in t and not t.endswith("-US"):
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append({
+            "ticker": t,
+            "name": str(r.get("name", t)).strip(),
+            "weight": r.get("weight")
+        })
+    return out
+
+def ishares_holdings(etf):
+    """Official iShares latest-holdings CSV."""
+    etf = etf.upper()
+    product = ISHARES_FUNDS.get(etf)
+    if not product:
+        raise RuntimeError(f"No iShares mapping configured for {etf}.")
+    pid, slug = product
+    url = f"https://www.ishares.com/us/products/{pid}/{slug}/latest-holdings.csv"
+    resp = requests.get(url, timeout=25, headers={"User-Agent":"Mozilla/5.0"})
+    resp.raise_for_status()
+
+    # iShares CSV begins with fund metadata; locate the real CSV header.
+    raw = resp.text
+    lines = raw.splitlines()
+    header_idx = None
+    for i, line in enumerate(lines[:30]):
+        low = line.lower()
+        if low.startswith("ticker,") and "weight" in low:
+            header_idx = i
+            break
+    if header_idx is None:
+        raise RuntimeError("Could not locate the iShares holdings CSV header.")
+    df = pd.read_csv(io.StringIO("\n".join(lines[header_idx:])))
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    tcol = next((orig for low,orig in cols.items() if low == "ticker"), None)
+    ncol = next((orig for low,orig in cols.items() if low == "name"), None)
+    wcol = next((orig for low,orig in cols.items() if "weight" in low), None)
+    asset_col = next((orig for low,orig in cols.items() if low == "asset class"), None)
+    if tcol is None:
+        raise RuntimeError("iShares holdings CSV did not contain a ticker column.")
+
+    rows = []
+    for _, row in df.iterrows():
+        if asset_col is not None:
+            asset = str(row.get(asset_col,"")).lower()
+            if "equity" not in asset:
+                continue
+        weight = None
+        if wcol is not None:
+            try:
+                weight = float(str(row.get(wcol,"")).replace("%","").replace(",",""))
+            except Exception:
+                pass
+        rows.append({
+            "ticker": row.get(tcol,""),
+            "name": row.get(ncol,row.get(tcol,"")) if ncol is not None else row.get(tcol,""),
+            "weight": weight
+        })
+    rows = clean_equity_holdings(rows)
+    if len(rows) < 5:
+        raise RuntimeError("iShares returned too few usable holdings.")
+    return rows
+
+def invesco_holdings(etf):
+    """Attempt official Invesco product-page holdings before falling back."""
+    etf = etf.upper()
+    url = INVESCO_FUNDS.get(etf)
+    if not url:
+        raise RuntimeError(f"No Invesco mapping configured for {etf}.")
+    resp = requests.get(url, timeout=25, headers={"User-Agent":"Mozilla/5.0"})
+    resp.raise_for_status()
+
+    # Invesco may render holdings as HTML tables. Try all tables and locate one
+    # with a ticker/symbol column. If their page changes, caller falls back.
+    tables = pd.read_html(io.StringIO(resp.text))
+    candidates = []
+    for df in tables:
+        cols = {str(c).strip().lower(): c for c in df.columns}
+        tcol = next((orig for low,orig in cols.items() if "ticker" in low or low == "symbol"), None)
+        if tcol is None:
+            continue
+        ncol = next((orig for low,orig in cols.items() if low == "name" or "holding" in low), None)
+        wcol = next((orig for low,orig in cols.items() if "weight" in low or "% of" in low), None)
+        rows = []
+        for _, row in df.iterrows():
+            weight = None
+            if wcol is not None:
+                try:
+                    weight = float(str(row.get(wcol,"")).replace("%","").replace(",",""))
+                except Exception:
+                    pass
+            rows.append({
+                "ticker": row.get(tcol,""),
+                "name": row.get(ncol,row.get(tcol,"")) if ncol is not None else row.get(tcol,""),
+                "weight": weight,
+            })
+        rows = clean_equity_holdings(rows)
+        if len(rows) > len(candidates):
+            candidates = rows
+    if len(candidates) < 5:
+        raise RuntimeError("Invesco page did not expose a complete ticker holdings table.")
+    return candidates
 
 def vaneck_holdings(etf):
-    """Pull current VanEck holdings from the public fund page HTML."""
+    """Pull current VanEck holdings from the official fund page HTML."""
     etf = etf.upper()
     fund_urls = {
-        "SMH":"https://www.vaneck.com/us/en/investments/semiconductor-etf-smh/"
+        "SMH":"https://www.vaneck.com/us/en/investments/semiconductor-etf-smh/",
+        "OIH":"https://www.vaneck.com/us/en/investments/oil-services-etf-oih/",
     }
     url = fund_urls.get(etf)
     if not url:
         raise RuntimeError(f"No VanEck holdings parser configured for {etf}.")
-    headers = {
-        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
-    }
+    headers = {"User-Agent":"Mozilla/5.0"}
     resp = requests.get(url, timeout=25, headers=headers)
     resp.raise_for_status()
     tables = pd.read_html(io.StringIO(resp.text))
-    best = None
+    best = []
     for df in tables:
-        cols = [str(c).strip().lower() for c in df.columns]
-        joined = " | ".join(cols)
-        if "ticker" in joined and ("net assets" in joined or "% of net assets" in joined):
-            best = df
-            break
-    if best is None:
-        # relaxed fallback: locate any table with ticker + holding
-        for df in tables:
-            cols = [str(c).strip().lower() for c in df.columns]
-            joined = " | ".join(cols)
-            if "ticker" in joined and "holding" in joined:
-                best = df
-                break
-    if best is None:
-        raise RuntimeError("Could not find the VanEck holdings table.")
-    cols = {str(c).strip().lower(): c for c in best.columns}
-    tcol = next((orig for low,orig in cols.items() if low == "ticker" or "ticker" in low), None)
-    ncol = next((orig for low,orig in cols.items() if "holding name" in low or low == "name"), None)
-    wcol = next((orig for low,orig in cols.items() if "net assets" in low or "weight" in low), None)
-    out = []
-    for _, row in best.iterrows():
-        t = str(row.get(tcol,"")).strip().upper().replace(".","-")
-        if not t or t in ("NAN","--","-USD CASH-","-") or len(t) > 12:
+        cols = {str(c).strip().lower(): c for c in df.columns}
+        tcol = next((orig for low,orig in cols.items() if low == "ticker" or "ticker" in low), None)
+        if tcol is None:
             continue
-        name = str(row.get(ncol,t)).strip() if ncol is not None else t
-        weight = None
-        if wcol is not None:
-            try:
-                raw = str(row.get(wcol,"")).replace("%","").replace(",","").strip()
-                weight = float(raw)
-            except Exception:
-                pass
-        out.append({"ticker":t,"name":name,"weight":weight})
-    if len(out) < 5:
-        raise RuntimeError("VanEck holdings page returned too few usable tickers.")
-    return out
+        ncol = next((orig for low,orig in cols.items() if "holding name" in low or low == "name"), None)
+        wcol = next((orig for low,orig in cols.items() if "net assets" in low or "weight" in low), None)
+        rows = []
+        for _, row in df.iterrows():
+            weight = None
+            if wcol is not None:
+                try:
+                    weight = float(str(row.get(wcol,"")).replace("%","").replace(",",""))
+                except Exception:
+                    pass
+            rows.append({
+                "ticker": row.get(tcol,""),
+                "name": row.get(ncol,row.get(tcol,"")) if ncol is not None else row.get(tcol,""),
+                "weight": weight,
+            })
+        rows = clean_equity_holdings(rows)
+        if len(rows) > len(best):
+            best = rows
+    if len(best) < 5:
+        raise RuntimeError("Could not find a complete VanEck holdings table.")
+    return best
 
 def yahoo_fund_holdings(etf):
     """Generic fallback using yfinance/Yahoo fund top-holdings data."""
@@ -383,22 +498,44 @@ def yahoo_fund_holdings(etf):
         raise RuntimeError(f"Could not retrieve holdings for {etf}: {e}")
 
 def get_fund_holdings(etf):
-    """Use issuer daily files where available; otherwise use Yahoo fund holdings."""
+    """Prefer each ETF issuer's official holdings; Yahoo is last-resort only."""
     etf = etf.upper()
-    # Prefer issuer data because it exposes the full portfolio.
-    if etf in VANECK_FUNDS:
-        try:
-            return vaneck_holdings(etf), "VanEck current holdings"
-        except Exception:
-            pass
+    attempts = []
+
     if etf in STATE_STREET_FUNDS:
         try:
-            return state_street_holdings(etf), "State Street daily holdings"
-        except Exception:
-            pass
-    # Generic fallback works across many issuers, typically with top holdings.
-    holdings = yahoo_fund_holdings(etf)
-    return holdings, "Yahoo Finance fund holdings"
+            h = state_street_holdings(etf)
+            return h, "State Street official daily holdings"
+        except Exception as e:
+            attempts.append(f"State Street: {e}")
+
+    if etf in ISHARES_FUNDS:
+        try:
+            h = ishares_holdings(etf)
+            return h, "iShares official latest-holdings CSV"
+        except Exception as e:
+            attempts.append(f"iShares: {e}")
+
+    if etf in VANECK_FUNDS:
+        try:
+            h = vaneck_holdings(etf)
+            return h, "VanEck official current holdings"
+        except Exception as e:
+            attempts.append(f"VanEck: {e}")
+
+    if etf in INVESCO_FUNDS:
+        try:
+            h = invesco_holdings(etf)
+            return h, "Invesco official product holdings"
+        except Exception as e:
+            attempts.append(f"Invesco: {e}")
+
+    try:
+        holdings = yahoo_fund_holdings(etf)
+        return holdings, "Yahoo Finance TOP holdings fallback"
+    except Exception as e:
+        attempts.append(f"Yahoo: {e}")
+        raise RuntimeError(f"Could not retrieve holdings for {etf}. " + " | ".join(attempts))
 
 
 
@@ -560,27 +697,24 @@ def yahoo_calendar_for_day(day):
 
 def discover_recent_earnings(tickers, recent_trading_days=10):
     """
-    Source priority:
-    1) Finnhub free earnings calendar (when FINNHUB_API_KEY is configured)
-    2) Unusual Whales API (only if a paid UW token is configured)
-    3) Yahoo public calendar
-    4) yfinance per-ticker earnings history
-
-    Returns {ticker: {"date": Timestamp, "time": str|None, "source": str, ...}}
+    Exhaustive ETF-holdings earnings scan:
+    Finnhub date-range -> optional UW -> Yahoo calendar -> targeted ticker history
+    for every holding still missing.
     """
     now = pd.Timestamp.now().normalize()
     calendar_days = int(recent_trading_days * 1.8) + 5
     start = now - pd.Timedelta(days=calendar_days)
     wanted = set(tickers)
     found = {}
+    diag = {"universe":len(tickers),"finnhub":0,"uw":0,"yahoo":0,"ticker_history":0}
 
-    # Primary free structured source: one Finnhub date-range request can cover the whole scan.
     if FINNHUB_API_KEY:
-        for t, meta in finnhub_earnings_calendar(start, now).items():
+        fh = finnhub_earnings_calendar(start, now)
+        for t, meta in fh.items():
             if t in wanted:
                 found[t] = meta
+                diag["finnhub"] += 1
 
-    # Optional paid source if the user already has it.
     if UW_API_TOKEN:
         for d in pd.date_range(start, now, freq="D"):
             if d.weekday() >= 5:
@@ -588,34 +722,37 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
             for t, meta in unusual_whales_day(d).items():
                 if t in wanted and t not in found:
                     found[t] = meta
+                    diag["uw"] += 1
 
-    # Free public fallback.
     for d in pd.date_range(start, now, freq="D"):
         if d.weekday() >= 5:
             continue
         day_map = yahoo_calendar_for_day(d)
         for t, ed in day_map.items():
             if t in wanted and t not in found:
-                found[t] = {"date": ed, "time": None, "source": "Yahoo earnings calendar"}
+                found[t] = {"date":ed,"time":None,"source":"Yahoo earnings calendar"}
+                diag["yahoo"] += 1
 
-    # Final fallback: ticker history.
+    # Critical completeness pass: directly validate every ETF holding not found
+    # by calendar-level sources before excluding it.
     missing = [t for t in tickers if t not in found]
     if missing:
         with ThreadPoolExecutor(max_workers=8) as ex:
-            futs = {ex.submit(get_earnings_dates,t,12):t for t in missing}
+            futs = {ex.submit(get_earnings_dates,t,20):t for t in missing}
             for fut in as_completed(futs):
                 t = futs[fut]
                 try:
-                    dates = [d for d in fut.result() if d <= now and d >= start]
+                    dates = [pd.Timestamp(d).normalize() for d in fut.result()
+                             if pd.Timestamp(d).normalize() <= now and pd.Timestamp(d).normalize() >= start]
                     if dates:
-                        found[t] = {
-                            "date": max(dates),
-                            "time": None,
-                            "source": "yfinance ticker history"
-                        }
+                        found[t] = {"date":max(dates),"time":None,"source":"Targeted ticker earnings history"}
+                        diag["ticker_history"] += 1
                 except Exception:
                     pass
-    return found
+
+    diag["found"] = len(found)
+    diag["missing_after_validation"] = len(tickers) - len(found)
+    return found, diag
 
 def get_earnings_dates(ticker, limit=12):
     try:
@@ -843,7 +980,7 @@ def api_postearnings(etf):
         # calendar-day buffer approximates requested trading-day window
         cutoff=now-pd.Timedelta(days=int(recent_days*1.8)+4)
 
-        recent_map = discover_recent_earnings(tickers, recent_days)
+        recent_map, earnings_diag = discover_recent_earnings(tickers, recent_days)
 
         recent=[]
         for h in holdings:
@@ -866,8 +1003,12 @@ def api_postearnings(etf):
             recent.append((h,d,dates,meta_recent))
 
         if not recent:
-            return jsonify({"ok":True,"sector":etf,"sector_name":SECTORS.get(etf,etf),
-                            "results":[],"recent_days":recent_days,"message":"No recent earnings were found after checking both the public calendar and ticker history."})
+            return jsonify({"ok":True,"sector":etf,"sector_name":RRG_UNIVERSE.get(etf,etf),
+                            "results":[],"recent_days":recent_days,
+                            "holdings_source":_holdings_source,
+                            "holdings_total_loaded":len(holdings),
+                            "earnings_diagnostics":earnings_diag,
+                            "message":"No recent earnings were found after calendar scans plus targeted validation of every loaded ETF holding."})
 
         # RRG context for recent names
         names=[x[0]["ticker"] for x in recent]
@@ -907,13 +1048,34 @@ def api_postearnings(etf):
                                    -((x["profile"] or {}).get("score",0)),
                                    -x.get("current_score",0)))
         return jsonify({"ok":True,"sector":etf,"sector_name":RRG_UNIVERSE.get(etf,etf),
-                        "recent_days":recent_days,"results":results})
+                        "recent_days":recent_days,"results":results,
+                        "holdings_source":_holdings_source,
+                        "holdings_total_loaded":len(holdings),
+                        "earnings_diagnostics":earnings_diag})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
 @app.get("/health")
 def health():
     return jsonify({"ok":True,"unusual_whales_api_configured":bool(UW_API_TOKEN),"finnhub_api_configured":bool(FINNHUB_API_KEY)})
+
+
+@app.get("/api/holdings-audit")
+def holdings_audit():
+    results = []
+    for etf, name in RRG_UNIVERSE.items():
+        try:
+            bundle, stale, err = cached_refresh_safe(
+                f"holdings:{etf}", lambda etf=etf:get_fund_holdings(etf), force=False, ttl=3600
+            )
+            holdings, source = bundle
+            results.append({
+                "etf":etf,"name":name,"count":len(holdings),"source":source,
+                "ok":True,"stale":stale,"error":err
+            })
+        except Exception as e:
+            results.append({"etf":etf,"name":name,"count":0,"source":"—","ok":False,"error":str(e)})
+    return jsonify({"ok":True,"results":results})
 
 @app.get("/api/source-status")
 def source_status():
@@ -989,7 +1151,8 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
 <div id="rotation" class="view active">
   <div class="panel">
-    <div class="row"><strong>Market & sector screen</strong><button class="primary" id="refreshMarket">Refresh market</button><span id="mstatus" class="status"></span></div>
+    <div class="row"><strong>Market & sector screen</strong><button class="primary" id="refreshMarket">Refresh market</button><button id="auditHoldings">Audit holdings sources</button><span id="mstatus" class="status"></span></div>
+    <div id="auditPanel" class="note" style="display:none;margin-top:10px"></div>
     <div id="internals" class="cards"></div>
   </div>
   <div class="grid2">
@@ -1082,6 +1245,14 @@ function renderGroups(){
  document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
  document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",()=>{let t=el.dataset.sector;currentSector=t; document.getElementById("sectorTitle").textContent=t+" selected"; loadSector()}));
 }
+
+async function auditHoldings(){
+ const p=document.getElementById("auditPanel");p.style.display="block";p.textContent="Checking issuer holdings feeds…";
+ try{
+   let r=await fetch("/api/holdings-audit"),j=await r.json();if(!j.ok)throw Error(j.error||"Audit failed");
+   p.innerHTML=`<div class="scroll"><table><thead><tr><th>ETF</th><th>Holdings loaded</th><th>Source</th><th>Status</th></tr></thead><tbody>${j.results.map(x=>`<tr><td><b>${x.etf}</b><div class="tiny">${x.name}</div></td><td>${x.count}</td><td>${x.source}</td><td>${x.ok?"✓":"⚠️ "+(x.error||"failed")}</td></tr>`).join("")}</tbody></table></div>`;
+ }catch(e){p.innerHTML=`<span class="error">${e.message}</span>`}
+}
 async function loadMarket(force=false){
  let st=document.getElementById("mstatus");st.textContent="Updating…";
  try{let r=await fetch("/api/market"+(force?"?refresh=1":""));let j=await r.json();if(!j.ok)throw Error(j.error);sectorData=j.sectors;st.textContent=j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`;let i=j.internals;
@@ -1110,9 +1281,9 @@ function renderEarnings(){
 function detailHTML(x){let p=x.profile;if(!p)return'<span class="note">Not enough usable historical earnings events for a profile.</span>';let ev=p.events||[];return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`}
 async function runEarnings(){
  let st=document.getElementById("estatus");st.textContent="Scanning earnings dates and building history… this can take a minute.";
- try{let s=document.getElementById("earnSector").value,d=document.getElementById("earnDays").value,l=document.getElementById("earnLimit").value,r=await fetch(`/api/postearnings/${s}?days=${d}&limit=${l}`),j=await r.json();if(!j.ok)throw Error(j.error);earnResults=j.results||[];st.textContent=earnResults.length?`${earnResults.length} recent earnings names found in ${s}`:(j.message||`No recent earnings names found in ${s}`);renderEarnings()}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
+ try{let s=document.getElementById("earnSector").value,d=document.getElementById("earnDays").value,l=document.getElementById("earnLimit").value,r=await fetch(`/api/postearnings/${s}?days=${d}&limit=${l}`),j=await r.json();if(!j.ok)throw Error(j.error);earnResults=j.results||[];let d=j.earnings_diagnostics||{};st.textContent=(earnResults.length?`${earnResults.length} recent earnings names found`:(j.message||"No recent earnings names found"))+` · ${j.holdings_total_loaded||"?"} holdings loaded · ${j.holdings_source||""} · Finnhub ${d.finnhub||0}, Yahoo ${d.yahoo||0}, targeted ${d.ticker_history||0}`;renderEarnings()}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
 </script>
 """
 @app.get("/")

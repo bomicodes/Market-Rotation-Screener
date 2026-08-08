@@ -105,3 +105,24 @@ SETUP
        FINNHUB_API_KEY = your_free_key
 3. Save changes / redeploy.
 4. Do NOT put the key in GitHub.
+
+NEW IN v13 — FULL HOLDINGS AUDIT + EXHAUSTIVE EARNINGS VALIDATION
+- Reworked holdings sources by ETF issuer:
+  State Street official daily holdings:
+    XLK XLC XLY XLF XLI XLB XLE XLV XLP XLU XLRE XBI XRT KRE XME XOP
+  iShares official latest-holdings CSV:
+    IGV IBB ITB IYT ITA
+  VanEck official current holdings:
+    SMH OIH
+  Invesco official product holdings attempted first:
+    TAN PBW
+  Yahoo Finance TOP holdings is now last-resort only.
+- IGV no longer relies on Yahoo top holdings. iShares currently reports over
+  100 IGV holdings and its official CSV includes PLTR.
+- Added "Audit holdings sources" button showing loaded count + source for every
+  Layer-1 ETF.
+- Post-Earnings now reports how many holdings were actually loaded and which
+  holdings source was used.
+- After calendar-level earnings sources run, every remaining ETF holding gets
+  a targeted ticker-history validation before being excluded.
+- Post-Earnings status displays source diagnostics (Finnhub / Yahoo / targeted).
