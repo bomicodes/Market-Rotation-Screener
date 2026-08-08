@@ -56,3 +56,52 @@ Use the on-screen Refresh/Scan controls when you want updated calculations.
 DISCLAIMER
 DIY relative-rotation screening model; not the proprietary official RRG formula.
 Screen first, then confirm price structure/premium/entry separately.
+
+NEW IN v10 — POST-EARNINGS FIX
+- Recent earnings discovery no longer depends only on yfinance.get_earnings_dates().
+- It now checks Yahoo Finance's public daily earnings calendar and then uses
+  per-ticker yfinance history as a fallback.
+- SMH now prefers VanEck's own current holdings page instead of Yahoo's
+  limited top-holdings list.
+- Historical earnings profiles can explicitly inject the newly discovered
+  recent earnings date if the ticker-history endpoint omitted it.
+- Example validation: AMD is a current SMH holding and reported earnings
+  August 4, 2026, so it should be discoverable in an SMH recent-earnings scan.
+
+NEW IN v11 — OFFICIAL UNUSUAL WHALES INTEGRATION
+- Added optional UW_API_TOKEN environment variable.
+- If configured, recent earnings use the official Unusual Whales API first:
+  GET /api/earnings/premarket
+  GET /api/earnings/afterhours
+- Historical event dates can also come from:
+  GET /api/earnings/{ticker}
+- The app displays the earnings source and report time when available.
+- If no UW API token is configured, the app continues working with:
+  Yahoo public earnings calendar -> yfinance ticker-history fallback.
+- No scraping of undocumented/private Unusual Whales website endpoints is used.
+
+RENDER
+Add UW_API_TOKEN in Render Environment only if you have an Unusual Whales API token.
+Leave it blank if you do not; the fallback sources remain active.
+
+NEW IN v12 — FREE FINNHUB EARNINGS CALENDAR
+- Added FINNHUB_API_KEY environment variable.
+- Finnhub is now the preferred earnings-discovery source when configured.
+- Finnhub's free tier currently provides one month of historical earnings and
+  new updates, which fits the post-earnings 3/5/10/14-day scanner.
+- One date-range request retrieves the earnings calendar for all holdings in
+  the selected ETF rather than making one earnings request per stock.
+- Source priority:
+    1. Finnhub earnings calendar (free key)
+    2. Unusual Whales API (optional, only if user already pays for it)
+    3. Yahoo earnings calendar
+    4. yfinance ticker history
+- Finnhub EPS/revenue estimate/actual fields are retained when returned.
+- All historical price excursion and Fast/Trend RRG calculations remain ours.
+
+SETUP
+1. Create a free Finnhub account/API key.
+2. In Render -> your service -> Environment, add:
+       FINNHUB_API_KEY = your_free_key
+3. Save changes / redeploy.
+4. Do NOT put the key in GitHub.

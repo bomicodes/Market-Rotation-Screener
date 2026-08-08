@@ -13,3 +13,7 @@ services:
         generateValue: true
       - key: SCREENER_PASSWORD
         sync: false
+      - key: FINNHUB_API_KEY
+        sync: false
+      - key: UW_API_TOKEN
+        sync: false

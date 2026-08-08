@@ -2,6 +2,7 @@
 from flask import Flask, jsonify, request, Response, session, redirect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import io, math, time, traceback, os
+from urllib.parse import quote
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
@@ -12,6 +13,8 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
+UW_API_TOKEN = os.environ.get("UW_API_TOKEN", "").strip()
+FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
 
 SECTORS = {
     "XLK":"Technology",
@@ -284,6 +287,63 @@ def state_street_holdings(etf):
 # State Street also publishes daily files for several industry/theme SPDRs.
 STATE_STREET_FUNDS = set(SECTORS) | {"XBI","XRT","KRE","XME","XOP"}
 
+
+VANECK_FUNDS = {"SMH"}
+
+def vaneck_holdings(etf):
+    """Pull current VanEck holdings from the public fund page HTML."""
+    etf = etf.upper()
+    fund_urls = {
+        "SMH":"https://www.vaneck.com/us/en/investments/semiconductor-etf-smh/"
+    }
+    url = fund_urls.get(etf)
+    if not url:
+        raise RuntimeError(f"No VanEck holdings parser configured for {etf}.")
+    headers = {
+        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+    }
+    resp = requests.get(url, timeout=25, headers=headers)
+    resp.raise_for_status()
+    tables = pd.read_html(io.StringIO(resp.text))
+    best = None
+    for df in tables:
+        cols = [str(c).strip().lower() for c in df.columns]
+        joined = " | ".join(cols)
+        if "ticker" in joined and ("net assets" in joined or "% of net assets" in joined):
+            best = df
+            break
+    if best is None:
+        # relaxed fallback: locate any table with ticker + holding
+        for df in tables:
+            cols = [str(c).strip().lower() for c in df.columns]
+            joined = " | ".join(cols)
+            if "ticker" in joined and "holding" in joined:
+                best = df
+                break
+    if best is None:
+        raise RuntimeError("Could not find the VanEck holdings table.")
+    cols = {str(c).strip().lower(): c for c in best.columns}
+    tcol = next((orig for low,orig in cols.items() if low == "ticker" or "ticker" in low), None)
+    ncol = next((orig for low,orig in cols.items() if "holding name" in low or low == "name"), None)
+    wcol = next((orig for low,orig in cols.items() if "net assets" in low or "weight" in low), None)
+    out = []
+    for _, row in best.iterrows():
+        t = str(row.get(tcol,"")).strip().upper().replace(".","-")
+        if not t or t in ("NAN","--","-USD CASH-","-") or len(t) > 12:
+            continue
+        name = str(row.get(ncol,t)).strip() if ncol is not None else t
+        weight = None
+        if wcol is not None:
+            try:
+                raw = str(row.get(wcol,"")).replace("%","").replace(",","").strip()
+                weight = float(raw)
+            except Exception:
+                pass
+        out.append({"ticker":t,"name":name,"weight":weight})
+    if len(out) < 5:
+        raise RuntimeError("VanEck holdings page returned too few usable tickers.")
+    return out
+
 def yahoo_fund_holdings(etf):
     """Generic fallback using yfinance/Yahoo fund top-holdings data."""
     try:
@@ -325,7 +385,12 @@ def yahoo_fund_holdings(etf):
 def get_fund_holdings(etf):
     """Use issuer daily files where available; otherwise use Yahoo fund holdings."""
     etf = etf.upper()
-    # Prefer issuer data for SPDR funds because it usually exposes the full portfolio.
+    # Prefer issuer data because it exposes the full portfolio.
+    if etf in VANECK_FUNDS:
+        try:
+            return vaneck_holdings(etf), "VanEck current holdings"
+        except Exception:
+            pass
     if etf in STATE_STREET_FUNDS:
         try:
             return state_street_holdings(etf), "State Street daily holdings"
@@ -334,6 +399,223 @@ def get_fund_holdings(etf):
     # Generic fallback works across many issuers, typically with top holdings.
     holdings = yahoo_fund_holdings(etf)
     return holdings, "Yahoo Finance fund holdings"
+
+
+
+
+def finnhub_earnings_calendar(start_date, end_date):
+    """
+    Finnhub free-tier earnings calendar. Returns a ticker -> metadata mapping.
+    Endpoint: /api/v1/calendar/earnings?from=YYYY-MM-DD&to=YYYY-MM-DD
+    """
+    if not FINNHUB_API_KEY:
+        return {}
+    url = "https://finnhub.io/api/v1/calendar/earnings"
+    params = {
+        "from": pd.Timestamp(start_date).strftime("%Y-%m-%d"),
+        "to": pd.Timestamp(end_date).strftime("%Y-%m-%d"),
+        "token": FINNHUB_API_KEY
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=25, headers={"User-Agent":"MarketRotationScreener/1.0"})
+        resp.raise_for_status()
+        payload = resp.json()
+        rows = payload.get("earningsCalendar", []) if isinstance(payload, dict) else []
+        out = {}
+        for r in rows:
+            t = str(r.get("symbol","")).strip().upper().replace(".","-")
+            d = r.get("date")
+            if not t or not d:
+                continue
+            # Finnhub may not always provide BMO/AMC; hour is optional.
+            hour = r.get("hour")
+            report_time = None
+            if hour:
+                h = str(hour).lower()
+                if h in ("bmo","before market open","premarket"):
+                    report_time = "premarket"
+                elif h in ("amc","after market close","afterhours"):
+                    report_time = "afterhours"
+                else:
+                    report_time = str(hour)
+            out[t] = {
+                "date": pd.Timestamp(d).normalize(),
+                "time": report_time,
+                "source": "Finnhub earnings calendar",
+                "eps_estimate": r.get("epsEstimate"),
+                "eps_actual": r.get("epsActual"),
+                "revenue_estimate": r.get("revenueEstimate"),
+                "revenue_actual": r.get("revenueActual"),
+            }
+        return out
+    except Exception:
+        return {}
+
+def uw_api_get(path, params=None):
+    if not UW_API_TOKEN:
+        return None
+    url = "https://api.unusualwhales.com" + path
+    headers = {
+        "Authorization": f"Bearer {UW_API_TOKEN}",
+        "Accept": "application/json",
+        "User-Agent": "MarketRotationScreener/1.0"
+    }
+    resp = requests.get(url, params=params or {}, headers=headers, timeout=25)
+    resp.raise_for_status()
+    payload = resp.json()
+    return payload.get("data", payload)
+
+def unusual_whales_day(date):
+    """Return recent earnings for one date from official UW premarket/afterhours APIs."""
+    if not UW_API_TOKEN:
+        return {}
+    ds = pd.Timestamp(date).strftime("%Y-%m-%d")
+    out = {}
+    for endpoint, fallback_time in [
+        ("/api/earnings/premarket", "premarket"),
+        ("/api/earnings/afterhours", "afterhours"),
+    ]:
+        try:
+            rows = uw_api_get(endpoint, {"date": ds, "limit": 100, "page": 0}) or []
+            # paginate once more only if full page returned
+            page = 1
+            while rows and len(rows) >= 100 and page < 5:
+                more = uw_api_get(endpoint, {"date": ds, "limit": 100, "page": page}) or []
+                if not more:
+                    break
+                rows.extend(more)
+                if len(more) < 100:
+                    break
+                page += 1
+            for r in rows:
+                t = str(r.get("symbol","")).strip().upper().replace(".","-")
+                if not t:
+                    continue
+                report_date = r.get("report_date") or ds
+                report_time = r.get("report_time") or fallback_time
+                out[t] = {
+                    "date": pd.Timestamp(report_date).normalize(),
+                    "time": report_time,
+                    "source": "Unusual Whales API",
+                    "reaction": r.get("reaction"),
+                    "expected_move_perc": r.get("expected_move_perc"),
+                }
+        except Exception:
+            continue
+    return out
+
+def unusual_whales_history(ticker):
+    """Official UW historical ticker earnings endpoint."""
+    if not UW_API_TOKEN:
+        return []
+    try:
+        rows = uw_api_get(f"/api/earnings/{ticker}") or []
+        out = []
+        for r in rows:
+            d = r.get("report_date")
+            if not d:
+                continue
+            out.append({
+                "date": pd.Timestamp(d).normalize(),
+                "time": r.get("report_time"),
+                "source": "Unusual Whales API",
+                "post_1d": r.get("post_earnings_move_1d"),
+                "post_3d": r.get("post_earnings_move_3d"),
+                "post_1w": r.get("post_earnings_move_1w"),
+                "post_2w": r.get("post_earnings_move_2w"),
+                "expected_move_perc": r.get("expected_move_perc"),
+            })
+        return sorted(out, key=lambda x:x["date"], reverse=True)
+    except Exception:
+        return []
+
+def yahoo_calendar_for_day(day):
+    """
+    Public Yahoo Finance earnings-calendar fallback.
+    Returns {TICKER: date}. This is used only for recent-event discovery;
+    historical profiling still uses per-ticker earnings history.
+    """
+    ds = pd.Timestamp(day).strftime("%Y-%m-%d")
+    url = f"https://finance.yahoo.com/calendar/earnings?day={ds}&offset=0&size=100"
+    headers = {
+        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36"
+    }
+    try:
+        resp = requests.get(url, timeout=20, headers=headers)
+        resp.raise_for_status()
+        tables = pd.read_html(io.StringIO(resp.text))
+        out = {}
+        for df in tables:
+            # Yahoo table generally contains Symbol / Company / Earnings Call Time.
+            symbol_col = next((c for c in df.columns if str(c).strip().lower() == "symbol"), None)
+            if symbol_col is None:
+                continue
+            for sym in df[symbol_col].astype(str):
+                t = sym.strip().upper().replace(".","-")
+                if t and t not in ("NAN","SYMBOL"):
+                    out[t] = pd.Timestamp(ds)
+        return out
+    except Exception:
+        return {}
+
+def discover_recent_earnings(tickers, recent_trading_days=10):
+    """
+    Source priority:
+    1) Finnhub free earnings calendar (when FINNHUB_API_KEY is configured)
+    2) Unusual Whales API (only if a paid UW token is configured)
+    3) Yahoo public calendar
+    4) yfinance per-ticker earnings history
+
+    Returns {ticker: {"date": Timestamp, "time": str|None, "source": str, ...}}
+    """
+    now = pd.Timestamp.now().normalize()
+    calendar_days = int(recent_trading_days * 1.8) + 5
+    start = now - pd.Timedelta(days=calendar_days)
+    wanted = set(tickers)
+    found = {}
+
+    # Primary free structured source: one Finnhub date-range request can cover the whole scan.
+    if FINNHUB_API_KEY:
+        for t, meta in finnhub_earnings_calendar(start, now).items():
+            if t in wanted:
+                found[t] = meta
+
+    # Optional paid source if the user already has it.
+    if UW_API_TOKEN:
+        for d in pd.date_range(start, now, freq="D"):
+            if d.weekday() >= 5:
+                continue
+            for t, meta in unusual_whales_day(d).items():
+                if t in wanted and t not in found:
+                    found[t] = meta
+
+    # Free public fallback.
+    for d in pd.date_range(start, now, freq="D"):
+        if d.weekday() >= 5:
+            continue
+        day_map = yahoo_calendar_for_day(d)
+        for t, ed in day_map.items():
+            if t in wanted and t not in found:
+                found[t] = {"date": ed, "time": None, "source": "Yahoo earnings calendar"}
+
+    # Final fallback: ticker history.
+    missing = [t for t in tickers if t not in found]
+    if missing:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs = {ex.submit(get_earnings_dates,t,12):t for t in missing}
+            for fut in as_completed(futs):
+                t = futs[fut]
+                try:
+                    dates = [d for d in fut.result() if d <= now and d >= start]
+                    if dates:
+                        found[t] = {
+                            "date": max(dates),
+                            "time": None,
+                            "source": "yfinance ticker history"
+                        }
+                except Exception:
+                    pass
+    return found
 
 def get_earnings_dates(ticker, limit=12):
     try:
@@ -561,25 +843,31 @@ def api_postearnings(etf):
         # calendar-day buffer approximates requested trading-day window
         cutoff=now-pd.Timedelta(days=int(recent_days*1.8)+4)
 
-        date_map={}
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            futs={ex.submit(get_earnings_dates,t,12):t for t in tickers}
-            for fut in as_completed(futs):
-                t=futs[fut]
-                dates=fut.result()
-                date_map[t]=dates
+        recent_map = discover_recent_earnings(tickers, recent_days)
 
         recent=[]
         for h in holdings:
-            dates=[d for d in date_map.get(h["ticker"],[]) if d<=now]
-            if not dates: continue
-            d=dates[0]
-            if d>=cutoff:
-                recent.append((h,d,dates))
+            t = h["ticker"]
+            meta_recent = recent_map.get(t)
+            if meta_recent is None:
+                continue
+            d = pd.Timestamp(meta_recent["date"]).normalize()
+
+            # Prefer UW historical dates if available, otherwise yfinance.
+            uw_hist = unusual_whales_history(t) if UW_API_TOKEN else []
+            if uw_hist:
+                dates = [x["date"] for x in uw_hist]
+            else:
+                dates = get_earnings_dates(t, 16)
+
+            if not any(abs((pd.Timestamp(x).normalize()-d).days) <= 1 for x in dates):
+                dates = [d] + dates
+
+            recent.append((h,d,dates,meta_recent))
 
         if not recent:
             return jsonify({"ok":True,"sector":etf,"sector_name":SECTORS.get(etf,etf),
-                            "results":[],"recent_days":recent_days})
+                            "results":[],"recent_days":recent_days,"message":"No recent earnings were found after checking both the public calendar and ticker history."})
 
         # RRG context for recent names
         names=[x[0]["ticker"] for x in recent]
@@ -587,7 +875,7 @@ def api_postearnings(etf):
         rrg={r["ticker"]:r for r in dual_rrg_rows(prices,etf,names,8,8)}
 
         def build(item):
-            h,d,dates=item
+            h,d,dates,event_meta=item
             prof=earnings_profile(h["ticker"],dates)
             r=rrg.get(h["ticker"],{})
             days_ago=max(0,(now-d).days)
@@ -596,6 +884,14 @@ def api_postearnings(etf):
             return {
                 "ticker":h["ticker"],"name":h["name"],"weight":h.get("weight"),
                 "earnings_date":d.strftime("%Y-%m-%d"),"calendar_days_ago":days_ago,
+                "earnings_time":event_meta.get("time"),
+                "earnings_source":event_meta.get("source"),
+                "uw_reaction":event_meta.get("reaction"),
+                "uw_expected_move_perc":event_meta.get("expected_move_perc"),
+                "eps_estimate":event_meta.get("eps_estimate"),
+                "eps_actual":event_meta.get("eps_actual"),
+                "revenue_estimate":event_meta.get("revenue_estimate"),
+                "revenue_actual":event_meta.get("revenue_actual"),
                 "profile":prof,"rotation":r,"current_score":current_score
             }
 
@@ -617,7 +913,16 @@ def api_postearnings(etf):
 
 @app.get("/health")
 def health():
-    return jsonify({"ok":True})
+    return jsonify({"ok":True,"unusual_whales_api_configured":bool(UW_API_TOKEN),"finnhub_api_configured":bool(FINNHUB_API_KEY)})
+
+@app.get("/api/source-status")
+def source_status():
+    return jsonify({
+        "ok": True,
+        "finnhub_api_configured": bool(FINNHUB_API_KEY),
+        "unusual_whales_api_configured": bool(UW_API_TOKEN),
+        "earnings_priority": ["Finnhub earnings calendar","Unusual Whales API (optional)","Yahoo earnings calendar","yfinance ticker history"]
+    })
 
 HTML = r"""
 <style>
@@ -745,7 +1050,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
       <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Historical mover labels use up to the last 8 completed earnings events. Expand any ticker for 1/3/5/10/14-day excursion stats.</div>
+    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub (free API key) → Unusual Whales API if configured → Yahoo calendar → ticker history. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover labels use up to the last 8 completed earnings events. Expand any ticker for 1/3/5/10/14-day excursion stats.</div>
   </div>
   <div class="panel">
     <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
@@ -799,13 +1104,13 @@ function compactRRG(r){
 function moverHTML(p){if(!p)return'<span class="mover mLOW">UNKNOWN</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
 function renderEarnings(){
  let f=document.getElementById("moverFilter").value,arr=earnResults.filter(x=>{let l=(x.profile||{}).label||"LOW";return f==="all"||(f==="hm"&&l!=="LOW")||(f==="high"&&l==="HIGH")});
- document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago} calendar days ago</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
+ document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>document.getElementById(b.dataset.id).classList.toggle("open")));
 }
 function detailHTML(x){let p=x.profile;if(!p)return'<span class="note">Not enough usable historical earnings events for a profile.</span>';let ev=p.events||[];return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`}
 async function runEarnings(){
  let st=document.getElementById("estatus");st.textContent="Scanning earnings dates and building history… this can take a minute.";
- try{let s=document.getElementById("earnSector").value,d=document.getElementById("earnDays").value,l=document.getElementById("earnLimit").value,r=await fetch(`/api/postearnings/${s}?days=${d}&limit=${l}`),j=await r.json();if(!j.ok)throw Error(j.error);earnResults=j.results||[];st.textContent=`${earnResults.length} recent earnings names found in ${s}`;renderEarnings()}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
+ try{let s=document.getElementById("earnSector").value,d=document.getElementById("earnDays").value,l=document.getElementById("earnLimit").value,r=await fetch(`/api/postearnings/${s}?days=${d}&limit=${l}`),j=await r.json();if(!j.ok)throw Error(j.error);earnResults=j.results||[];st.textContent=earnResults.length?`${earnResults.length} recent earnings names found in ${s}`:(j.message||`No recent earnings names found in ${s}`);renderEarnings()}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
 </script>
