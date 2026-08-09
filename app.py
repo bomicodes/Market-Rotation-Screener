@@ -1918,10 +1918,11 @@ function badge(q){return q?`<span class="badge ${q}">${q.toUpperCase()}</span>`:
 function dir(r){if(!r||!r.ticker)return"—";let s=`<span class="${r.rs_up?'up':'down'}">RS-Ratio ${r.rs_up?'↑':'↓'}</span> · <span class="${r.mom_up?'up':'down'}">RS-Momentum ${r.mom_up?'↑':'↓'}</span>`;if(r.l_to_i)s+=' <span class="flag">L→I</span>';if(r.early_turn)s+=' <span class="flag">EARLY TURN</span>';return s}
 const rrgFocusState={};
 
-function drawRRG(id,rows){
+function drawRRG(id,rows,focusTicker=undefined){
  const c=document.getElementById(id),ctx=c.getContext("2d"),W=c.width,H=c.height,p=42;
  rrgFocusState[id]=rrgFocusState[id]||{selected:null,rows:[],hits:[]};
  const state=rrgFocusState[id];
+ if(focusTicker!==undefined)state.selected=focusTicker;
  state.rows=rows||[];
  state.hits=[];
 
@@ -2010,8 +2011,8 @@ function drawRRG(id,rows){
    const color=quadColors[r.quadrant];
 
    ctx.strokeStyle=color;
-   ctx.lineWidth=isSelected?3.2:1.5;
-   ctx.globalAlpha=isFaded?.10:(isSelected?1:.65);
+   ctx.lineWidth=isSelected?4.2:1.5;
+   ctx.globalAlpha=isFaded?.06:(isSelected?1:.72);
    ctx.beginPath();
    pts.forEach((pt,j)=>{
      j?ctx.lineTo(X(pt.x),Y(pt.y)):ctx.moveTo(X(pt.x),Y(pt.y));
@@ -2024,11 +2025,11 @@ function drawRRG(id,rows){
    ctx.globalAlpha=isFaded?.16:1;
    ctx.fillStyle=color;
    ctx.beginPath();
-   ctx.arc(ex,ey,isSelected?7:5,0,Math.PI*2);
+   ctx.arc(ex,ey,isSelected?8:5,0,Math.PI*2);
    ctx.fill();
 
    const label=r.ticker;
-   ctx.font=isSelected?"bold 15px sans-serif":"bold 11px sans-serif";
+   ctx.font=isSelected?"bold 17px sans-serif":"bold 11px sans-serif";
    const labelX=ex+(isSelected?10:7);
    const labelY=ey-(isSelected?8:6);
    const labelWidth=ctx.measureText(label).width;
@@ -2050,6 +2051,16 @@ function drawRRG(id,rows){
  ctx.lineWidth=1;
 }
 
+
+
+function toggleRRGFocus(id,ticker){
+ const state=rrgFocusState[id];
+ if(!state)return;
+ const next=state.selected===ticker?null:ticker;
+ drawRRG(id,state.rows,next);
+ if(id==="stockChart")syncLiveRowSelection();
+ if(id==="historyChart")syncHistoricalRowSelection();
+}
 
 function syncLiveRowSelection(){
  const selected=rrgFocusState["stockChart"]?.selected||null;
@@ -2093,12 +2104,7 @@ function installRRGInteractions(id){
  c.addEventListener("click",evt=>{
    const ticker=hitTicker(evt);
    if(!ticker)return;
-   const state=rrgFocusState[id];
-   state.selected=state.selected===ticker?null:ticker;
-   drawRRG(id,state.rows);
-
-   if(id==="stockChart")syncLiveRowSelection();
-   if(id==="historyChart")syncHistoricalRowSelection();
+   toggleRRGFocus(id,ticker);
  });
 
  c.addEventListener("mousemove",evt=>{
@@ -2270,11 +2276,7 @@ function renderLiveStocks(){
  // Clicking anywhere else on a ticker row toggles chart focus.
  document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
    const ticker=row.dataset.liveTicker;
-   const state=rrgFocusState["stockChart"];
-   if(!state)return;
-   state.selected=state.selected===ticker?null:ticker;
-   drawRRG("stockChart",state.rows);
-   syncLiveRowSelection();
+   toggleRRGFocus("stockChart",ticker);
  }));
 
  refreshLiveBookmarkButtons();
@@ -2423,11 +2425,7 @@ function renderHistorical(){
 
  document.querySelectorAll("[data-hist-ticker]").forEach(row=>row.addEventListener("click",()=>{
    const ticker=row.dataset.histTicker;
-   const state=rrgFocusState["historyChart"];
-   if(!state)return;
-   state.selected=state.selected===ticker?null:ticker;
-   drawRRG("historyChart",state.rows);
-   syncHistoricalRowSelection();
+   toggleRRGFocus("historyChart",ticker);
  }));
 
  syncHistoricalRowSelection();

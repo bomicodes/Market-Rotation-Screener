@@ -307,3 +307,11 @@ v17.4 — LIVE + HISTORICAL ROW FOCUS
 - Row highlighting stays synchronized with chart clicks.
 - Bookmark stars are isolated from row-click focus.
 - Filters, cache, watchlist, and all signal logic unchanged.
+
+v17.5 — LIVE RRG CLICK-FOCUS FIX
+- Fixed live table-row focus by using an explicit focus ticker during canvas redraw.
+- Live row click and chart click now share one focus function.
+- Historical row/chart click uses the same mechanism for consistency.
+- Selected tail is slightly thicker/larger; all other displayed tails dim more strongly.
+- Clicking the selected ticker again clears focus and restores all tails normally.
+- Watchlist, filters, caching, and signal logic unchanged.
