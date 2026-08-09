@@ -284,3 +284,16 @@ v17.1 — SEARCH + NO-RELOAD TOGGLING
 - Historical ETF and holdings-limit changes also reuse prior results when available.
 - Explicit Refresh buttons bypass cache.
 - Potential Turn / Rotating In / Rotating Out logic unchanged from v17.0.
+
+v17.2 — HISTORICAL FILTER LAYOUT
+- Historical RRG Quadrant is directly before Tail.
+- Quadrant + Tail are visually grouped on the same line.
+- Search, browser-session cache, Potential Turn, and all v17.1 behavior unchanged.
+
+v17.3 — LIVE-ONLY WATCHLIST
+- Added ☆/★ bookmark button to the live stock RRG table only.
+- Added compact Live Watchlist panel under the live RRG.
+- Watchlist persists via browser localStorage.
+- Saved fields: ticker, ETF, Fast quadrant, Trend quadrant, tail signal.
+- Clear-all and individual remove supported.
+- Historical RRG is unchanged and has no bookmark feature.

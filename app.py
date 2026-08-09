@@ -1235,6 +1235,23 @@ button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca
   letter-spacing:.03em;
   white-space:nowrap;
 }
+
+.histFilterPair{{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:nowrap;
+}}
+
+.bookmarkBtn{{
+  border:0;
+  background:transparent;
+  padding:2px 5px;
+  cursor:pointer;
+  font-size:18px;
+  line-height:1;
+}}
+.bookmarkBtn.saved{{filter:brightness(1.2)}}
 </style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
@@ -1702,7 +1719,22 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   </div>
   <div class="grid2">
     <div class="panel"><canvas id="stockChart" width="900" height="540"></canvas></div>
-    <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <strong>★ Live Watchlist</strong>
+      <span class="note">Saved locally in this browser.</span>
+      <button id="clearLiveWatchlist">Clear all</button>
+      <span id="liveWatchStatus" class="status"></span>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th></th><th>Ticker</th><th>ETF</th><th>Fast</th><th>Trend</th><th>Tail</th></tr></thead>
+        <tbody id="liveWatchRows"></tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -1740,8 +1772,8 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
         <option value="50">50</option>
         <option value="all">All</option>
       </select>
-
-      <label class="note">Quadrant</label>
+      <span class="histFilterPair">
+        <label class="note">Quadrant</label>
       <select id="histQuadrantFilter">
         <option value="all" selected>All</option>
         <option value="Leading">Leading</option>
@@ -1749,13 +1781,14 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
         <option value="Weakening">Weakening</option>
         <option value="Lagging">Lagging</option>
       </select>
-      <label class="note">Tail</label>
+        <label class="note">Tail</label>
       <select id="histTailFilter">
         <option value="all" selected>All</option>
         <option value="Potential Turn">Potential Turn 👀</option>
         <option value="Rotating In">Rotating In ↗</option>
         <option value="Rotating Out">Rotating Out ↙</option>
       </select>
+      </span>
       <label class="note">Search</label>
       <input id="histTickerSearch" type="search" placeholder="Ticker…" autocomplete="off" style="width:96px">
 
@@ -1791,6 +1824,89 @@ const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
 function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
 
+
+const LIVE_WATCHLIST_KEY="marketRotationLiveWatchlistV1";
+let liveWatchlist=[];
+
+function loadLiveWatchlist(){
+ try{
+   const raw=localStorage.getItem(LIVE_WATCHLIST_KEY);
+   liveWatchlist=raw?JSON.parse(raw):[];
+   if(!Array.isArray(liveWatchlist))liveWatchlist=[];
+ }catch(e){liveWatchlist=[]}
+}
+
+function saveLiveWatchlist(){
+ try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){}
+ renderLiveWatchlist();
+ refreshLiveBookmarkButtons();
+}
+
+function liveWatchKey(ticker){
+ return String(ticker||"").toUpperCase();
+}
+
+function isLiveWatched(ticker){
+ return liveWatchlist.some(x=>liveWatchKey(x.ticker)===liveWatchKey(ticker));
+}
+
+function liveBookmarkButtonHTML(ticker){
+ const saved=isLiveWatched(ticker);
+ return `<button class="bookmarkBtn ${saved?"saved":""}" data-live-bookmark="${ticker}" title="${saved?"Remove from watchlist":"Add to watchlist"}">${saved?"★":"☆"}</button>`;
+}
+
+function currentLiveWatchItem(x){
+ return {
+   ticker:x.ticker,
+   etf:currentSector||"—",
+   fast:x.fast?.quadrant||x.quadrant||"—",
+   trend:x.trend?.quadrant||"—",
+   tail:effectiveTailSignal(x)||x.tail_trajectory||"—"
+ };
+}
+
+function toggleLiveWatch(item){
+ if(!item||!item.ticker)return;
+ const key=liveWatchKey(item.ticker);
+ const i=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===key);
+ if(i>=0)liveWatchlist.splice(i,1);
+ else liveWatchlist.unshift(item);
+ saveLiveWatchlist();
+}
+
+function refreshLiveBookmarkButtons(){
+ document.querySelectorAll("[data-live-bookmark]").forEach(btn=>{
+   const saved=isLiveWatched(btn.dataset.liveBookmark);
+   btn.textContent=saved?"★":"☆";
+   btn.classList.toggle("saved",saved);
+   btn.title=saved?"Remove from watchlist":"Add to watchlist";
+ });
+}
+
+function renderLiveWatchlist(){
+ const rows=document.getElementById("liveWatchRows");
+ if(!rows)return;
+ if(!liveWatchlist.length){
+   rows.innerHTML=`<tr><td colspan="6"><span class="note">No saved tickers yet. Click ☆ beside a live RRG ticker.</span></td></tr>`;
+ }else{
+   rows.innerHTML=liveWatchlist.map(x=>`<tr>
+     <td><button class="bookmarkBtn saved" data-live-watch-remove="${x.ticker}" title="Remove">★</button></td>
+     <td><b>${x.ticker}</b></td>
+     <td>${x.etf||"—"}</td>
+     <td>${x.fast||"—"}</td>
+     <td>${x.trend||"—"}</td>
+     <td>${x.tail||"—"}</td>
+   </tr>`).join("");
+
+   document.querySelectorAll("[data-live-watch-remove]").forEach(btn=>btn.addEventListener("click",()=>{
+     const key=liveWatchKey(btn.dataset.liveWatchRemove);
+     liveWatchlist=liveWatchlist.filter(x=>liveWatchKey(x.ticker)!==key);
+     saveLiveWatchlist();
+   }));
+ }
+ const st=document.getElementById("liveWatchStatus");
+ if(st)st.textContent=`${liveWatchlist.length} saved`;
+}
 const quadColors={Leading:"#22c55e",Improving:"#38bdf8",Lagging:"#ef4444",Weakening:"#f59e0b"};
 function fmt(v,n=2){return(v==null||!isFinite(v))?"—":Number(v).toFixed(n)}
 function pct(v){return(v==null)?"—":(v>=0?"+":"")+fmt(v,2)+"%"}
@@ -2118,7 +2234,15 @@ function filteredLiveStocks(){
 function renderLiveStocks(){
  const data=filteredLiveStocks();
  drawRRG("stockChart",data);
- document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
+ document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr><td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
+
+ document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{
+   evt.stopPropagation();
+   const ticker=btn.dataset.liveBookmark;
+   const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);
+   if(x)toggleLiveWatch(currentLiveWatchItem(x));
+ }));
+ refreshLiveBookmarkButtons();
 }
 
 function alignBadge(a){
@@ -2334,7 +2458,11 @@ document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",renderLiveStocks);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",renderLiveStocks);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
+document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
+ liveWatchlist=[];
+ saveLiveWatchlist();
+});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();loadMarket(false);
 </script>
 """
 @app.get("/")
