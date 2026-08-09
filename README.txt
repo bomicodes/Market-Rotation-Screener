@@ -315,3 +315,12 @@ v17.5 — LIVE RRG CLICK-FOCUS FIX
 - Selected tail is slightly thicker/larger; all other displayed tails dim more strongly.
 - Clicking the selected ticker again clears focus and restores all tails normally.
 - Watchlist, filters, caching, and signal logic unchanged.
+
+v17.6 — SECTOR RRG CLICK-FOCUS FIX
+- Sector/Groups-vs-SPY table rows are now wired to RRG focus.
+- Clicking XLK (or any sector/theme row) highlights its full tail and dims all other displayed tails.
+- The same click still selects that ETF and loads its holdings, preserving existing workflow.
+- Clicking the selected sector again clears the RRG highlight.
+- Clicking the ticker directly on the sector RRG also focuses it and loads its holdings.
+- Sector table row highlighting stays synchronized with chart selection.
+- Live stock, Historical RRG, watchlist, filters, cache, and signals unchanged.

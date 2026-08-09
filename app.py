@@ -1256,6 +1256,10 @@ button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca
 .liveTickerRow{{cursor:pointer}}
 .liveTickerRow:hover{{background:rgba(59,130,246,.08)}}
 .liveTickerRow.selectedLiveRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
+
+.sectorTickerRow{{cursor:pointer}}
+.sectorTickerRow:hover{{background:rgba(59,130,246,.08)}}
+.sectorTickerRow.selectedSectorRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
 </style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
@@ -1654,7 +1658,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div id="internals" class="cards"></div>
   </div>
   <div class="grid2">
-    <div class="panel"><div class="row"><strong>Layer 1 · Groups vs SPY</strong>
+    <div class="panel"><div class="row"><strong>Layer 1 · Groups vs SPY</strong><span class="note">Click a sector row or chart ticker to focus it; click again to clear.</span>
 <select id="groupFilter"><option value="all">All</option><option value="core">Core sectors</option><option value="industry">Industries / themes</option></select>
 <span class="note">Fast RRG = 10/5 daily · Trend RRG = 25/12 daily</span></div><canvas id="sectorChart" width="900" height="540"></canvas></div>
     <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
@@ -2058,8 +2062,17 @@ function toggleRRGFocus(id,ticker){
  if(!state)return;
  const next=state.selected===ticker?null:ticker;
  drawRRG(id,state.rows,next);
+ if(id==="sectorChart")syncSectorRowSelection();
  if(id==="stockChart")syncLiveRowSelection();
  if(id==="historyChart")syncHistoricalRowSelection();
+}
+
+
+function syncSectorRowSelection(){
+ const selected=rrgFocusState["sectorChart"]?.selected||null;
+ document.querySelectorAll("[data-sector]").forEach(r=>{
+   r.classList.toggle("selectedSectorRow",selected===r.dataset.sector);
+ });
 }
 
 function syncLiveRowSelection(){
@@ -2105,6 +2118,14 @@ function installRRGInteractions(id){
    const ticker=hitTicker(evt);
    if(!ticker)return;
    toggleRRGFocus(id,ticker);
+   if(id==="sectorChart"){
+     syncSectorRowSelection();
+     currentSector=ticker;
+     document.getElementById("sectorTitle").textContent=ticker+" selected";
+     const sel=document.getElementById("coreSectorSelect");
+     if(sel && [...sel.options].some(o=>o.value===ticker))sel.value=ticker;
+     loadSector();
+   }
  });
 
  c.addEventListener("mousemove",evt=>{
@@ -2124,9 +2145,32 @@ function filteredGroups(){
  return sectorData.filter(x=>f==="all"||(f==="core"&&x.group==="Core Sector")||(f==="industry"&&x.group==="Industry / Theme"));
 }
 function renderGroups(){
- let data=filteredGroups(); drawRRG("sectorChart",data);
- document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
- document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",()=>{let t=el.dataset.sector;currentSector=t; document.getElementById("sectorTitle").textContent=t+" selected"; loadSector()}));
+ let data=filteredGroups();
+
+ // Clear sector focus if the selected ETF is hidden by the current group filter.
+ const sectorState=rrgFocusState["sectorChart"];
+ if(sectorState?.selected && !data.some(x=>x.ticker===sectorState.selected)){
+   sectorState.selected=null;
+ }
+
+ drawRRG("sectorChart",data);
+ document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow sectorTickerRow" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
+
+ document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",()=>{
+   const t=el.dataset.sector;
+
+   // Highlight/dim the sector RRG using the same toggle behavior as live/historical.
+   toggleRRGFocus("sectorChart",t);
+
+   // Preserve the original behavior: select the ETF and load its holdings.
+   currentSector=t;
+   document.getElementById("sectorTitle").textContent=t+" selected";
+   const sel=document.getElementById("coreSectorSelect");
+   if(sel && [...sel.options].some(o=>o.value===t))sel.value=t;
+   loadSector();
+ }));
+
+ syncSectorRowSelection();
 }
 
 async function auditHoldings(){
