@@ -1639,7 +1639,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
   </div>
   <div class="panel">
-    <div class="row"><strong>Stock screen</strong><span class="note">Tip: defaults to top 20 holdings. Filter by quadrant and Rotating In/Out to reduce clutter. Click a ticker to isolate its full tail.</span>
+    <div class="row"><strong>Stock screen</strong><span class="note">Tip: defaults to top 20 holdings. Search and filters update instantly from loaded data; returning to a previously loaded ETF/limit uses browser-session cache. Refresh forces a new pull.</span>
       <label class="note">ETF / group</label>
       <select id="coreSectorSelect">
         <option value="">Choose ETF…</option>
@@ -1691,6 +1691,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
         <option value="Rotating In">Rotating In ↗</option>
         <option value="Rotating Out">Rotating Out ↙</option>
       </select>
+      <label class="note">Search</label>
+      <input id="liveTickerSearch" type="search" placeholder="Ticker…" autocomplete="off" style="width:96px">
+
 
       <span id="sectorTitle" class="note">Choose a sector</span>
       
@@ -1753,6 +1756,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
         <option value="Rotating In">Rotating In ↗</option>
         <option value="Rotating Out">Rotating Out ↙</option>
       </select>
+      <label class="note">Search</label>
+      <input id="histTickerSearch" type="search" placeholder="Ticker…" autocomplete="off" style="width:96px">
+
       <label class="note">As of</label>
       <input type="date" id="histDate">
       <button id="histPrev">← Previous day</button>
@@ -1761,7 +1767,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <span id="histStatus" class="status"></span>
     </div>
     <div class="note" style="margin-top:9px">
-      The RRG is calculated only with price data available on or before the selected date. Historical stock mode defaults to top 20 holdings. Filter by quadrant and Rotating In/Out; matching names keep their full tails. Click a chart ticker or table row to isolate it. Forward returns never feed the historical signal.
+      The RRG is calculated only with price data available on or before the selected date. Historical stock mode defaults to top 20 holdings. Search/filters are instant; previously loaded Group/Stock, ETF, date and holdings-limit combinations repopulate from browser-session cache.
     </div>
   </div>
   <div class="grid2">
@@ -1780,7 +1786,11 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
 </div>
 <script>
-let sectorData=[],currentSector=null,earnResults=[];
+let sectorData=[],currentSector=null,earnResults=[],liveStockData=[];
+const clientCache={market:null,sectors:new Map(),historical:new Map()};
+function cacheKeySector(etf,limit){return `${etf}|${limit}`}
+function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
+
 const quadColors={Leading:"#22c55e",Improving:"#38bdf8",Lagging:"#ef4444",Weakening:"#f59e0b"};
 function fmt(v,n=2){return(v==null||!isFinite(v))?"—":Number(v).toFixed(n)}
 function pct(v){return(v==null)?"—":(v>=0?"+":"")+fmt(v,2)+"%"}
@@ -1988,16 +1998,55 @@ async function auditHoldings(){
    p.innerHTML=`<div class="scroll"><table><thead><tr><th>ETF</th><th>Holdings loaded</th><th>Source</th><th>Status</th></tr></thead><tbody>${j.results.map(x=>`<tr><td><b>${x.etf}</b><div class="tiny">${x.name}</div></td><td>${x.count}</td><td>${x.source}</td><td>${!x.ok?"⚠️ "+(x.error||"failed"):(x.partial?"⚠️ PARTIAL":"✓ FULL")}</td></tr>`).join("")}</tbody></table></div>`;
  }catch(e){p.innerHTML=`<span class="error">${e.message}</span>`}
 }
-async function loadMarket(force=false){
- let st=document.getElementById("mstatus");st.textContent="Updating…";
- try{let r=await fetch("/api/market"+(force?"?refresh=1":""));let j=await r.json();if(!j.ok)throw Error(j.error);sectorData=j.sectors;st.textContent=j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`;let i=j.internals;
- document.getElementById("internals").innerHTML=`<div class="card"><div class="tiny">SPY TREND</div><b>${pct(i.SPY.d5)}</b><div class="tiny">${pct(i.SPY.d20)} / 20d</div></div><div class="card"><div class="tiny">RSP/SPY · BREADTH</div><b>${pct(i.RSP.d5)}</b><div class="tiny">${pct(i.RSP.d20)} / 20d</div></div><div class="card"><div class="tiny">IWM/SPY</div><b>${pct(i.IWM.d5)}</b><div class="tiny">${pct(i.IWM.d20)} / 20d</div></div><div class="card"><div class="tiny">QQQ/SPY</div><b>${pct(i.QQQ.d5)}</b><div class="tiny">${pct(i.QQQ.d20)} / 20d</div></div><div class="card"><div class="tiny">PARTICIPATION</div><b>${j.participation}</b></div>`;
+function applyMarketPayload(j,fromCache=false){
+ sectorData=j.sectors||[];
+ const st=document.getElementById("mstatus");
+ st.textContent=fromCache?`Cached · through ${j.asof||"—"}`:(j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`);
+ const i=j.internals||{};
+ document.getElementById("internals").innerHTML=`<div class="card"><div class="tiny">SPY TREND</div><b>${pct(i.SPY?.d5)}</b><div class="tiny">${pct(i.SPY?.d20)} / 20d</div></div><div class="card"><div class="tiny">RSP/SPY · BREADTH</div><b>${pct(i.RSP?.d5)}</b><div class="tiny">${pct(i.RSP?.d20)} / 20d</div></div><div class="card"><div class="tiny">IWM/SPY</div><b>${pct(i.IWM?.d5)}</b><div class="tiny">${pct(i.IWM?.d20)} / 20d</div></div><div class="card"><div class="tiny">QQQ/SPY</div><b>${pct(i.QQQ?.d5)}</b><div class="tiny">${pct(i.QQQ?.d20)} / 20d</div></div><div class="card"><div class="tiny">PARTICIPATION</div><b>${j.participation||"—"}</b></div>`;
  renderGroups();
- }catch(e){st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`}}
-async function loadSector(){
- if(!currentSector)return;let st=document.getElementById("sstatus");st.textContent="Updating…";document.getElementById("sectorTitle").textContent=currentSector;
- try{let lim=document.getElementById("liveHoldingsLimit").value,r=await fetch(`/api/sector/${currentSector}?limit=${lim}`),j=await r.json();if(!j.ok)throw Error(j.error);st.textContent=(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;liveStockData=j.results||[];renderLiveStocks()}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
+}
 
+async function loadMarket(force=false){
+ const st=document.getElementById("mstatus");
+ if(!force&&clientCache.market){applyMarketPayload(clientCache.market,true);return}
+ st.textContent="Updating…";
+ try{
+   const r=await fetch("/api/market"+(force?"?refresh=1":""));
+   const j=await r.json();
+   if(!j.ok)throw Error(j.error);
+   clientCache.market=j;
+   applyMarketPayload(j,false);
+ }catch(e){
+   st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`;
+ }
+}
+
+function applySectorPayload(j,fromCache=false){
+ liveStockData=j.results||[];
+ const st=document.getElementById("sstatus");
+ st.textContent=(fromCache?"Cached · ":"")+(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;
+ renderLiveStocks();
+}
+
+async function loadSector(force=false){
+ if(!currentSector)return;
+ const st=document.getElementById("sstatus");
+ const lim=document.getElementById("liveHoldingsLimit").value;
+ const key=cacheKeySector(currentSector,lim);
+ document.getElementById("sectorTitle").textContent=currentSector;
+ if(!force&&clientCache.sectors.has(key)){applySectorPayload(clientCache.sectors.get(key),true);return}
+ st.textContent="Updating…";
+ try{
+   const r=await fetch(`/api/sector/${currentSector}?limit=${lim}`);
+   const j=await r.json();
+   if(!j.ok)throw Error(j.error);
+   clientCache.sectors.set(key,j);
+   applySectorPayload(j,false);
+ }catch(e){
+   st.innerHTML=`<span class="error">${e.message}</span>`;
+ }
+}
 
 
 function potentialTurnFromTail(x){
@@ -2057,10 +2106,12 @@ function tailBadge(x){
 function filteredLiveStocks(){
  const q=document.getElementById("liveQuadrantFilter")?.value||"all";
  const t=document.getElementById("liveTailFilter")?.value||"all";
+ const s=(document.getElementById("liveTickerSearch")?.value||"").trim().toUpperCase();
  return liveStockData.filter(x=>{
    const qok=q==="all"||x.quadrant===q;
    const tok=t==="all"||effectiveTailSignal(x)===t;
-   return qok&&tok;
+   const sok=!s||String(x.ticker||"").toUpperCase().includes(s)||String(x.name||"").toUpperCase().includes(s);
+   return qok&&tok&&sok;
  });
 }
 
@@ -2186,10 +2237,12 @@ function histPct(v){
 function filteredHistorical(){
  const q=document.getElementById("histQuadrantFilter")?.value||"all";
  const t=document.getElementById("histTailFilter")?.value||"all";
+ const s=(document.getElementById("histTickerSearch")?.value||"").trim().toUpperCase();
  return historicalData.filter(x=>{
    const qok=q==="all"||x.quadrant===q;
    const tok=t==="all"||effectiveTailSignal(x)===t;
-   return qok&&tok;
+   const sok=!s||String(x.ticker||"").toUpperCase().includes(s)||String(x.name||"").toUpperCase().includes(s);
+   return qok&&tok&&sok;
  });
 }
 
@@ -2214,13 +2267,27 @@ function renderHistorical(){
  }));
 }
 
-async function loadHistorical(){
+function applyHistoricalPayload(j,fromCache=false){
+ historicalData=j.results||[];
+ document.getElementById("histDate").value=j.asof;
+ document.getElementById("histTitle").textContent=`${j.asof} · ${j.source}`;
+ const st=document.getElementById("histStatus");
+ const detail=(j.mode==="stocks")
+   ?`${j.holdings_as_screened} of ${j.holdings_total} holdings · benchmark ${j.benchmark}`
+   :`${historicalData.length} groups · benchmark ${j.benchmark}`;
+ st.textContent=(fromCache?"Cached · ":"")+detail;
+ renderHistorical();
+}
+
+async function loadHistorical(force=false){
  const st=document.getElementById("histStatus");
  const mode=document.getElementById("histMode").value;
  const etf=document.getElementById("histETF").value;
  const date=document.getElementById("histDate").value;
  const limit=document.getElementById("histLimit").value;
  if(!date){st.innerHTML='<span class="error">Choose a date.</span>';return}
+ const key=cacheKeyHistory(mode,etf,date,limit);
+ if(!force&&clientCache.historical.has(key)){applyHistoricalPayload(clientCache.historical.get(key),true);return}
  st.textContent="Reconstructing point-in-time RRG…";
  try{
    const params=new URLSearchParams({mode,etf,date,limit});
@@ -2229,13 +2296,9 @@ async function loadHistorical(){
    let j;
    try{j=JSON.parse(raw)}catch(e){throw Error(`Unreadable historical response (${r.status})`)}
    if(!r.ok||!j.ok)throw Error(j.error||"Historical RRG failed");
-   historicalData=j.results||[];
-   document.getElementById("histDate").value=j.asof;
-   document.getElementById("histTitle").textContent=`${j.asof} · ${j.source}`;
-   st.textContent=(j.mode==="stocks")
-     ? `${j.holdings_as_screened} of ${j.holdings_total} holdings · benchmark ${j.benchmark}`
-     : `${historicalData.length} groups · benchmark ${j.benchmark}`;
-   renderHistorical();
+   clientCache.historical.set(key,j);
+   clientCache.historical.set(cacheKeyHistory(mode,etf,j.asof,limit),j);
+   applyHistoricalPayload(j,false);
  }catch(e){
    st.innerHTML=`<span class="error">${e.message}</span>`;
  }
@@ -2253,6 +2316,7 @@ function shiftHistDate(days){
 document.getElementById("runHistory").addEventListener("click",loadHistorical);
 document.getElementById("histQuadrantFilter").addEventListener("change",renderHistorical);
 document.getElementById("histTailFilter").addEventListener("change",renderHistorical);
+document.getElementById("histTickerSearch").addEventListener("input",renderHistorical);
 document.getElementById("histPrev").addEventListener("click",()=>shiftHistDate(-1));
 document.getElementById("histNext").addEventListener("click",()=>shiftHistDate(1));
 document.getElementById("histMode").addEventListener("change",()=>{
@@ -2260,14 +2324,17 @@ document.getElementById("histMode").addEventListener("change",()=>{
  document.getElementById("histETF").disabled=groups;
  document.getElementById("histLimit").disabled=groups;
  document.getElementById("histLimitLabel").style.opacity=groups?.45:1;
+ loadHistorical();
 });
+document.getElementById("histETF").addEventListener("change",loadHistorical);
+document.getElementById("histLimit").addEventListener("change",loadHistorical);
 document.getElementById("histETF").disabled=true;
 document.getElementById("histLimit").disabled=true;
 document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",renderLiveStocks);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
 </script>
 """
 @app.get("/")

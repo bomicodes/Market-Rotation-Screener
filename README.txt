@@ -271,3 +271,16 @@ v17.0 — POTENTIAL TURN
   next-day Improving/Lagging classification can appear.
 - Potential Turn is a watch signal, not the same as confirmed Rotating In.
 - Existing Rotating In / Rotating Out logic and all v16.9 features preserved.
+
+v17.1 — SEARCH + NO-RELOAD TOGGLING
+- Added ticker/company search to live stock RRG and Historical RRG.
+- Search, quadrant filters, and tail filters are local only and never refetch.
+- Browser-session cache stores:
+  * Market / Groups-vs-SPY payload
+  * Live ETF stock RRG by ETF + 20/50/All
+  * Historical RRG by mode + ETF + date + 20/50/All
+- Returning to an already loaded universe repopulates immediately.
+- Historical Group vs SPY <-> Stocks within ETF toggles reuse cached results.
+- Historical ETF and holdings-limit changes also reuse prior results when available.
+- Explicit Refresh buttons bypass cache.
+- Potential Turn / Rotating In / Rotating Out logic unchanged from v17.0.
