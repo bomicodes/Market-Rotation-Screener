@@ -1252,6 +1252,10 @@ button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca
   line-height:1;
 }}
 .bookmarkBtn.saved{{filter:brightness(1.2)}}
+
+.liveTickerRow{{cursor:pointer}}
+.liveTickerRow:hover{{background:rgba(59,130,246,.08)}}
+.liveTickerRow.selectedLiveRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
 </style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
@@ -1656,7 +1660,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
   </div>
   <div class="panel">
-    <div class="row"><strong>Stock screen</strong><span class="note">Tip: defaults to top 20 holdings. Search and filters update instantly from loaded data; returning to a previously loaded ETF/limit uses browser-session cache. Refresh forces a new pull.</span>
+    <div class="row"><strong>Stock screen</strong><span class="note">Tip: click a ticker row or chart label to focus it. All displayed tails stay visible; the others dim. Click the selected ticker again to clear. Search/filters use loaded data and cached universes repopulate instantly.</span>
       <label class="note">ETF / group</label>
       <select id="coreSectorSelect">
         <option value="">Choose ETF…</option>
@@ -1805,7 +1809,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   </div>
   <div class="grid2">
     <div class="panel">
-      <div class="row"><strong id="histTitle">Historical RRG</strong><span class="note">Click a ticker to isolate its tail.</span></div>
+      <div class="row"><strong id="histTitle">Historical RRG</strong><span class="note">Click a ticker row or chart label to focus it; all other displayed tails dim. Click again to clear.</span></div>
       <canvas id="historyChart" width="900" height="540"></canvas>
     </div>
     <div class="panel">
@@ -2046,6 +2050,21 @@ function drawRRG(id,rows){
  ctx.lineWidth=1;
 }
 
+
+function syncLiveRowSelection(){
+ const selected=rrgFocusState["stockChart"]?.selected||null;
+ document.querySelectorAll("[data-live-ticker]").forEach(r=>{
+   r.classList.toggle("selectedLiveRow",selected===r.dataset.liveTicker);
+ });
+}
+
+function syncHistoricalRowSelection(){
+ const selected=rrgFocusState["historyChart"]?.selected||null;
+ document.querySelectorAll("[data-hist-ticker]").forEach(r=>{
+   r.classList.toggle("selectedHistRow",selected===r.dataset.histTicker);
+ });
+}
+
 function installRRGInteractions(id){
  const c=document.getElementById(id);
  if(!c || c.dataset.rrgInteractive==="1")return;
@@ -2078,11 +2097,8 @@ function installRRGInteractions(id){
    state.selected=state.selected===ticker?null:ticker;
    drawRRG(id,state.rows);
 
-   if(id==="historyChart"){
-     document.querySelectorAll("[data-hist-ticker]").forEach(r=>{
-       r.classList.toggle("selectedHistRow",state.selected===r.dataset.histTicker);
-     });
-   }
+   if(id==="stockChart")syncLiveRowSelection();
+   if(id==="historyChart")syncHistoricalRowSelection();
  });
 
  c.addEventListener("mousemove",evt=>{
@@ -2233,16 +2249,36 @@ function filteredLiveStocks(){
 
 function renderLiveStocks(){
  const data=filteredLiveStocks();
- drawRRG("stockChart",data);
- document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr><td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
 
+ // If the selected ticker is no longer in the current filtered set, clear focus.
+ const stockState=rrgFocusState["stockChart"];
+ if(stockState?.selected && !data.some(x=>x.ticker===stockState.selected)){
+   stockState.selected=null;
+ }
+
+ drawRRG("stockChart",data);
+ document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}"><td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
+
+ // Bookmark click should NOT trigger row focus.
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{
    evt.stopPropagation();
    const ticker=btn.dataset.liveBookmark;
    const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);
    if(x)toggleLiveWatch(currentLiveWatchItem(x));
  }));
+
+ // Clicking anywhere else on a ticker row toggles chart focus.
+ document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
+   const ticker=row.dataset.liveTicker;
+   const state=rrgFocusState["stockChart"];
+   if(!state)return;
+   state.selected=state.selected===ticker?null:ticker;
+   drawRRG("stockChart",state.rows);
+   syncLiveRowSelection();
+ }));
+
  refreshLiveBookmarkButtons();
+ syncLiveRowSelection();
 }
 
 function alignBadge(a){
@@ -2372,6 +2408,13 @@ function filteredHistorical(){
 
 function renderHistorical(){
  const data=filteredHistorical();
+
+ // If selected ticker is filtered out, clear focus.
+ const histState=rrgFocusState["historyChart"];
+ if(histState?.selected && !data.some(x=>x.ticker===histState.selected)){
+   histState.selected=null;
+ }
+
  drawRRG("historyChart",data);
  document.getElementById("histRows").innerHTML=data.map((x,k)=>{
    let f=x.forward||{};
@@ -2384,11 +2427,10 @@ function renderHistorical(){
    if(!state)return;
    state.selected=state.selected===ticker?null:ticker;
    drawRRG("historyChart",state.rows);
-
-   document.querySelectorAll("[data-hist-ticker]").forEach(r=>{
-     r.classList.toggle("selectedHistRow",state.selected===r.dataset.histTicker);
-   });
+   syncHistoricalRowSelection();
  }));
+
+ syncHistoricalRowSelection();
 }
 
 function applyHistoricalPayload(j,fromCache=false){

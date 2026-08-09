@@ -297,3 +297,13 @@ v17.3 — LIVE-ONLY WATCHLIST
 - Saved fields: ticker, ETF, Fast quadrant, Trend quadrant, tail signal.
 - Clear-all and individual remove supported.
 - Historical RRG is unchanged and has no bookmark feature.
+
+v17.4 — LIVE + HISTORICAL ROW FOCUS
+- Live RRG table rows are now clickable.
+- Historical RRG table retains/standardizes the same click-to-focus behavior.
+- Clicking a ticker row or ticker on the RRG keeps ALL currently displayed tails on chart.
+- Non-selected tails dim; selected tail/label/endpoint are emphasized.
+- Clicking the selected ticker again clears focus and restores normal display.
+- Row highlighting stays synchronized with chart clicks.
+- Bookmark stars are isolated from row-click focus.
+- Filters, cache, watchlist, and all signal logic unchanged.
