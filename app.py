@@ -1202,6 +1202,109 @@ button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
 
+
+@app.get("/api/historical-rrg")
+def api_historical_rrg():
+    """
+    Point-in-time RRG replay. Every RRG value is calculated only from prices
+    available on or before the selected as-of date. Forward returns are
+    calculated separately and never feed the RRG signal.
+    """
+    try:
+        etf=request.args.get("etf","XLK").upper()
+        mode=request.args.get("mode","groups").lower()
+        date_raw=request.args.get("date")
+        if not date_raw:
+            return jsonify({"ok":False,"error":"Choose a historical date."}),400
+
+        target=pd.Timestamp(date_raw).normalize()
+        today=pd.Timestamp.now().normalize()
+        if target>today:
+            target=today
+
+        # Download enough history before the target for Trend RRG and enough
+        # future data for the optional forward-return panel.
+        start=(target-pd.Timedelta(days=550)).strftime("%Y-%m-%d")
+        end=(min(today+pd.Timedelta(days=1),target+pd.Timedelta(days=60))).strftime("%Y-%m-%d")
+
+        if mode=="groups":
+            benchmark="SPY"
+            members=list(RRG_UNIVERSE.keys())
+            names={**SECTORS,**INDUSTRIES}
+            source="Layer 1 groups vs SPY"
+        else:
+            if etf not in RRG_UNIVERSE:
+                return jsonify({"ok":False,"error":"Choose an ETF from the Layer-1 universe."}),400
+            benchmark=etf
+            holdings,holdings_source=cached(f"holdings:{etf}",lambda:get_fund_holdings(etf),ttl=3600)
+            members=[h["ticker"] for h in holdings]
+            names={h["ticker"]:h.get("name",h["ticker"]) for h in holdings}
+            source=f"{etf} holdings · {holdings_source}"
+
+        tickers=[benchmark]+members
+        raw=yf.download(tickers,start=start,end=end,auto_adjust=True,progress=False,threads=True)
+
+        if raw is None or raw.empty:
+            raise RuntimeError("No historical price data returned.")
+
+        if isinstance(raw.columns,pd.MultiIndex):
+            if "Close" in raw.columns.get_level_values(0):
+                prices=raw["Close"].copy()
+            elif "Adj Close" in raw.columns.get_level_values(0):
+                prices=raw["Adj Close"].copy()
+            else:
+                prices=raw.xs(raw.columns.levels[0][0],axis=1,level=0)
+        else:
+            prices=raw.copy()
+            if len(tickers)==1:
+                prices=pd.DataFrame({tickers[0]:prices["Close"]})
+
+        prices.index=pd.to_datetime(prices.index).tz_localize(None)
+        prices=prices.sort_index()
+
+        # Snap weekends/holidays to the last completed trading session.
+        eligible=prices.index[prices.index<=target]
+        if len(eligible)==0:
+            raise RuntimeError("No trading session exists on or before that date.")
+        asof=pd.Timestamp(eligible[-1]).normalize()
+
+        signal_prices=prices.loc[prices.index<=asof]
+        rows=dual_rrg_rows(signal_prices,benchmark,members,8,8)
+
+        # Point-in-time forward returns, kept separate from signal computation.
+        horizons=(1,5,10,20)
+        for r in rows:
+            t=r["ticker"]
+            r["name"]=names.get(t,t)
+            r["forward"]={}
+            if t not in prices.columns:
+                continue
+            s=prices[t].dropna()
+            hist=s[s.index<=asof]
+            fut=s[s.index>asof]
+            if hist.empty:
+                continue
+            base=float(hist.iloc[-1])
+            for h in horizons:
+                if len(fut)>=h:
+                    r["forward"][str(h)]=round((float(fut.iloc[h-1])/base-1)*100,2)
+                else:
+                    r["forward"][str(h)]=None
+
+        return jsonify({
+            "ok":True,
+            "requested_date":target.strftime("%Y-%m-%d"),
+            "asof":asof.strftime("%Y-%m-%d"),
+            "mode":mode,
+            "benchmark":benchmark,
+            "etf":etf,
+            "source":source,
+            "results":rows
+        })
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
 @app.get("/api/market")
 def api_market():
     try:
@@ -1469,6 +1572,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 <div class="tabs">
 <button class="tab active" data-view="rotation">Rotation Screen</button>
 <button class="tab" data-view="earnings">Post-Earnings Screen</button>
+<button class="tab" data-view="history">Historical RRG</button>
 </div>
 
 <div id="rotation" class="view active">
@@ -1484,7 +1588,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
   </div>
   <div class="panel">
-    <div class="row"><strong>Stock screen</strong>
+    <div class="row"><strong>Stock screen</strong><span class="note">Tip: right = stronger relative strength, up = stronger relative momentum. Click a ticker to isolate its tail; click again to clear.</span>
       <label class="note">ETF / group</label>
       <select id="coreSectorSelect">
         <option value="">Choose ETF…</option>
@@ -1541,6 +1645,43 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
   </div>
 </div>
+
+<div id="history" class="view">
+  <div class="panel">
+    <div class="row">
+      <strong>Historical RRG · point-in-time replay</strong>
+      <label class="note">View</label>
+      <select id="histMode">
+        <option value="groups">Groups vs SPY</option>
+        <option value="stocks">Stocks within ETF</option>
+      </select>
+      <label class="note">ETF</label>
+      <select id="histETF">""" + "".join([f'<option value="{k}">{k} · {v}</option>' for k,v in RRG_UNIVERSE.items()]) + r"""</select>
+      <label class="note">As of</label>
+      <input type="date" id="histDate">
+      <button id="histPrev">← Previous day</button>
+      <button class="primary" id="runHistory">Load</button>
+      <button id="histNext">Next day →</button>
+      <span id="histStatus" class="status"></span>
+    </div>
+    <div class="note" style="margin-top:9px">
+      The RRG is calculated only with price data available on or before the selected date. Forward returns are shown separately for study and never feed the historical signal. Weekends/holidays automatically snap to the prior trading session.
+    </div>
+  </div>
+  <div class="grid2">
+    <div class="panel">
+      <div class="row"><strong id="histTitle">Historical RRG</strong><span class="note">Click a ticker to isolate its tail.</span></div>
+      <canvas id="historyChart" width="900" height="540"></canvas>
+    </div>
+    <div class="panel">
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>Ticker</th><th>Fast</th><th>Trend</th><th>+1D</th><th>+5D</th><th>+10D</th><th>+20D</th></tr></thead>
+        <tbody id="histRows"></tbody>
+      </table></div>
+    </div>
+  </div>
+</div>
+
 </div>
 <script>
 let sectorData=[],currentSector=null,earnResults=[];
@@ -1549,15 +1690,185 @@ function fmt(v,n=2){return(v==null||!isFinite(v))?"—":Number(v).toFixed(n)}
 function pct(v){return(v==null)?"—":(v>=0?"+":"")+fmt(v,2)+"%"}
 function badge(q){return q?`<span class="badge ${q}">${q.toUpperCase()}</span>`:"—"}
 function dir(r){if(!r||!r.ticker)return"—";let s=`<span class="${r.rs_up?'up':'down'}">RS-Ratio ${r.rs_up?'↑':'↓'}</span> · <span class="${r.mom_up?'up':'down'}">RS-Momentum ${r.mom_up?'↑':'↓'}</span>`;if(r.l_to_i)s+=' <span class="flag">L→I</span>';if(r.early_turn)s+=' <span class="flag">EARLY TURN</span>';return s}
+const rrgFocusState={};
+
 function drawRRG(id,rows){
- const c=document.getElementById(id),ctx=c.getContext("2d"),W=c.width,H=c.height,p=42;ctx.clearRect(0,0,W,H);ctx.fillStyle="#0d1217";ctx.fillRect(0,0,W,H);
- if(!rows||!rows.length){ctx.fillStyle="#8b95a5";ctx.fillText("No data yet",p,p);return}
- let xs=[],ys=[];rows.forEach(r=>(r.tail||[]).forEach(pt=>{xs.push(pt.x);ys.push(pt.y)}));let xmin=Math.min(98,...xs)-.8,xmax=Math.max(102,...xs)+.8,ymin=Math.min(98,...ys)-.8,ymax=Math.max(102,...ys)+.8;
- const X=x=>p+(x-xmin)/(xmax-xmin)*(W-2*p),Y=y=>H-p-(y-ymin)/(ymax-ymin)*(H-2*p),cx=X(100),cy=Y(100);
- ctx.strokeStyle="#475569";ctx.beginPath();ctx.moveTo(cx,p);ctx.lineTo(cx,H-p);ctx.moveTo(p,cy);ctx.lineTo(W-p,cy);ctx.stroke();
- ctx.fillStyle="#64748b";ctx.font="10px sans-serif";ctx.fillText("IMPROVING",p+6,p+14);ctx.fillText("LEADING",W-p-50,p+14);ctx.fillText("LAGGING",p+6,H-p-8);ctx.fillText("WEAKENING",W-p-70,H-p-8);
- rows.forEach(r=>{let pts=r.tail||[];if(!pts.length)return;let color=quadColors[r.quadrant];ctx.strokeStyle=color;ctx.globalAlpha=.65;ctx.beginPath();pts.forEach((pt,j)=>{j?ctx.lineTo(X(pt.x),Y(pt.y)):ctx.moveTo(X(pt.x),Y(pt.y))});ctx.stroke();ctx.globalAlpha=1;let last=pts[pts.length-1];ctx.fillStyle=color;ctx.beginPath();ctx.arc(X(last.x),Y(last.y),5,0,Math.PI*2);ctx.fill();ctx.font="bold 11px sans-serif";ctx.fillText(r.ticker,X(last.x)+7,Y(last.y)-6)});
+ const c=document.getElementById(id),ctx=c.getContext("2d"),W=c.width,H=c.height,p=42;
+ rrgFocusState[id]=rrgFocusState[id]||{selected:null,rows:[],hits:[]};
+ const state=rrgFocusState[id];
+ state.rows=rows||[];
+ state.hits=[];
+
+ ctx.clearRect(0,0,W,H);
+ ctx.fillStyle="#0d1217";
+ ctx.fillRect(0,0,W,H);
+
+ if(!rows||!rows.length){
+   ctx.fillStyle="#8b95a5";
+   ctx.fillText("No data yet",p,p);
+   return;
+ }
+
+ let xs=[],ys=[];
+ rows.forEach(r=>(r.tail||[]).forEach(pt=>{xs.push(pt.x);ys.push(pt.y)}));
+ let xmin=Math.min(98,...xs)-.8,xmax=Math.max(102,...xs)+.8,
+     ymin=Math.min(98,...ys)-.8,ymax=Math.max(102,...ys)+.8;
+
+ const X=x=>p+(x-xmin)/(xmax-xmin)*(W-2*p),
+       Y=y=>H-p-(y-ymin)/(ymax-ymin)*(H-2*p),
+       cx=X(100),cy=Y(100);
+
+ ctx.strokeStyle="#475569";
+ ctx.lineWidth=1;
+ ctx.globalAlpha=1;
+ ctx.beginPath();
+ ctx.moveTo(cx,p);ctx.lineTo(cx,H-p);
+ ctx.moveTo(p,cy);ctx.lineTo(W-p,cy);
+ ctx.stroke();
+
+ ctx.fillStyle="#64748b";
+ ctx.font="10px sans-serif";
+ ctx.fillText("IMPROVING",p+6,p+14);
+ ctx.fillText("LEADING",W-p-50,p+14);
+ ctx.fillText("LAGGING",p+6,H-p-8);
+ ctx.fillText("WEAKENING",W-p-70,H-p-8);
+
+ // RRG axes: horizontal = relative strength, vertical = relative momentum.
+ ctx.save();
+ ctx.globalAlpha=.9;
+ ctx.fillStyle="#94a3b8";
+ ctx.font="bold 11px sans-serif";
+ ctx.textAlign="center";
+ ctx.fillText("RELATIVE STRENGTH (RS)  →",W/2,H-10);
+
+ ctx.translate(13,H/2);
+ ctx.rotate(-Math.PI/2);
+ ctx.fillText("RELATIVE MOMENTUM  →",0,0);
+ ctx.restore();
+
+ // Small direction cues around the 100/100 reference cross.
+ ctx.save();
+ ctx.fillStyle="#64748b";
+ ctx.font="9px sans-serif";
+ ctx.textAlign="left";
+ ctx.fillText("weaker RS",p+4,cy-7);
+ ctx.textAlign="right";
+ ctx.fillText("stronger RS",W-p-4,cy-7);
+ ctx.save();
+ ctx.translate(cx+9,p+30);
+ ctx.rotate(-Math.PI/2);
+ ctx.textAlign="right";
+ ctx.fillText("stronger momentum",0,0);
+ ctx.restore();
+ ctx.save();
+ ctx.translate(cx+9,H-p-28);
+ ctx.rotate(-Math.PI/2);
+ ctx.textAlign="left";
+ ctx.fillText("weaker momentum",0,0);
+ ctx.restore();
+ ctx.restore();
+
+ const selected=state.selected;
+
+ // Draw non-selected tails first so the selected path stays visually on top.
+ const ordered=selected
+   ? [...rows.filter(r=>r.ticker!==selected),...rows.filter(r=>r.ticker===selected)]
+   : rows;
+
+ ordered.forEach(r=>{
+   let pts=r.tail||[];
+   if(!pts.length)return;
+
+   const isSelected=selected===r.ticker;
+   const isFaded=selected && !isSelected;
+   const color=quadColors[r.quadrant];
+
+   ctx.strokeStyle=color;
+   ctx.lineWidth=isSelected?3.2:1.5;
+   ctx.globalAlpha=isFaded?.10:(isSelected?1:.65);
+   ctx.beginPath();
+   pts.forEach((pt,j)=>{
+     j?ctx.lineTo(X(pt.x),Y(pt.y)):ctx.moveTo(X(pt.x),Y(pt.y));
+   });
+   ctx.stroke();
+
+   let last=pts[pts.length-1],
+       ex=X(last.x),ey=Y(last.y);
+
+   ctx.globalAlpha=isFaded?.16:1;
+   ctx.fillStyle=color;
+   ctx.beginPath();
+   ctx.arc(ex,ey,isSelected?7:5,0,Math.PI*2);
+   ctx.fill();
+
+   const label=r.ticker;
+   ctx.font=isSelected?"bold 15px sans-serif":"bold 11px sans-serif";
+   const labelX=ex+(isSelected?10:7);
+   const labelY=ey-(isSelected?8:6);
+   const labelWidth=ctx.measureText(label).width;
+   ctx.globalAlpha=isFaded?.18:1;
+   ctx.fillStyle=color;
+   ctx.fillText(label,labelX,labelY);
+
+   // Make both the endpoint and ticker label clickable/tappable.
+   state.hits.push({
+     ticker:r.ticker,
+     x1:Math.min(ex-10,labelX-4),
+     y1:Math.min(ey-12,labelY-18),
+     x2:Math.max(ex+10,labelX+labelWidth+6),
+     y2:Math.max(ey+12,labelY+8)
+   });
+ });
+
+ ctx.globalAlpha=1;
+ ctx.lineWidth=1;
 }
+
+function installRRGInteractions(id){
+ const c=document.getElementById(id);
+ if(!c || c.dataset.rrgInteractive==="1")return;
+ c.dataset.rrgInteractive="1";
+
+ function canvasPoint(evt){
+   const rect=c.getBoundingClientRect();
+   const clientX=evt.touches?evt.touches[0].clientX:evt.clientX;
+   const clientY=evt.touches?evt.touches[0].clientY:evt.clientY;
+   return {
+     x:(clientX-rect.left)*(c.width/rect.width),
+     y:(clientY-rect.top)*(c.height/rect.height)
+   };
+ }
+
+ function hitTicker(evt){
+   const state=rrgFocusState[id];
+   if(!state)return null;
+   const pt=canvasPoint(evt);
+   // Reverse so visually top-most labels/endpoints win overlapping clicks.
+   return [...(state.hits||[])].reverse().find(h=>
+     pt.x>=h.x1&&pt.x<=h.x2&&pt.y>=h.y1&&pt.y<=h.y2
+   )?.ticker||null;
+ }
+
+ c.addEventListener("click",evt=>{
+   const ticker=hitTicker(evt);
+   if(!ticker)return;
+   const state=rrgFocusState[id];
+   state.selected=state.selected===ticker?null:ticker;
+   drawRRG(id,state.rows);
+ });
+
+ c.addEventListener("mousemove",evt=>{
+   c.style.cursor=hitTicker(evt)?"pointer":"default";
+ });
+
+ c.addEventListener("mouseleave",()=>{
+   c.style.cursor="default";
+ });
+}
+
+installRRGInteractions("sectorChart");
+installRRGInteractions("stockChart");
+installRRGInteractions("historyChart");
 function filteredGroups(){
  let f=document.getElementById("groupFilter")?.value||"all";
  return sectorData.filter(x=>f==="all"||(f==="core"&&x.group==="Core Sector")||(f==="industry"&&x.group==="Industry / Theme"));
@@ -1689,6 +2000,65 @@ async function runEarnings(){
    st.innerHTML=`<span class="error">${e.message}</span>`;
  }
 }
+
+let historicalData=[];
+
+function histPct(v){
+ if(v===null||v===undefined||Number.isNaN(Number(v)))return "—";
+ let n=Number(v);
+ return `<span class="${n>0?"pos":n<0?"neg":""}">${n>0?"+":""}${n.toFixed(2)}%</span>`;
+}
+
+function renderHistorical(){
+ drawRRG("historyChart",historicalData);
+ document.getElementById("histRows").innerHTML=historicalData.map((x,k)=>{
+   let f=x.forward||{};
+   return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${histPct(f["1"])}</td><td>${histPct(f["5"])}</td><td>${histPct(f["10"])}</td><td>${histPct(f["20"])}</td></tr>`;
+ }).join("");
+}
+
+async function loadHistorical(){
+ const st=document.getElementById("histStatus");
+ const mode=document.getElementById("histMode").value;
+ const etf=document.getElementById("histETF").value;
+ const date=document.getElementById("histDate").value;
+ if(!date){st.innerHTML='<span class="error">Choose a date.</span>';return}
+ st.textContent="Reconstructing point-in-time RRG…";
+ try{
+   const params=new URLSearchParams({mode,etf,date});
+   const r=await fetch(`/api/historical-rrg?${params.toString()}`);
+   const raw=await r.text();
+   let j;
+   try{j=JSON.parse(raw)}catch(e){throw Error(`Unreadable historical response (${r.status})`)}
+   if(!r.ok||!j.ok)throw Error(j.error||"Historical RRG failed");
+   historicalData=j.results||[];
+   document.getElementById("histDate").value=j.asof;
+   document.getElementById("histTitle").textContent=`${j.asof} · ${j.source}`;
+   st.textContent=`${historicalData.length} names · benchmark ${j.benchmark}`;
+   renderHistorical();
+ }catch(e){
+   st.innerHTML=`<span class="error">${e.message}</span>`;
+ }
+}
+
+function shiftHistDate(days){
+ const el=document.getElementById("histDate");
+ if(!el.value)return;
+ let d=new Date(el.value+"T12:00:00");
+ d.setDate(d.getDate()+days);
+ el.value=d.toISOString().slice(0,10);
+ loadHistorical();
+}
+
+document.getElementById("runHistory").addEventListener("click",loadHistorical);
+document.getElementById("histPrev").addEventListener("click",()=>shiftHistDate(-1));
+document.getElementById("histNext").addEventListener("click",()=>shiftHistDate(1));
+document.getElementById("histMode").addEventListener("change",()=>{
+ document.getElementById("histETF").disabled=document.getElementById("histMode").value==="groups";
+});
+document.getElementById("histETF").disabled=true;
+document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
+
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
 </script>

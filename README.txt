@@ -197,3 +197,27 @@ v16.2 — ALL HOLDINGS
 - Stock Screen now always scans all holdings returned by the best available source.
 - Backend default is also all holdings.
 - Earnings/history behavior remains unchanged from stable v16/v16.1.
+
+v16.3 — CLICK-TO-FOCUS RRG
+- Click/tap a ticker endpoint or label directly on either RRG chart.
+- Selected ticker tail is drawn thicker/brighter with a larger label/endpoint.
+- Other tails fade substantially so the selected path is easy to follow.
+- Clicking a different ticker switches focus immediately.
+- Clicking the selected ticker again clears focus and restores the full chart.
+- No holdings, earnings, or historical-mover logic changed from stable v16.2.
+
+v16.4 — RRG AXIS LABELS
+- Added Relative Strength (RS) label to the horizontal RRG axis.
+- Added Relative Momentum label to the vertical RRG axis.
+- Added small weaker/stronger directional cues around the 100/100 cross.
+- Click-to-focus interaction from v16.3 is unchanged.
+- Holdings, earnings, and historical-mover logic are unchanged.
+
+v16.5 — HISTORICAL RRG / BACKTEST MODE
+- Added a separate Historical RRG tab; live Rotation and Post-Earnings logic unchanged.
+- Pick an as-of date and reconstruct either Layer-1 groups vs SPY or stocks vs a selected ETF.
+- RRG calculations use only prices on or before the selected date (point-in-time signal).
+- Weekends/holidays snap to the previous trading session.
+- Previous/Next day controls allow manual replay through history.
+- +1D/+5D/+10D/+20D forward returns are calculated separately for study and do not feed the RRG.
+- Historical chart retains click-to-focus tails and RS/Momentum axis labels.
