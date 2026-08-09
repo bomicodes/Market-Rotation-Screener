@@ -221,3 +221,21 @@ v16.5 — HISTORICAL RRG / BACKTEST MODE
 - Previous/Next day controls allow manual replay through history.
 - +1D/+5D/+10D/+20D forward returns are calculated separately for study and do not feed the RRG.
 - Historical chart retains click-to-focus tails and RS/Momentum axis labels.
+
+v16.6 — HISTORICAL RRG USABILITY
+- Historical stock RRG defaults to top 20 ETF holdings.
+- Added Historical Holdings selector: 20 / 50 / All.
+- Holdings limit is applied before historical price downloads to reduce data load.
+- Historical table rows are clickable and use the same tail-focus behavior as chart clicks.
+- Clicking a row again clears focus; clicking another row switches focus.
+- Chart clicks and table-row highlight stay synchronized.
+- Groups-vs-SPY mode ignores/disables the holdings selector.
+
+v16.7 — MAIN ROTATION HOLDINGS LIMIT
+- Main Rotation Screen stock-level RRG now defaults to top 20 holdings.
+- Added live Holdings selector: 20 / 50 / All.
+- Limit is applied before the stock-level RRG download/calculation.
+- Changing the selector reloads the selected ETF/group automatically.
+- Layer 1 groups-vs-SPY RRG remains full/unlimited.
+- Historical mode keeps its separate 20 / 50 / All selector.
+- Click-to-focus, earnings, and historical-mover logic are unchanged.

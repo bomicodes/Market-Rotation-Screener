@@ -1198,6 +1198,11 @@ input,button{{width:100%;font:inherit;padding:13px;border-radius:10px;box-sizing
 input{{background:#0b0e11;color:#fff;border:1px solid #334155;margin:10px 0}}
 button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca5a5}}
 
+
+.histTickerRow{cursor:pointer}
+.histTickerRow:hover{background:rgba(59,130,246,.08)}
+.histTickerRow.selectedHistRow{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}
+
 </style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
@@ -1232,13 +1237,25 @@ def api_historical_rrg():
             members=list(RRG_UNIVERSE.keys())
             names={**SECTORS,**INDUSTRIES}
             source="Layer 1 groups vs SPY"
+            holdings_total=len(members)
+            holdings_as_screened=len(members)
         else:
             if etf not in RRG_UNIVERSE:
                 return jsonify({"ok":False,"error":"Choose an ETF from the Layer-1 universe."}),400
             benchmark=etf
             holdings,holdings_source=cached(f"holdings:{etf}",lambda:get_fund_holdings(etf),ttl=3600)
-            members=[h["ticker"] for h in holdings]
-            names={h["ticker"]:h.get("name",h["ticker"]) for h in holdings}
+
+            limit_raw=request.args.get("limit","20").lower()
+            if limit_raw=="all":
+                chosen=holdings
+            else:
+                limit=max(5,min(100,int(limit_raw)))
+                chosen=holdings[:limit]
+
+            members=[h["ticker"] for h in chosen]
+            names={h["ticker"]:h.get("name",h["ticker"]) for h in chosen}
+            holdings_total=len(holdings)
+            holdings_as_screened=len(chosen)
             source=f"{etf} holdings · {holdings_source}"
 
         tickers=[benchmark]+members
@@ -1299,6 +1316,8 @@ def api_historical_rrg():
             "benchmark":benchmark,
             "etf":etf,
             "source":source,
+            "holdings_total":holdings_total,
+            "holdings_as_screened":holdings_as_screened,
             "results":rows
         })
     except Exception as e:
@@ -1320,7 +1339,7 @@ def api_sector(etf):
     if etf not in RRG_UNIVERSE:
         return jsonify({"ok":False,"error":"Choose an ETF from the Layer-1 RRG universe."}),400
     try:
-        limit_raw=request.args.get("limit","all").lower()
+        limit_raw=request.args.get("limit","20").lower()
         limit=None if limit_raw=="all" else max(5,min(100,int(limit_raw)))
         force_holdings = request.args.get("refresh")=="1"
         holding_bundle, holdings_stale, holdings_refresh_error = cached_refresh_safe(
@@ -1588,7 +1607,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
   </div>
   <div class="panel">
-    <div class="row"><strong>Stock screen</strong><span class="note">Tip: right = stronger relative strength, up = stronger relative momentum. Click a ticker to isolate its tail; click again to clear.</span>
+    <div class="row"><strong>Stock screen</strong><span class="note">Tip: defaults to top 20 holdings; switch to 50 or All when needed. Right = stronger RS, up = stronger momentum. Click a ticker to isolate its tail.</span>
       <label class="note">ETF / group</label>
       <select id="coreSectorSelect">
         <option value="">Choose ETF…</option>
@@ -1618,6 +1637,13 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 <option value="TAN">TAN · Solar</option>
 <option value="PBW">PBW · Clean Energy</option>
       </select>
+      <label class="note">Holdings</label>
+      <select id="liveHoldingsLimit">
+        <option value="20" selected>20</option>
+        <option value="50">50</option>
+        <option value="all">All</option>
+      </select>
+
       <span id="sectorTitle" class="note">Choose a sector</span>
       
       <button id="refreshSector">Refresh</button><span id="sstatus" class="status"></span>
@@ -1657,6 +1683,12 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       </select>
       <label class="note">ETF</label>
       <select id="histETF">""" + "".join([f'<option value="{k}">{k} · {v}</option>' for k,v in RRG_UNIVERSE.items()]) + r"""</select>
+      <label class="note" id="histLimitLabel">Holdings</label>
+      <select id="histLimit">
+        <option value="20" selected>20</option>
+        <option value="50">50</option>
+        <option value="all">All</option>
+      </select>
       <label class="note">As of</label>
       <input type="date" id="histDate">
       <button id="histPrev">← Previous day</button>
@@ -1665,7 +1697,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <span id="histStatus" class="status"></span>
     </div>
     <div class="note" style="margin-top:9px">
-      The RRG is calculated only with price data available on or before the selected date. Forward returns are shown separately for study and never feed the historical signal. Weekends/holidays automatically snap to the prior trading session.
+      The RRG is calculated only with price data available on or before the selected date. Historical stock mode defaults to the top 20 ETF holdings to reduce noise and data usage; switch to 50 or All when needed. Click either a chart ticker or its table row to isolate the tail. Forward returns never feed the historical signal.
     </div>
   </div>
   <div class="grid2">
@@ -1855,6 +1887,12 @@ function installRRGInteractions(id){
    const state=rrgFocusState[id];
    state.selected=state.selected===ticker?null:ticker;
    drawRRG(id,state.rows);
+
+   if(id==="historyChart"){
+     document.querySelectorAll("[data-hist-ticker]").forEach(r=>{
+       r.classList.toggle("selectedHistRow",state.selected===r.dataset.histTicker);
+     });
+   }
  });
 
  c.addEventListener("mousemove",evt=>{
@@ -1894,7 +1932,7 @@ async function loadMarket(force=false){
  }catch(e){st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`}}
 async function loadSector(){
  if(!currentSector)return;let st=document.getElementById("sstatus");st.textContent="Updating…";document.getElementById("sectorTitle").textContent=currentSector;
- try{let r=await fetch(`/api/sector/${currentSector}?limit=all`),j=await r.json();if(!j.ok)throw Error(j.error);st.textContent=(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;drawRRG("stockChart",j.results);document.getElementById("stockRows").innerHTML=j.results.map((x,k)=>`<tr><td>${k+1}</td><td><b>${x.ticker}</b></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("")}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
+ try{let lim=document.getElementById("liveHoldingsLimit").value,r=await fetch(`/api/sector/${currentSector}?limit=${lim}`),j=await r.json();if(!j.ok)throw Error(j.error);st.textContent=(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;drawRRG("stockChart",j.results);document.getElementById("stockRows").innerHTML=j.results.map((x,k)=>`<tr><td>${k+1}</td><td><b>${x.ticker}</b></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("")}catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}}
 
 function alignBadge(a){
  if(!a)return "—";
@@ -2013,8 +2051,20 @@ function renderHistorical(){
  drawRRG("historyChart",historicalData);
  document.getElementById("histRows").innerHTML=historicalData.map((x,k)=>{
    let f=x.forward||{};
-   return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${histPct(f["1"])}</td><td>${histPct(f["5"])}</td><td>${histPct(f["10"])}</td><td>${histPct(f["20"])}</td></tr>`;
+   return `<tr class="clickrow histTickerRow" data-hist-ticker="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${histPct(f["1"])}</td><td>${histPct(f["5"])}</td><td>${histPct(f["10"])}</td><td>${histPct(f["20"])}</td></tr>`;
  }).join("");
+
+ document.querySelectorAll("[data-hist-ticker]").forEach(row=>row.addEventListener("click",()=>{
+   const ticker=row.dataset.histTicker;
+   const state=rrgFocusState["historyChart"];
+   if(!state)return;
+   state.selected=state.selected===ticker?null:ticker;
+   drawRRG("historyChart",state.rows);
+
+   document.querySelectorAll("[data-hist-ticker]").forEach(r=>{
+     r.classList.toggle("selectedHistRow",state.selected===r.dataset.histTicker);
+   });
+ }));
 }
 
 async function loadHistorical(){
@@ -2022,10 +2072,11 @@ async function loadHistorical(){
  const mode=document.getElementById("histMode").value;
  const etf=document.getElementById("histETF").value;
  const date=document.getElementById("histDate").value;
+ const limit=document.getElementById("histLimit").value;
  if(!date){st.innerHTML='<span class="error">Choose a date.</span>';return}
  st.textContent="Reconstructing point-in-time RRG…";
  try{
-   const params=new URLSearchParams({mode,etf,date});
+   const params=new URLSearchParams({mode,etf,date,limit});
    const r=await fetch(`/api/historical-rrg?${params.toString()}`);
    const raw=await r.text();
    let j;
@@ -2034,7 +2085,9 @@ async function loadHistorical(){
    historicalData=j.results||[];
    document.getElementById("histDate").value=j.asof;
    document.getElementById("histTitle").textContent=`${j.asof} · ${j.source}`;
-   st.textContent=`${historicalData.length} names · benchmark ${j.benchmark}`;
+   st.textContent=(j.mode==="stocks")
+     ? `${j.holdings_as_screened} of ${j.holdings_total} holdings · benchmark ${j.benchmark}`
+     : `${historicalData.length} groups · benchmark ${j.benchmark}`;
    renderHistorical();
  }catch(e){
    st.innerHTML=`<span class="error">${e.message}</span>`;
@@ -2054,13 +2107,18 @@ document.getElementById("runHistory").addEventListener("click",loadHistorical);
 document.getElementById("histPrev").addEventListener("click",()=>shiftHistDate(-1));
 document.getElementById("histNext").addEventListener("click",()=>shiftHistDate(1));
 document.getElementById("histMode").addEventListener("change",()=>{
- document.getElementById("histETF").disabled=document.getElementById("histMode").value==="groups";
+ const groups=document.getElementById("histMode").value==="groups";
+ document.getElementById("histETF").disabled=groups;
+ document.getElementById("histLimit").disabled=groups;
+ document.getElementById("histLimitLabel").style.opacity=groups?.45:1;
 });
 document.getElementById("histETF").disabled=true;
+document.getElementById("histLimit").disabled=true;
+document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("refreshSector").addEventListener("click",loadSector);document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadMarket(false);
 </script>
 """
 @app.get("/")
