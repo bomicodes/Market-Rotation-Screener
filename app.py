@@ -2015,7 +2015,7 @@ function drawRRG(id,rows,focusTicker=undefined){
    const color=quadColors[r.quadrant];
 
    ctx.strokeStyle=color;
-   ctx.lineWidth=isSelected?4.2:1.5;
+   ctx.lineWidth=1.5;
    ctx.globalAlpha=isFaded?.06:(isSelected?1:.72);
    ctx.beginPath();
    pts.forEach((pt,j)=>{
@@ -2029,11 +2029,11 @@ function drawRRG(id,rows,focusTicker=undefined){
    ctx.globalAlpha=isFaded?.16:1;
    ctx.fillStyle=color;
    ctx.beginPath();
-   ctx.arc(ex,ey,isSelected?8:5,0,Math.PI*2);
+   ctx.arc(ex,ey,5,0,Math.PI*2);
    ctx.fill();
 
    const label=r.ticker;
-   ctx.font=isSelected?"bold 17px sans-serif":"bold 11px sans-serif";
+   ctx.font="bold 11px sans-serif";
    const labelX=ex+(isSelected?10:7);
    const labelY=ey-(isSelected?8:6);
    const labelWidth=ctx.measureText(label).width;

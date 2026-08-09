@@ -324,3 +324,9 @@ v17.6 — SECTOR RRG CLICK-FOCUS FIX
 - Clicking the ticker directly on the sector RRG also focuses it and loads its holdings.
 - Sector table row highlighting stays synchronized with chart selection.
 - Live stock, Historical RRG, watchlist, filters, cache, and signals unchanged.
+
+v17.7 — SUBTLE RRG FOCUS
+- Selected ticker tail now keeps the same line thickness, endpoint size, and label size as default.
+- Focus is created primarily by dimming all other displayed tails.
+- Applies consistently to Sector, Live Stock, and Historical RRG charts.
+- All v17.6 click behavior, caching, filters, and watchlist unchanged.
