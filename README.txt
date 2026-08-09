@@ -239,3 +239,35 @@ v16.7 — MAIN ROTATION HOLDINGS LIMIT
 - Layer 1 groups-vs-SPY RRG remains full/unlimited.
 - Historical mode keeps its separate 20 / 50 / All selector.
 - Click-to-focus, earnings, and historical-mover logic are unchanged.
+
+v16.8 — SIMPLE TAIL TRAJECTORY + RRG FILTERS
+- Added Tail Trajectory to RRG rows using the most recent 3-point vector:
+    Rotating In = recent tail points northeast (RS and momentum both rising)
+    Rotating Out = recent tail points southwest (RS and momentum both falling)
+    Neutral = all other recent directions
+- Added quadrant filter to live stock RRG:
+    All / Leading / Improving / Weakening / Lagging
+- Added tail filter to live stock RRG:
+    All / Rotating In / Rotating Out
+- Added the same quadrant and tail filters to Historical RRG.
+- Filters use the ticker's current endpoint state, but the full tail remains visible.
+- Historical table and chart click-to-focus behavior is preserved.
+- Earnings and historical-mover logic remain unchanged.
+
+v16.9 — HISTORICAL FILTER VISIBILITY
+- Confirmed/added Historical RRG filters:
+    Quadrant: All / Leading / Improving / Weakening / Lagging
+    Tail: All / Rotating In / Rotating Out
+- Filters apply to both the Historical RRG chart and historical results table.
+- Matching names retain their full historical tail.
+- All v16.8 logic remains unchanged.
+
+v17.0 — POTENTIAL TURN
+- Adds Tail filter: Potential Turn 👀 to live RRG and Historical RRG.
+- Potential Turn is intentionally pre-confirmation:
+  endpoint is still Lagging, but the recent tail has made a meaningful hook
+  from prior deterioration into rightward / northeast improvement.
+- Designed to surface the PANW / CRWD / RBRK-style pattern before the
+  next-day Improving/Lagging classification can appear.
+- Potential Turn is a watch signal, not the same as confirmed Rotating In.
+- Existing Rotating In / Rotating Out logic and all v16.9 features preserved.
