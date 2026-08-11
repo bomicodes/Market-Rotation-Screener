@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.2"
+APP_VERSION = "18.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1342,56 +1342,70 @@ def login():
             session["authenticated"] = True
             return redirect("/")
         error = "Incorrect password."
-    return Response(f"""<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#0b0e11"><title>Market Rotation Screener</title>
+
+    html = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b0e11">
+<title>Market Rotation Screener</title>
 <style>
-body{{margin:0;background:#0b0e11;color:#e5e7eb;font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;place-items:center;min-height:100vh;padding:22px}}
-.box{{width:min(420px,100%);background:#12161b;border:1px solid #27303a;border-radius:16px;padding:22px}}
-h1{{font-size:20px;margin:0 0 8px}}p{{color:#8b95a5}}
-input,button{{width:100%;font:inherit;padding:13px;border-radius:10px;box-sizing:border-box}}
-input{{background:#0b0e11;color:#fff;border:1px solid #334155;margin:10px 0}}
-button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca5a5}}
-
-
-
-
-.potentialTurnBadge{
-  display:inline-block;
-  padding:3px 8px;
-  border-radius:999px;
-  border:1px solid rgba(255,255,255,.24);
-  font-size:11px;
-  font-weight:800;
-  letter-spacing:.03em;
-  white-space:nowrap;
+body {
+  margin: 0;
+  background: #0b0e11;
+  color: #e5e7eb;
+  font: 16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 22px;
 }
-
-.histFilterPair{{
-  display:inline-flex;
-  align-items:center;
-  gap:6px;
-  flex-wrap:nowrap;
-}}
-
-.bookmarkBtn{{
-  border:0;
-  background:transparent;
-  padding:2px 5px;
-  cursor:pointer;
-  font-size:18px;
-  line-height:1;
-}}
-.bookmarkBtn.saved{{filter:brightness(1.2)}}
-
-.liveTickerRow{{cursor:pointer}}
-.liveTickerRow:hover{{background:rgba(59,130,246,.08)}}
-.liveTickerRow.selectedLiveRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
-
-
-</style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
-<form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
-<button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
+.box {
+  width: min(420px,100%);
+  background: #12161b;
+  border: 1px solid #27303a;
+  border-radius: 16px;
+  padding: 22px;
+}
+h1 { font-size: 20px; margin: 0 0 8px; }
+p { color: #8b95a5; }
+input, button {
+  width: 100%;
+  font: inherit;
+  padding: 13px;
+  border-radius: 10px;
+  box-sizing: border-box;
+}
+input {
+  background: #0b0e11;
+  color: #fff;
+  border: 1px solid #334155;
+  margin: 10px 0;
+}
+button {
+  background: #1d4ed8;
+  color: #fff;
+  border: 0;
+  font-weight: 700;
+}
+.err { color: #fca5a5; }
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>Market Rotation Screener</h1>
+    <p>Enter your password to continue.</p>
+    __ERROR__
+    <form method="post">
+      <input type="password" name="password" placeholder="Password" autofocus>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>"""
+    err_html = f'<div class="err">{error}</div>' if error else ""
+    return Response(html.replace("__ERROR__", err_html), mimetype="text/html")
 
 @app.get("/api/historical-rrg")
 def api_historical_rrg():

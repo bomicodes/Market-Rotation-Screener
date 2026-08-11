@@ -366,3 +366,8 @@ v18.2 — LOGIN 500 FIX
 - Fixed CSS accidentally embedded in the login-page Python f-string.
 - Resolves Render traceback: NameError: name 'cursor' is not defined.
 - Preserves the live/historical RRG focus behavior, options module, and earnings-horizon fix.
+
+v18.3 — CLEAN LOGIN REBUILD
+- Replaced the entire login function/template with a clean non-f-string HTML template.
+- Eliminates all CSS-expression NameErrors in /login.
+- Preserves v18 options module, RRG behavior, caching, and earnings fixes.
