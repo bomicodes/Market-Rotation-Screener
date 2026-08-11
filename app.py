@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.3"
+APP_VERSION = "18.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1290,7 +1290,7 @@ def options_quality_payload(ticker):
 
 
 def market_payload():
-    tickers=["SPY","RSP","IWM","QQQ","^VIX","^TNX"]+list(RRG_UNIVERSE)
+    tickers=["SPY","RSP","IWM","QQQ","HYG","LQD","^VIX","^TNX"]+list(RRG_UNIVERSE)
     prices=dl_prices(tickers,"18mo")
     if "SPY" not in prices: raise RuntimeError("SPY data unavailable.")
     internals={}
@@ -1300,6 +1300,27 @@ def market_payload():
         pair=prices[["SPY",t]].dropna()
         ratio=pair[t]/pair["SPY"]
         internals[t]={"d5":pct_change(ratio,5),"d20":pct_change(ratio,20),"label":label}
+    # Credit risk appetite: high yield relative to investment grade.
+    if "HYG" in prices and "LQD" in prices:
+        credit_pair=prices[["HYG","LQD"]].dropna()
+        if len(credit_pair):
+            credit_ratio=credit_pair["HYG"]/credit_pair["LQD"]
+            internals["CREDIT"]={
+                "d5":pct_change(credit_ratio,5),
+                "d20":pct_change(credit_ratio,20),
+                "label":"HYG/LQD"
+            }
+
+    # Treasury context: 10-year yield level and short/medium trend.
+    if "^TNX" in prices:
+        tnx=prices["^TNX"].dropna()
+        if len(tnx):
+            internals["TNX"]={
+                "value":float(tnx.iloc[-1]),
+                "d5":pct_change(tnx,5),
+                "d20":pct_change(tnx,20),
+                "label":"10Y yield"
+            }
     if "^VIX" in prices:
         v=prices["^VIX"].dropna()
         internals["VIX"]={"value":float(v.iloc[-1]) if len(v) else None,"d5":pct_change(v,5)}
@@ -1310,12 +1331,30 @@ def market_payload():
         signals.append(1 if d5>0 and d20>0 else (-1 if d5<0 and d20<0 else 0))
     total=sum(signals)
     participation="Broadening" if total>=2 else ("Narrowing" if total<=-2 else "Mixed")
+
+    # Risk appetite is deliberately a context score, not an RRG input.
+    risk_components=[]
+    for t in ("RSP","IWM","QQQ"):
+        d5=(internals.get(t) or {}).get("d5")
+        if d5 is not None:
+            risk_components.append(1 if d5>0 else -1)
+    cd5=(internals.get("CREDIT") or {}).get("d5")
+    if cd5 is not None:
+        risk_components.append(1 if cd5>0 else -1)
+
+    risk_score=sum(risk_components)
+    if risk_score>=3:
+        risk_appetite="Risk-On"
+    elif risk_score<=-3:
+        risk_appetite="Risk-Off"
+    else:
+        risk_appetite="Mixed"
     rows=dual_rrg_rows(prices,"SPY",list(RRG_UNIVERSE),8,8)
     for r in rows:
         r["name"]=RRG_UNIVERSE.get(r["ticker"],r["ticker"])
         r["group"]="Core Sector" if r["ticker"] in SECTORS else "Industry / Theme"
         r["alignment"]=alignment_label(r.get("fast"), r.get("trend"))
-    return {"asof":prices.index.max().strftime("%Y-%m-%d"),"internals":internals,"participation":participation,"sectors":rows}
+    return {"asof":prices.index.max().strftime("%Y-%m-%d"),"internals":internals,"participation":participation,"risk_appetite":risk_appetite,"risk_score":risk_score,"sectors":rows}
 
 
 def auth_required():
@@ -1784,6 +1823,7 @@ def source_status():
         "ok": True,
         "finnhub_api_configured": bool(FINNHUB_API_KEY),
         "unusual_whales_api_configured": bool(UW_API_TOKEN),
+        "alpaca_api_configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
         "earnings_priority": ["Finnhub earnings calendar","Unusual Whales API (optional)","Yahoo earnings calendar","yfinance ticker history"]
     })
 
@@ -1859,7 +1899,13 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   <div class="panel">
     <div class="row"><strong>Market & sector screen</strong><button class="primary" id="refreshMarket">Refresh market</button><button id="auditHoldings">Audit holdings sources</button><span id="mstatus" class="status"></span></div>
     <div id="auditPanel" class="note" style="display:none;margin-top:10px"></div>
-    <div id="internals" class="cards"></div>
+    <div class="panel">
+      <div class="row">
+        <strong>Market Regime</strong>
+        <span id="regimeSummary" class="note">Loading…</span>
+      </div>
+      <div id="internals" class="cards"></div>
+    </div>
   </div>
   <div class="grid2">
     <div class="panel"><div class="row"><strong>Layer 1 · Groups vs SPY</strong><span class="note">Click a sector row or chart ticker to focus it; click again to clear.</span>
@@ -1938,6 +1984,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="row">
       <strong>Options · 7–30 DTE</strong>
       <span class="note">Alpaca indicative feed for screening; verify live OPRA in Webull before entry.</span>
+      <a href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="note">Get free Alpaca API key ↗</a>
       <label class="note">Type</label>
       <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
       <label class="note">Liquidity</label>
@@ -2406,7 +2453,24 @@ function applyMarketPayload(j,fromCache=false){
  const st=document.getElementById("mstatus");
  st.textContent=fromCache?`Cached · through ${j.asof||"—"}`:(j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`);
  const i=j.internals||{};
- document.getElementById("internals").innerHTML=`<div class="card"><div class="tiny">SPY TREND</div><b>${pct(i.SPY?.d5)}</b><div class="tiny">${pct(i.SPY?.d20)} / 20d</div></div><div class="card"><div class="tiny">RSP/SPY · BREADTH</div><b>${pct(i.RSP?.d5)}</b><div class="tiny">${pct(i.RSP?.d20)} / 20d</div></div><div class="card"><div class="tiny">IWM/SPY</div><b>${pct(i.IWM?.d5)}</b><div class="tiny">${pct(i.IWM?.d20)} / 20d</div></div><div class="card"><div class="tiny">QQQ/SPY</div><b>${pct(i.QQQ?.d5)}</b><div class="tiny">${pct(i.QQQ?.d20)} / 20d</div></div><div class="card"><div class="tiny">PARTICIPATION</div><b>${j.participation||"—"}</b></div>`;
+
+ const arrow=v=>v==null?"→":v>0?"↑":v<0?"↓":"→";
+ const tone=v=>v==null?"":v>0?"up":v<0?"down":"";
+ const valPct=v=>v==null?"—":pct(v);
+
+ const regime=document.getElementById("regimeSummary");
+ if(regime){
+   const score=j.risk_score==null?"—":`${Math.max(0,Math.min(4,Math.round((j.risk_score+4)/2)))}/4`;
+   regime.innerHTML=`<b>${j.risk_appetite||"Mixed"}</b> · Participation: <b>${j.participation||"—"}</b> · Risk support ${score}`;
+ }
+
+ document.getElementById("internals").innerHTML=`
+   <div class="card"><div class="tiny">SPY TREND</div><b>${valPct(i.SPY?.d5)}</b><div class="tiny">${valPct(i.SPY?.d20)} / 20d</div></div>
+   <div class="card"><div class="tiny">RSP/SPY · BREADTH</div><b>${arrow(i.RSP?.d5)} ${valPct(i.RSP?.d5)}</b><div class="tiny">${valPct(i.RSP?.d20)} / 20d</div></div>
+   <div class="card"><div class="tiny">IWM/SPY · SMALL CAPS</div><b>${arrow(i.IWM?.d5)} ${valPct(i.IWM?.d5)}</b><div class="tiny">${valPct(i.IWM?.d20)} / 20d</div></div>
+   <div class="card"><div class="tiny">QQQ/SPY · GROWTH</div><b>${arrow(i.QQQ?.d5)} ${valPct(i.QQQ?.d5)}</b><div class="tiny">${valPct(i.QQQ?.d20)} / 20d</div></div>
+   <div class="card"><div class="tiny">HYG/LQD · CREDIT</div><b>${arrow(i.CREDIT?.d5)} ${valPct(i.CREDIT?.d5)}</b><div class="tiny">${valPct(i.CREDIT?.d20)} / 20d</div></div>
+   <div class="card"><div class="tiny">10Y TREASURY YIELD</div><b>${i.TNX?.value==null?"—":fmt(i.TNX.value,2)+"%"}</b><div class="tiny">${arrow(i.TNX?.d5)} ${valPct(i.TNX?.d5)} / 5d · ${valPct(i.TNX?.d20)} / 20d</div></div>`;
  renderGroups();
 }
 

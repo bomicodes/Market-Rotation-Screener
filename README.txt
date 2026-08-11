@@ -371,3 +371,27 @@ v18.3 — CLEAN LOGIN REBUILD
 - Replaced the entire login function/template with a clean non-f-string HTML template.
 - Eliminates all CSS-expression NameErrors in /login.
 - Preserves v18 options module, RRG behavior, caching, and earnings fixes.
+
+v18.4 — MARKET REGIME + ALPACA SETUP
+
+MARKET REGIME
+- Existing RRG calculations are unchanged.
+- Added compact context cards:
+    SPY trend
+    RSP/SPY breadth
+    IWM/SPY small-cap participation
+    QQQ/SPY growth leadership
+    HYG/LQD credit risk appetite
+    10Y Treasury yield level + 5D/20D trend
+- Added context-only Risk Appetite label:
+    Risk-On / Mixed / Risk-Off
+  This does NOT feed into RRG calculations or ranking.
+
+ALPACA
+- Options module from v18 remains intact.
+- Added direct signup link in the Options panel.
+- Render variables are already defined in render.yaml:
+    APCA_API_KEY_ID
+    APCA_API_SECRET_KEY
+- The site works without keys; only Options/Scan options require them.
+- Free Alpaca indicative data is for screening only; verify live OPRA in Webull before entry.
