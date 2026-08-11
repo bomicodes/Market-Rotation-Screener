@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.1"
+APP_VERSION = "18.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1354,9 +1354,6 @@ input{{background:#0b0e11;color:#fff;border:1px solid #334155;margin:10px 0}}
 button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca5a5}}
 
 
-.histTickerRow{cursor:pointer}
-.histTickerRow:hover{background:rgba(59,130,246,.08)}
-.histTickerRow.selectedHistRow{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}
 
 
 .potentialTurnBadge{
@@ -1391,17 +1388,10 @@ button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca
 .liveTickerRow:hover{{background:rgba(59,130,246,.08)}}
 .liveTickerRow.selectedLiveRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
 
-.sectorTickerRow{{cursor:pointer}}
-.sectorTickerRow:hover{{background:rgba(59,130,246,.08)}}
-.sectorTickerRow.selectedSectorRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
 
-.optBadge{{display:inline-block;border:1px solid #334155;border-radius:999px;padding:2px 7px;font-size:11px;white-space:nowrap}}
-.optGood{{color:#86efac}} .optWarn{{color:#fde68a}} .optBad{{color:#fca5a5}}
-.optionsBtn{{padding:5px 8px;font-size:11px}}
 </style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
-
 
 @app.get("/api/historical-rrg")
 def api_historical_rrg():

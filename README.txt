@@ -361,3 +361,8 @@ v18.1 — SAFE STARTUP / RENDER HARDENING
 - Gunicorn timeout restored to 120 seconds.
 - Added server-side 500 logging to make any future Render traceback visible.
 - Preserves v18.0 options screen and DDOG/incomplete earnings-horizon fix.
+
+v18.2 — LOGIN 500 FIX
+- Fixed CSS accidentally embedded in the login-page Python f-string.
+- Resolves Render traceback: NameError: name 'cursor' is not defined.
+- Preserves the live/historical RRG focus behavior, options module, and earnings-horizon fix.
