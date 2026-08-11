@@ -10,11 +10,17 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
+APP_VERSION = "18.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
 UW_API_TOKEN = os.environ.get("UW_API_TOKEN", "").strip()
 FINNHUB_API_KEY = os.environ.get("FINNHUB_API_KEY", "").strip()
+ALPACA_API_KEY = os.environ.get("APCA_API_KEY_ID", os.environ.get("ALPACA_API_KEY", "")).strip()
+ALPACA_API_SECRET = os.environ.get("APCA_API_SECRET_KEY", os.environ.get("ALPACA_API_SECRET", "")).strip()
+ALPACA_TRADING_BASE_URL = os.environ.get("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
+ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
+
 
 SECTORS = {
     "XLK":"Technology",
@@ -1085,12 +1091,15 @@ def event_session_index(df, earnings_date):
     return int(pos)
 
 def abs_excursion(df, start_pos, days):
+    # Require the full post-event trading-session window.
     if start_pos is None or start_pos <= 0 or start_pos >= len(df):
         return None
+    if start_pos + days > len(df):
+        return None
     base = float(df["Close"].iloc[start_pos-1])
-    end = min(len(df), start_pos+days)
-    if end <= start_pos: return None
-    seg = df.iloc[start_pos:end]
+    seg = df.iloc[start_pos:start_pos+days]
+    if len(seg) < days:
+        return None
     hi = float(seg["High"].max())
     lo = float(seg["Low"].min())
     up = (hi/base-1)*100
@@ -1118,9 +1127,11 @@ def earnings_profile(ticker, dates):
             row[f"exc{n}"]=abs_excursion(df,pos,n)
         if row["exc1"] is not None:
             events.append(row)
-    # Use up to last 8 completed events, avoiding the current one if insufficient future days.
+    # Stats use only fully completed 14D events. The detail table can still show
+    # recent incomplete events with unfinished horizons as —.
     completed=[e for e in events if e["exc14"] is not None]
     hist=completed[-8:]
+    display_events=events[-8:]
     if len(hist)<3:
         return None
     def med(key):
@@ -1152,8 +1163,131 @@ def earnings_profile(ticker, dates):
         "median_exc5":round(med("exc5") or 0,2),"median_exc10":round(m10,2),
         "median_exc14":round(med("exc14") or 0,2),
         "pct_gt5_10d":round(pct5 or 0,1),"pct_gt10_14d":round(pct10 or 0,1),
-        "behavior":behavior,"events":list(reversed(hist))
+        "behavior":behavior,"events":list(reversed(display_events))
     }
+
+def alpaca_headers():
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        raise RuntimeError("Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY to Render.")
+    return {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_API_SECRET,"Accept":"application/json"}
+
+def _safe_float(v):
+    try:
+        if v is None or v=="": return None
+        return float(v)
+    except Exception:
+        return None
+
+def realized_vol_20d(ticker):
+    df=dl_ohlc(ticker,"3mo")
+    c=df["Close"].dropna()
+    if not len(c): return None,None
+    spot=float(c.iloc[-1])
+    if len(c)<22: return None,spot
+    ret=np.log(c/c.shift(1)).dropna().tail(20)
+    return float(ret.std(ddof=1)*np.sqrt(252)),spot
+
+def alpaca_option_contracts(ticker,start_date,end_date):
+    url=f"{ALPACA_TRADING_BASE_URL}/v2/options/contracts"
+    params={"underlying_symbols":ticker,"expiration_date_gte":start_date,"expiration_date_lte":end_date,"status":"active","limit":1000}
+    rows=[]; token=None
+    for _ in range(4):
+        if token: params["page_token"]=token
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+        if r.status_code in (401,403):
+            raise RuntimeError("Alpaca contract access was rejected. Check API credentials/account permissions.")
+        r.raise_for_status()
+        j=r.json() or {}
+        rows.extend(j.get("option_contracts") or [])
+        token=j.get("next_page_token") or j.get("page_token")
+        if not token: break
+    return rows
+
+def alpaca_option_chain(ticker,start_date,end_date,spot):
+    url=f"{ALPACA_DATA_BASE_URL}/v1beta1/options/snapshots/{ticker}"
+    params={
+        "feed":"indicative","expiration_date_gte":start_date,"expiration_date_lte":end_date,
+        "strike_price_gte":round(max(.01,spot*.75),2),"strike_price_lte":round(spot*1.25,2),"limit":1000
+    }
+    out={}; token=None
+    for _ in range(4):
+        if token: params["page_token"]=token
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+        if r.status_code in (401,403):
+            raise RuntimeError("Alpaca indicative option-chain access was rejected. Check API credentials.")
+        if r.status_code==429: raise RuntimeError("Alpaca rate limit reached. Try again shortly.")
+        r.raise_for_status()
+        j=r.json() or {}
+        part=j.get("snapshots") or {}
+        if isinstance(part,dict): out.update(part)
+        token=j.get("next_page_token")
+        if not token: break
+    return out
+
+def option_contract_row(symbol,snap,meta,spot):
+    q=(snap or {}).get("latestQuote") or (snap or {}).get("latest_quote") or {}
+    t=(snap or {}).get("latestTrade") or (snap or {}).get("latest_trade") or {}
+    dbar=(snap or {}).get("dailyBar") or (snap or {}).get("daily_bar") or {}
+    g=(snap or {}).get("greeks") or {}
+    bid=_safe_float(q.get("bp",q.get("bid_price"))); ask=_safe_float(q.get("ap",q.get("ask_price")))
+    last=_safe_float(t.get("p",t.get("price"))); vol=_safe_float(dbar.get("v",dbar.get("volume"))) or 0
+    iv=_safe_float((snap or {}).get("impliedVolatility",(snap or {}).get("implied_volatility")))
+    oi=_safe_float((meta or {}).get("open_interest")) or 0
+    strike=_safe_float((meta or {}).get("strike_price"))
+    mid=spread=None
+    if bid is not None and ask is not None and bid>=0 and ask>=bid and bid+ask>0:
+        mid=(bid+ask)/2
+        if mid>0: spread=(ask-bid)/mid*100
+    moneyness=(strike/spot-1)*100 if strike and spot else None
+    if oi>=500 and vol>=100 and spread is not None and spread<=10: liq="Liquid"
+    elif oi>=100 and vol>=25 and spread is not None and spread<=15: liq="Tradable"
+    else: liq="Thin"
+    return {
+        "symbol":symbol,"type":(meta or {}).get("type"),"expiration":(meta or {}).get("expiration_date"),
+        "strike":strike,"bid":bid,"ask":ask,"mid":mid,"last":last,"volume":int(vol),"open_interest":int(oi),
+        "iv":(iv*100 if iv is not None and iv<=5 else iv),"delta":_safe_float(g.get("delta")),
+        "gamma":_safe_float(g.get("gamma")),"theta":_safe_float(g.get("theta")),"vega":_safe_float(g.get("vega")),
+        "spread_pct":spread,"moneyness_pct":moneyness,"liquidity":liq
+    }
+
+def options_quality_payload(ticker):
+    ticker=ticker.upper().strip()
+    today=pd.Timestamp.now().normalize()
+    start=(today+pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    end=(today+pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    rv20,spot=realized_vol_20d(ticker)
+    if spot is None: raise RuntimeError(f"Could not determine current price for {ticker}.")
+    contracts=alpaca_option_contracts(ticker,start,end)
+    meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+    snaps=alpaca_option_chain(ticker,start,end,spot)
+    rows=[]
+    for sym,snap in snaps.items():
+        if sym not in meta: continue
+        r=option_contract_row(sym,snap,meta[sym],spot)
+        if r["expiration"] and r["moneyness_pct"] is not None and abs(r["moneyness_pct"])<=20: rows.append(r)
+    ivrows=[r for r in rows if r["iv"] is not None and abs(r["moneyness_pct"])<=8 and (r["delta"] is None or .20<=abs(r["delta"])<=.80)]
+    atm_iv=float(np.median([r["iv"] for r in ivrows])) if ivrows else None
+    rv_pct=rv20*100 if rv20 is not None else None
+    ratio=atm_iv/rv_pct if atm_iv is not None and rv_pct and rv_pct>0 else None
+    if ratio is None: ivstate="Unknown"
+    elif ratio<.90: ivstate="Cheap / Crushed"
+    elif ratio<1.25: ivstate="Normal"
+    elif ratio<1.60: ivstate="Elevated"
+    else: ivstate="Juiced"
+    liquid=sum(r["liquidity"]=="Liquid" for r in rows)
+    tradable=sum(r["liquidity"] in ("Liquid","Tradable") for r in rows)
+    liq="Liquid" if liquid>=3 else ("Tradable" if tradable>=3 else "Thin")
+    rank={"Liquid":0,"Tradable":1,"Thin":2}
+    rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
+    return {
+        "ticker":ticker,"spot":round(spot,2),"dte_min":7,"dte_max":30,"feed":"Alpaca indicative",
+        "rv20":round(rv_pct,1) if rv_pct is not None else None,
+        "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
+        "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
+        "iv_state":ivstate,"liquidity":liq,"liquid_contracts":liquid,"tradable_contracts":tradable,
+        "contracts_checked":len(rows),"contracts":rows[:120]
+    }
+
 
 def market_payload():
     tickers=["SPY","RSP","IWM","QQQ","^VIX","^TNX"]+list(RRG_UNIVERSE)
@@ -1260,6 +1394,10 @@ button{{background:#1d4ed8;color:#fff;border:0;font-weight:700}}.err{{color:#fca
 .sectorTickerRow{{cursor:pointer}}
 .sectorTickerRow:hover{{background:rgba(59,130,246,.08)}}
 .sectorTickerRow.selectedSectorRow{{background:rgba(59,130,246,.16);outline:1px solid rgba(96,165,250,.35)}}
+
+.optBadge{{display:inline-block;border:1px solid #334155;border-radius:999px;padding:2px 7px;font-size:11px;white-space:nowrap}}
+.optGood{{color:#86efac}} .optWarn{{color:#fde68a}} .optBad{{color:#fca5a5}}
+.optionsBtn{{padding:5px 8px;font-size:11px}}
 </style></head><body><div class="box"><h1>Market Rotation Screener</h1><p>Enter your screener password.</p>
 <form method="post"><input type="password" name="password" autocomplete="current-password" autofocus>
 <button type="submit">Open Screener</button></form><div class="err">{error}</div></div></body></html>""", mimetype="text/html")
@@ -1377,6 +1515,44 @@ def api_historical_rrg():
             "holdings_as_screened":holdings_as_screened,
             "results":rows
         })
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
+@app.get("/api/options/<ticker>")
+def api_options(ticker):
+    try:
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"options-v18:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+@app.post("/api/options-scan")
+def api_options_scan():
+    try:
+        body=request.get_json(silent=True) or {}
+        symbols=[]
+        for s in body.get("symbols",[]):
+            s=str(s).upper().strip()
+            if s and s not in symbols: symbols.append(s)
+        symbols=symbols[:25]
+        if not symbols: return jsonify({"ok":False,"error":"No symbols supplied."}),400
+        if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+            return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
+        def one(sym):
+            try:
+                p,stale,err=cached_refresh_safe(f"options-v18:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                return {"ok":True,**p,"stale":stale}
+            except Exception as e:
+                return {"ok":False,"ticker":sym,"error":str(e)}
+        results=[]
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs=[ex.submit(one,s) for s in symbols]
+            for f in as_completed(futs): results.append(f.result())
+        order={s:i for i,s in enumerate(symbols)}
+        results.sort(key=lambda x:order.get(x.get("ticker"),999))
+        return jsonify({"ok":True,"results":results})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
@@ -1522,7 +1698,7 @@ def api_earnings_history(ticker):
     ticker = ticker.upper().strip()
     try:
         event_date = request.args.get("event_date")
-        cache_key = f"earnings-profile-v16:{ticker}:{event_date or 'latest'}"
+        cache_key = f"earnings-profile-v18:{ticker}:{event_date or 'latest'}"
 
         def build():
             dates = merged_historical_earnings_dates(ticker, event_date)
@@ -1558,7 +1734,27 @@ def api_earnings_history(ticker):
 
 @app.get("/health")
 def health():
-    return jsonify({"ok":True,"unusual_whales_api_configured":bool(UW_API_TOKEN),"finnhub_api_configured":bool(FINNHUB_API_KEY)})
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "alpaca_api_configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
+        "finnhub_api_configured": bool(FINNHUB_API_KEY),
+        "unusual_whales_api_configured": bool(UW_API_TOKEN),
+    })
+
+
+@app.get("/api/diagnostics")
+def api_diagnostics():
+    return jsonify({
+        "ok": True,
+        "version": APP_VERSION,
+        "alpaca": {
+            "configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
+            "feed": "indicative",
+            "dte": "7-30"
+        },
+        "startup_network_calls": False
+    })
 
 
 @app.get("/api/holdings-audit")
@@ -1641,6 +1837,10 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   button{touch-action:manipulation}
 }
 
+
+.optBadge{display:inline-block;border:1px solid #334155;border-radius:999px;padding:2px 7px;font-size:11px;white-space:nowrap}
+.optGood{color:#86efac}.optWarn{color:#fde68a}.optBad{color:#fca5a5}
+.optionsBtn{padding:5px 8px;font-size:11px}
 </style>
 <div class="wrap">
 <h1>Market Rotation Screener</h1>
@@ -1722,12 +1922,29 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
       <span id="sectorTitle" class="note">Choose a sector</span>
       
-      <button id="refreshSector">Refresh</button><span id="sstatus" class="status"></span>
+      <button id="refreshSector">Refresh</button><button id="scanOptions">Scan options</button><span id="sstatus" class="status"></span>
     </div>
   </div>
   <div class="grid2">
     <div class="panel"><canvas id="stockChart" width="900" height="540"></canvas></div>
-    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Alignment</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+  </div>
+
+  <div class="panel" id="optionsPanel">
+    <div class="row">
+      <strong>Options · 7–30 DTE</strong>
+      <span class="note">Alpaca indicative feed for screening; verify live OPRA in Webull before entry.</span>
+      <label class="note">Type</label>
+      <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
+      <label class="note">Liquidity</label>
+      <select id="optLiquidityFilter"><option value="all">Any</option><option value="Tradable">Tradable+</option><option value="Liquid">Liquid only</option></select>
+      <span id="optionsStatus" class="status"></span>
+    </div>
+    <div id="optionsSummary" class="cards"></div>
+    <div class="scroll"><table>
+      <thead><tr><th>Contract</th><th>DTE</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
+      <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Options on a live ticker, or Scan options to score displayed names.</td></tr></tbody>
+    </table></div>
   </div>
 
   <div class="panel">
@@ -2297,34 +2514,68 @@ function filteredLiveStocks(){
  });
 }
 
+
+let optionScanMap={},activeOptionsData=null;
+
+function optionBadgeHTML(x){
+ if(!x)return '<span class="optBadge">Check</span>';
+ if(x.error||x.ok===false)return '<span class="optBadge optBad">Error</span>';
+ const liq=x.liquidity||"—",cls=liq==="Liquid"?"optGood":liq==="Tradable"?"optWarn":"optBad";
+ return `<span class="optBadge ${cls}">${liq}</span><div class="tiny">${x.iv_state||"—"}</div>`;
+}
+function dteFromExpiration(exp){
+ if(!exp)return null;const a=new Date(exp+"T12:00:00"),b=new Date();
+ return Math.max(0,Math.round((a-b)/86400000));
+}
+function renderOptionsPanel(){
+ const sum=document.getElementById("optionsSummary"),body=document.getElementById("optionsRows"),st=document.getElementById("optionsStatus");
+ if(!activeOptionsData){sum.innerHTML="";return}
+ const x=activeOptionsData;st.textContent=`${x.ticker} · ${x.feed||""}`;
+ sum.innerHTML=`<div class="card"><div class="tiny">UNDERLYING</div><b>${x.ticker} · $${fmt(x.spot,2)}</b></div>
+ <div class="card"><div class="tiny">LIQUIDITY</div><b>${x.liquidity}</b><div class="tiny">${x.liquid_contracts} liquid · ${x.tradable_contracts} tradable</div></div>
+ <div class="card"><div class="tiny">ATM IV</div><b>${x.atm_iv==null?"—":fmt(x.atm_iv,1)+"%"}</b><div class="tiny">${x.iv_state}</div></div>
+ <div class="card"><div class="tiny">20D REALIZED VOL</div><b>${x.rv20==null?"—":fmt(x.rv20,1)+"%"}</b><div class="tiny">IV/RV ${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</div></div>`;
+ const typ=document.getElementById("optTypeFilter").value,lf=document.getElementById("optLiquidityFilter").value,rank={Thin:0,Tradable:1,Liquid:2};
+ const rows=(x.contracts||[]).filter(r=>(typ==="all"||r.type===typ)&&(lf==="all"||(lf==="Tradable"&&rank[r.liquidity]>=1)||(lf==="Liquid"&&r.liquidity==="Liquid"))).slice(0,60);
+ body.innerHTML=rows.length?rows.map(r=>`<tr><td><b>${r.symbol}</b><div class="tiny">${r.type||""}</div></td>
+ <td>${dteFromExpiration(r.expiration)??"—"}</td><td>${r.strike==null?"—":"$"+fmt(r.strike,2)}<div class="tiny">${r.moneyness_pct==null?"":fmt(r.moneyness_pct,1)+"%"}</div></td>
+ <td>${r.bid==null?"—":"$"+fmt(r.bid,2)}</td><td>${r.ask==null?"—":"$"+fmt(r.ask,2)}</td><td>${r.spread_pct==null?"—":fmt(r.spread_pct,1)+"%"}</td>
+ <td>${r.volume??0}</td><td>${r.open_interest??0}</td><td>${r.iv==null?"—":fmt(r.iv,1)+"%"}</td><td>${r.delta==null?"—":fmt(r.delta,2)}</td>
+ <td>${optionBadgeHTML({liquidity:r.liquidity,iv_state:""})}</td></tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
+}
+async function loadOptionsTicker(ticker){
+ const st=document.getElementById("optionsStatus");st.textContent=`Loading ${ticker} options…`;
+ try{
+   const r=await fetch(`/api/options/${encodeURIComponent(ticker)}`),j=await r.json();
+   if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
+   activeOptionsData=j;optionScanMap[ticker]=j;renderOptionsPanel();renderLiveStocks();
+ }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
+}
+async function scanVisibleOptions(){
+ const symbols=filteredLiveStocks().slice(0,25).map(x=>x.ticker),st=document.getElementById("optionsStatus"),btn=document.getElementById("scanOptions");
+ if(!symbols.length){st.textContent="No live tickers to scan.";return}
+ st.textContent=`Scanning ${symbols.length} tickers…`;btn.disabled=true;
+ try{
+   const r=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols})}),j=await r.json();
+   if(!r.ok||!j.ok)throw Error(j.error||"Options scan failed");
+   (j.results||[]).forEach(x=>optionScanMap[x.ticker]=x);
+   st.textContent=`Options scan complete · ${symbols.length} tickers`;renderLiveStocks();
+ }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}finally{btn.disabled=false}
+}
+
 function renderLiveStocks(){
  const data=filteredLiveStocks();
-
- // If the selected ticker is no longer in the current filtered set, clear focus.
  const stockState=rrgFocusState["stockChart"];
- if(stockState?.selected && !data.some(x=>x.ticker===stockState.selected)){
-   stockState.selected=null;
- }
-
+ if(stockState?.selected&&!data.some(x=>x.ticker===stockState.selected))stockState.selected=null;
  drawRRG("stockChart",data);
- document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}"><td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
-
- // Bookmark click should NOT trigger row focus.
- document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{
-   evt.stopPropagation();
-   const ticker=btn.dataset.liveBookmark;
-   const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);
-   if(x)toggleLiveWatch(currentLiveWatchItem(x));
- }));
-
- // Clicking anywhere else on a ticker row toggles chart focus.
- document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
-   const ticker=row.dataset.liveTicker;
-   toggleRRGFocus("stockChart",ticker);
- }));
-
- refreshLiveBookmarkButtons();
- syncLiveRowSelection();
+ document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
+ <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
+ <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td>
+ <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Options</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
+ document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
+ document.querySelectorAll("[data-options-ticker]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();loadOptionsTicker(btn.dataset.optionsTicker)}));
+ document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>toggleRRGFocus("stockChart",row.dataset.liveTicker)));
+ refreshLiveBookmarkButtons();syncLiveRowSelection();
 }
 
 function alignBadge(a){
@@ -2543,15 +2794,25 @@ document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",renderLiveStocks);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
+document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
+document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
+document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  liveWatchlist=[];
  saveLiveWatchlist();
 });document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();loadMarket(false);
 </script>
 """
+@app.errorhandler(500)
+def internal_error(err):
+    app.logger.exception("Unhandled server error: %s", err)
+    return Response("Internal Server Error — check Render logs for the Python traceback.", status=500, mimetype="text/plain")
+
 @app.get("/")
 def home():
-    return Response("<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#0b0e11'><meta name='apple-mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><title>Market Rotation Screener</title></head><body>"+HTML+"</body></html>", mimetype="text/html")
+    # Important: rendering the shell performs no external network requests.
+    shell = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#0b0e11'><meta name='apple-mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><title>Market Rotation Screener</title></head><body>" + str(HTML) + "</body></html>"
+    return Response(shell, mimetype="text/html")
 
 if __name__=="__main__":
     app.run(host="0.0.0.0",port=PORT,debug=False,threaded=True)

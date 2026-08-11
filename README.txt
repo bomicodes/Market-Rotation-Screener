@@ -330,3 +330,34 @@ v17.7 — SUBTLE RRG FOCUS
 - Focus is created primarily by dimming all other displayed tails.
 - Applies consistently to Sector, Live Stock, and Historical RRG charts.
 - All v17.6 click behavior, caching, filters, and watchlist unchanged.
+
+v18.0 — OPTIONS SCREEN + EARNINGS HORIZON FIX
+
+Render Environment:
+  APCA_API_KEY_ID=<Alpaca API key>
+  APCA_API_SECRET_KEY=<Alpaca API secret>
+Optional:
+  ALPACA_TRADING_BASE_URL=https://paper-api.alpaca.markets
+
+Options:
+- 7–30 DTE Alpaca indicative screening.
+- Per-ticker Options button and Scan options for up to 25 displayed live RRG names.
+- Shows bid/ask, spread %, volume, OI, IV, delta and liquidity.
+- Liquid = OI>=500, volume>=100, spread<=10%.
+- Tradable = OI>=100, volume>=25, spread<=15%.
+- ATM IV is compared with annualized 20D realized volatility:
+  Cheap/Crushed <0.90 IV/RV; Normal 0.90–1.25; Elevated 1.25–1.60; Juiced >1.60.
+- This is not IV rank/percentile; use Webull OPRA for the final live quote.
+
+Earnings:
+- Incomplete horizons now show as — and are never reused as longer horizons.
+- Stats use only completed 14D earnings events; recent incomplete events can still display.
+
+v18.1 — SAFE STARTUP / RENDER HARDENING
+- Home page and /health make ZERO Alpaca or external data requests.
+- Options remain fully lazy: only Options / Scan options buttons call Alpaca.
+- Added /api/diagnostics and version=18.1 to /health.
+- Added APCA_API_KEY_ID and APCA_API_SECRET_KEY to render.yaml.
+- Gunicorn timeout restored to 120 seconds.
+- Added server-side 500 logging to make any future Render traceback visible.
+- Preserves v18.0 options screen and DDOG/incomplete earnings-horizon fix.
