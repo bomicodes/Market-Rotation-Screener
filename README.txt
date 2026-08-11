@@ -395,3 +395,29 @@ ALPACA
     APCA_API_SECRET_KEY
 - The site works without keys; only Options/Scan options require them.
 - Free Alpaca indicative data is for screening only; verify live OPRA in Webull before entry.
+
+v18.5 — OPTIONS SETUP UX
+- Added prominent Connect Alpaca / Get API Key button.
+- Options ticker clicks and Scan options automatically scroll to the Options panel.
+- App checks /api/diagnostics to show Alpaca connected/not-connected state.
+- If Alpaca keys are missing, Options actions show setup instructions instead of appearing inactive.
+- No RRG calculations changed.
+
+v18.6 — OPTIONS SCAN RESULTS FIX
+- Scan options now scans the full currently filtered live-RRG ticker set (up to 100 safety ceiling), not only the first 25.
+- Scan results render in their own ranked summary table instead of leaving the panel stuck on one active ticker.
+- Ranked by a simple options-quality score using liquidity, IV state, and number of liquid/tradable contracts.
+- Each scan result has Analyze Ticker for full 7–30 DTE chain drill-down.
+- Renamed the per-row action to Analyze Ticker.
+- Replaced the ambiguous Check badge with Not scanned.
+- No RRG calculations changed.
+
+v18.7 — LIVE TICKER SEARCH FIX
+- Live RRG ticker search now searches the selected ETF's FULL holdings universe,
+  even when the display is set to top 20 or top 50 holdings.
+- Search remains instant for already-loaded names, then automatically loads/caches
+  the full ETF holdings set after a 250 ms debounce.
+- Search matches ticker or company name.
+- Clearing search immediately restores the normal selected holdings view.
+- Switching ETFs resets the expanded search universe correctly.
+- No RRG calculations changed.

@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.4"
+APP_VERSION = "18.7"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -926,7 +926,7 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
             k = f"uw-calendar:{pd.Timestamp(d).date()}"
             return cached(k, lambda: unusual_whales_day(d), ttl=1800)
 
-        with ThreadPoolExecutor(max_workers=4) as ex:
+        with ThreadPoolExecutor(max_workers=3) as ex:
             futures = {ex.submit(uw_day_cached, d): d for d in days}
             for fut in as_completed(futures):
                 try:
@@ -1579,8 +1579,10 @@ def api_options_scan():
         for s in body.get("symbols",[]):
             s=str(s).upper().strip()
             if s and s not in symbols: symbols.append(s)
-        symbols=symbols[:25]
         if not symbols: return jsonify({"ok":False,"error":"No symbols supplied."}),400
+        # Scan the entire filtered ticker set supplied by the live RRG.
+        # Keep a generous safety ceiling only to prevent accidental abuse.
+        symbols=symbols[:100]
         if not ALPACA_API_KEY or not ALPACA_API_SECRET:
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
@@ -1885,6 +1887,12 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .optBadge{display:inline-block;border:1px solid #334155;border-radius:999px;padding:2px 7px;font-size:11px;white-space:nowrap}
 .optGood{color:#86efac}.optWarn{color:#fde68a}.optBad{color:#fca5a5}
 .optionsBtn{padding:5px 8px;font-size:11px}
+
+.setupBtn{display:inline-block;background:#1d4ed8;color:#fff;text-decoration:none;border:1px solid #2563eb;border-radius:8px;padding:9px 12px;font-weight:700}
+.setupBtn:hover{filter:brightness(1.08)}
+.setupBox{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;padding:10px 12px;border:1px solid #334155;border-radius:9px;background:#0f141a}
+.setupBox.ready{border-color:#166534}
+.setupBox code{color:#bfdbfe}
 </style>
 <div class="wrap">
 <h1>Market Rotation Screener</h1>
@@ -1967,7 +1975,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
         <option value="Rotating Out">Rotating Out ↙</option>
       </select>
       <label class="note">Search</label>
-      <input id="liveTickerSearch" type="search" placeholder="Ticker…" autocomplete="off" style="width:96px">
+      <input id="liveTickerSearch" type="search" placeholder="Ticker / name…" autocomplete="off" style="width:96px">
 
 
       <span id="sectorTitle" class="note">Choose a sector</span>
@@ -1984,18 +1992,34 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="row">
       <strong>Options · 7–30 DTE</strong>
       <span class="note">Alpaca indicative feed for screening; verify live OPRA in Webull before entry.</span>
-      <a href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="note">Get free Alpaca API key ↗</a>
+      <a id="alpacaSignupBtn" href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="setupBtn">Connect Alpaca / Get API Key ↗</a>
       <label class="note">Type</label>
       <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
       <label class="note">Liquidity</label>
       <select id="optLiquidityFilter"><option value="all">Any</option><option value="Tradable">Tradable+</option><option value="Liquid">Liquid only</option></select>
       <span id="optionsStatus" class="status"></span>
     </div>
-    <div id="optionsSummary" class="cards"></div>
-    <div class="scroll"><table>
-      <thead><tr><th>Contract</th><th>DTE</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
-      <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Options on a live ticker, or Scan options to score displayed names.</td></tr></tbody>
-    </table></div>
+    <div id="alpacaSetupBox" class="setupBox">
+      <b>Alpaca setup</b>
+      <span class="note">Create a free Alpaca account, then add <code>APCA_API_KEY_ID</code> and <code>APCA_API_SECRET_KEY</code> in Render → Environment. Redeploy after saving.</span>
+    </div>
+    <div id="optionsScanSection" style="display:none">
+      <div class="row" style="margin-top:10px">
+        <strong>Scan Results</strong>
+        <span class="note">Ranked across all currently filtered RRG tickers. Click Analyze Ticker for the full chain.</span>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>Ticker</th><th>Liquidity</th><th>ATM IV</th><th>IV state</th><th>IV/RV</th><th>Liquid contracts</th><th>Tradable contracts</th><th>Action</th></tr></thead>
+        <tbody id="optionsScanRows"></tbody>
+      </table></div>
+    </div>
+    <div id="optionsDetailSection">
+      <div id="optionsSummary" class="cards"></div>
+      <div class="scroll"><table>
+        <thead><tr><th>Contract</th><th>DTE</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
+        <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Analyze Ticker on a live RRG name for its 7–30 DTE chain, or Scan options to rank all displayed names.</td></tr></tbody>
+      </table></div>
+    </div>
   </div>
 
   <div class="panel">
@@ -2095,7 +2119,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
 </div>
 <script>
-let sectorData=[],currentSector=null,earnResults=[],liveStockData=[];
+let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false;
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
 function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
@@ -2498,6 +2522,10 @@ function applySectorPayload(j,fromCache=false){
 
 async function loadSector(force=false){
  if(!currentSector)return;
+ if(liveSearchSector && liveSearchSector!==currentSector){
+   liveSearchData=[];
+   liveSearchSector=null;
+ }
  const st=document.getElementById("sstatus");
  const lim=document.getElementById("liveHoldingsLimit").value;
  const key=cacheKeySector(currentSector,lim);
@@ -2574,7 +2602,8 @@ function filteredLiveStocks(){
  const q=document.getElementById("liveQuadrantFilter")?.value||"all";
  const t=document.getElementById("liveTailFilter")?.value||"all";
  const s=(document.getElementById("liveTickerSearch")?.value||"").trim().toUpperCase();
- return liveStockData.filter(x=>{
+ const source=(s && liveSearchSector===currentSector && liveSearchData.length)?liveSearchData:liveStockData;
+ return source.filter(x=>{
    const qok=q==="all"||x.quadrant===q;
    const tok=t==="all"||effectiveTailSignal(x)===t;
    const sok=!s||String(x.ticker||"").toUpperCase().includes(s)||String(x.name||"").toUpperCase().includes(s);
@@ -2583,10 +2612,96 @@ function filteredLiveStocks(){
 }
 
 
+let liveSearchTimer=null;
+
+async function ensureLiveSearchUniverse(){
+ const input=document.getElementById("liveTickerSearch");
+ const term=(input?.value||"").trim();
+ if(!term){
+   renderLiveStocks();
+   return;
+ }
+ if(!currentSector){
+   const st=document.getElementById("sstatus");
+   if(st)st.textContent="Choose an ETF/group before searching.";
+   return;
+ }
+ if(liveSearchSector===currentSector && liveSearchData.length){
+   renderLiveStocks();
+   return;
+ }
+ if(liveSearchLoading)return;
+
+ liveSearchLoading=true;
+ const st=document.getElementById("sstatus");
+ if(st)st.textContent=`Searching all ${currentSector} holdings…`;
+
+ try{
+   const key=cacheKeySector(currentSector,"all");
+   let j=clientCache.sectors.get(key);
+   if(!j){
+     const r=await fetch(`/api/sector/${currentSector}?limit=all`);
+     j=await r.json();
+     if(!r.ok||!j.ok)throw Error(j.error||"Search lookup failed");
+     clientCache.sectors.set(key,j);
+   }
+   liveSearchData=j.results||[];
+   liveSearchSector=currentSector;
+   const matches=filteredLiveStocks();
+   if(st)st.textContent=matches.length
+     ? `${matches.length} match${matches.length===1?"":"es"} across all ${j.holdings_total||liveSearchData.length} ${currentSector} holdings`
+     : `No match found across all ${j.holdings_total||liveSearchData.length} ${currentSector} holdings`;
+   renderLiveStocks();
+ }catch(e){
+   if(st)st.innerHTML=`<span class="error">Search failed: ${e.message}</span>`;
+ }finally{
+   liveSearchLoading=false;
+ }
+}
+
+function handleLiveTickerSearch(){
+ clearTimeout(liveSearchTimer);
+ const term=(document.getElementById("liveTickerSearch")?.value||"").trim();
+ if(!term){
+   renderLiveStocks();
+   return;
+ }
+ // Fast local response first; then expand to all ETF holdings after a short debounce.
+ renderLiveStocks();
+ liveSearchTimer=setTimeout(ensureLiveSearchUniverse,250);
+}
+
+
+let alpacaConfigured=null;
+
+async function checkAlpacaStatus(){
+ const box=document.getElementById("alpacaSetupBox");
+ try{
+   const r=await fetch("/api/diagnostics");
+   const j=await r.json();
+   alpacaConfigured=!!(j.alpaca&&j.alpaca.configured);
+   if(box){
+     if(alpacaConfigured){
+       box.classList.add("ready");
+       box.innerHTML='<b>✓ Alpaca connected</b><span class="note">Options screening is ready. Quotes use the indicative feed; verify live OPRA in Webull before entry.</span>';
+     }else{
+       box.classList.remove("ready");
+     }
+   }
+ }catch(e){
+   alpacaConfigured=null;
+ }
+}
+
+function focusOptionsPanel(){
+ const panel=document.getElementById("optionsPanel");
+ if(panel)panel.scrollIntoView({behavior:"smooth",block:"start"});
+}
+
 let optionScanMap={},activeOptionsData=null;
 
 function optionBadgeHTML(x){
- if(!x)return '<span class="optBadge">Check</span>';
+ if(!x)return '<span class="tiny">Not scanned</span>';
  if(x.error||x.ok===false)return '<span class="optBadge optBad">Error</span>';
  const liq=x.liquidity||"—",cls=liq==="Liquid"?"optGood":liq==="Tradable"?"optWarn":"optBad";
  return `<span class="optBadge ${cls}">${liq}</span><div class="tiny">${x.iv_state||"—"}</div>`;
@@ -2595,6 +2710,44 @@ function dteFromExpiration(exp){
  if(!exp)return null;const a=new Date(exp+"T12:00:00"),b=new Date();
  return Math.max(0,Math.round((a-b)/86400000));
 }
+
+function optionScanScore(x){
+ if(!x||x.ok===false||x.error)return -999;
+ const liq={Liquid:3,Tradable:2,Thin:0}[x.liquidity]||0;
+ const iv={ "Cheap / Crushed":3, "Normal":2, "Elevated":0, "Juiced":-2, "Unknown":0 }[x.iv_state]||0;
+ const contracts=Math.min(3,(x.liquid_contracts||0)/3)+Math.min(2,(x.tradable_contracts||0)/5);
+ return liq*3+iv*2+contracts;
+}
+
+function renderOptionsScanResults(results){
+ const section=document.getElementById("optionsScanSection");
+ const body=document.getElementById("optionsScanRows");
+ if(!section||!body)return;
+ const arr=(results||[]).slice().sort((a,b)=>optionScanScore(b)-optionScanScore(a));
+ section.style.display="block";
+ body.innerHTML=arr.map((x,k)=>{
+   if(x.ok===false||x.error){
+     return `<tr><td>${k+1}</td><td><b>${x.ticker||"—"}</b></td><td colspan="6"><span class="error">${x.error||"Scan failed"}</span></td><td><button class="optionsBtn scanAnalyzeBtn" data-scan-analyze="${x.ticker||""}">Analyze Ticker</button></td></tr>`;
+   }
+   return `<tr>
+     <td>${k+1}</td>
+     <td><b>${x.ticker}</b><div class="tiny">$${x.spot==null?"—":fmt(x.spot,2)}</div></td>
+     <td>${optionBadgeHTML(x)}</td>
+     <td>${x.atm_iv==null?"—":fmt(x.atm_iv,1)+"%"}</td>
+     <td>${x.iv_state||"—"}</td>
+     <td>${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</td>
+     <td>${x.liquid_contracts??0}</td>
+     <td>${x.tradable_contracts??0}</td>
+     <td><button class="optionsBtn scanAnalyzeBtn" data-scan-analyze="${x.ticker}">Analyze Ticker</button></td>
+   </tr>`;
+ }).join("");
+ document.querySelectorAll("[data-scan-analyze]").forEach(btn=>btn.addEventListener("click",evt=>{
+   evt.stopPropagation();
+   const t=btn.dataset.scanAnalyze;
+   if(t)loadOptionsTicker(t);
+ }));
+}
+
 function renderOptionsPanel(){
  const sum=document.getElementById("optionsSummary"),body=document.getElementById("optionsRows"),st=document.getElementById("optionsStatus");
  if(!activeOptionsData){sum.innerHTML="";return}
@@ -2612,7 +2765,13 @@ function renderOptionsPanel(){
  <td>${optionBadgeHTML({liquidity:r.liquidity,iv_state:""})}</td></tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
 }
 async function loadOptionsTicker(ticker){
- const st=document.getElementById("optionsStatus");st.textContent=`Loading ${ticker} options…`;
+ focusOptionsPanel();
+ const st=document.getElementById("optionsStatus");
+ if(alpacaConfigured===false){
+   st.innerHTML='<span class="error">Connect Alpaca first using the blue button above, then add the API key + secret in Render.</span>';
+   return;
+ }
+ st.textContent=`Loading ${ticker} options…`;
  try{
    const r=await fetch(`/api/options/${encodeURIComponent(ticker)}`),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
@@ -2620,14 +2779,21 @@ async function loadOptionsTicker(ticker){
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
 }
 async function scanVisibleOptions(){
- const symbols=filteredLiveStocks().slice(0,25).map(x=>x.ticker),st=document.getElementById("optionsStatus"),btn=document.getElementById("scanOptions");
+ focusOptionsPanel();
+ const symbols=filteredLiveStocks().map(x=>x.ticker),st=document.getElementById("optionsStatus"),btn=document.getElementById("scanOptions");
+ if(alpacaConfigured===false){
+   st.innerHTML='<span class="error">Connect Alpaca first using the blue button above, then add the API key + secret in Render.</span>';
+   return;
+ }
  if(!symbols.length){st.textContent="No live tickers to scan.";return}
- st.textContent=`Scanning ${symbols.length} tickers…`;btn.disabled=true;
+ st.textContent=`Scanning all ${symbols.length} filtered tickers…`;btn.disabled=true;
  try{
    const r=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols})}),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options scan failed");
-   (j.results||[]).forEach(x=>optionScanMap[x.ticker]=x);
-   st.textContent=`Options scan complete · ${symbols.length} tickers`;renderLiveStocks();
+   (j.results||[]).forEach(x=>{if(x.ticker)optionScanMap[x.ticker]=x});
+   renderOptionsScanResults(j.results||[]);
+   st.textContent=`Options scan complete · ${j.results?.length||0} tickers`;
+   renderLiveStocks();
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}finally{btn.disabled=false}
 }
 
@@ -2639,7 +2805,7 @@ function renderLiveStocks(){
  document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
  <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
  <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td>
- <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Options</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
+ <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Analyze Ticker</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
  document.querySelectorAll("[data-options-ticker]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();loadOptionsTicker(btn.dataset.optionsTicker)}));
  document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>toggleRRGFocus("stockChart",row.dataset.liveTicker)));
@@ -2861,14 +3027,14 @@ document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",renderLiveStocks);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
 document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
 document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  liveWatchlist=[];
  saveLiveWatchlist();
-});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();loadMarket(false);
+});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
 </script>
 """
 @app.errorhandler(500)
