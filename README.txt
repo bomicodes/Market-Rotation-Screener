@@ -458,3 +458,11 @@ v18.11 — OPTIONS HEADER + CALLS/PUTS
 v18.12 — CURRENT PRICE WORDING
 - Renamed options price context from Underlying to Current price.
 - No other UI, options, or RRG logic changes.
+
+v18.13 — SECTOR SWITCH DATA-INTEGRITY FIX
+- Fixed stale sector holdings appearing after switching ETFs.
+- Each live-sector request is now tagged with the ETF/request sequence that started it.
+- Late responses from a previously selected ETF are ignored.
+- Old rows are cleared immediately while the newly selected ETF loads.
+- Search state is reset when changing ETFs so a prior sector's expanded holdings cannot bleed into the new one.
+- No RRG calculations changed.

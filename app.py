@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.12"
+APP_VERSION = "18.13"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2130,7 +2130,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
 </div>
 <script>
-let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false;
+let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0;
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
 function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
@@ -2524,32 +2524,59 @@ async function loadMarket(force=false){
  }
 }
 
-function applySectorPayload(j,fromCache=false){
+function applySectorPayload(j,fromCache=false,expectedSector=null){
+ if(expectedSector && expectedSector!==currentSector)return false;
  liveStockData=j.results||[];
  const st=document.getElementById("sstatus");
  st.textContent=(fromCache?"Cached · ":"")+(j.holdings_stale?"Holdings refresh unavailable — using last good list · ":"")+`${j.holdings_as_screened} of ${j.holdings_total} holdings · ${j.holdings_source||"source unknown"} · through ${j.asof||"—"}`;
  renderLiveStocks();
+ return true;
 }
 
 async function loadSector(force=false){
  if(!currentSector)return;
- if(liveSearchSector && liveSearchSector!==currentSector){
+ const requestedSector=currentSector;
+ const requestId=++sectorRequestSeq;
+
+ if(liveSearchSector && liveSearchSector!==requestedSector){
    liveSearchData=[];
    liveSearchSector=null;
  }
+
+ // Clear the previous sector immediately so stale rows are never displayed
+ // while a newly selected ETF is loading.
+ liveStockData=[];
+ const stockState=rrgFocusState["stockChart"];
+ if(stockState)stockState.selected=null;
+ renderLiveStocks();
+
  const st=document.getElementById("sstatus");
  const lim=document.getElementById("liveHoldingsLimit").value;
- const key=cacheKeySector(currentSector,lim);
- document.getElementById("sectorTitle").textContent=currentSector;
- if(!force&&clientCache.sectors.has(key)){applySectorPayload(clientCache.sectors.get(key),true);return}
- st.textContent="Updating…";
+ const key=cacheKeySector(requestedSector,lim);
+ document.getElementById("sectorTitle").textContent=requestedSector;
+
+ if(!force&&clientCache.sectors.has(key)){
+   if(requestId!==sectorRequestSeq || requestedSector!==currentSector)return;
+   applySectorPayload(clientCache.sectors.get(key),true,requestedSector);
+   return;
+ }
+
+ st.textContent=`Updating ${requestedSector}…`;
  try{
-   const r=await fetch(`/api/sector/${currentSector}?limit=${lim}`);
+   const r=await fetch(`/api/sector/${requestedSector}?limit=${lim}`);
    const j=await r.json();
    if(!j.ok)throw Error(j.error);
+
+   // Cache the response under the ETF that actually initiated it.
    clientCache.sectors.set(key,j);
-   applySectorPayload(j,false);
+
+   // If the user changed sectors while this request was in flight,
+   // do not let the late response overwrite the newly selected ETF.
+   if(requestId!==sectorRequestSeq || requestedSector!==currentSector)return;
+
+   applySectorPayload(j,false,requestedSector);
  }catch(e){
+   if(requestId!==sectorRequestSeq || requestedSector!==currentSector)return;
    st.innerHTML=`<span class="error">${e.message}</span>`;
  }
 }
@@ -3084,7 +3111,17 @@ document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{if(e.target.value){currentSector=e.target.value;document.getElementById("sectorTitle").textContent=currentSector+" selected";loadSector();}});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
+ if(e.target.value){
+   currentSector=e.target.value;
+   liveSearchData=[];
+   liveSearchSector=null;
+   const search=document.getElementById("liveTickerSearch");
+   if(search)search.value="";
+   document.getElementById("sectorTitle").textContent=currentSector+" selected";
+   loadSector();
+ }
+});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
 document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
 document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
