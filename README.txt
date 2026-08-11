@@ -421,3 +421,20 @@ v18.7 — LIVE TICKER SEARCH FIX
 - Clearing search immediately restores the normal selected holdings view.
 - Switching ETFs resets the expanded search universe correctly.
 - No RRG calculations changed.
+
+v18.8 — OPTIONS CONTRACT UI
+- Human-readable contracts: Ticker · Expiration · Strike + C/P.
+- Example: XOM · Aug 21 · $165C.
+- Mid premium is now a dedicated prominent column.
+- Bid/ask remain visible beside Mid.
+- Raw OCC option symbol is demoted to small secondary text.
+- Mobile layout gives the contract cell more room.
+- No options scoring, data source, or RRG calculations changed.
+
+v18.9 — OPTIONS UI CLEANUP
+- Removed % vs spot / ITM-OTM style contract context from the contract display.
+- Contract labels now read like: DVN · Aug 21 · $45 Call.
+- Raw OCC symbol remains in small secondary text.
+- Blue Alpaca setup button automatically hides after the app confirms Alpaca is connected.
+- Connected status remains visible in the green status box.
+- No options scoring, data source, or RRG calculations changed.

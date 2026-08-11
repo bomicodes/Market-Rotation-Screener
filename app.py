@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.7"
+APP_VERSION = "18.9"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1893,6 +1893,15 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .setupBox{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0;padding:10px 12px;border:1px solid #334155;border-radius:9px;background:#0f141a}
 .setupBox.ready{border-color:#166534}
 .setupBox code{color:#bfdbfe}
+
+.contractPrimary{font-size:13px;white-space:nowrap}
+.occSymbol{font-size:10px;color:#64748b;margin-top:2px;word-break:break-all}
+#optionsRows td:nth-child(3){font-size:14px}
+@media(max-width:700px){
+  .contractPrimary{white-space:normal;line-height:1.25}
+  #optionsRows td{min-width:72px}
+  #optionsRows td:first-child{min-width:165px}
+}
 </style>
 <div class="wrap">
 <h1>Market Rotation Screener</h1>
@@ -2016,8 +2025,8 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div id="optionsDetailSection">
       <div id="optionsSummary" class="cards"></div>
       <div class="scroll"><table>
-        <thead><tr><th>Contract</th><th>DTE</th><th>Strike</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
-        <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Analyze Ticker on a live RRG name for its 7–30 DTE chain, or Scan options to rank all displayed names.</td></tr></tbody>
+        <thead><tr><th>Contract</th><th>DTE</th><th>Mid</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
+        <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Analyze Ticker for a human-readable 7–30 DTE chain. Mid premium is highlighted; the raw OCC symbol is shown in small text.</td></tr></tbody>
       </table></div>
     </div>
   </div>
@@ -2681,11 +2690,14 @@ async function checkAlpacaStatus(){
    const j=await r.json();
    alpacaConfigured=!!(j.alpaca&&j.alpaca.configured);
    if(box){
+     const signup=document.getElementById("alpacaSignupBtn");
      if(alpacaConfigured){
        box.classList.add("ready");
        box.innerHTML='<b>✓ Alpaca connected</b><span class="note">Options screening is ready. Quotes use the indicative feed; verify live OPRA in Webull before entry.</span>';
+       if(signup)signup.style.display="none";
      }else{
        box.classList.remove("ready");
+       if(signup)signup.style.display="";
      }
    }
  }catch(e){
@@ -2748,6 +2760,33 @@ function renderOptionsScanResults(results){
  }));
 }
 
+
+function formatOptionDate(exp){
+ if(!exp)return "—";
+ const d=new Date(exp+"T12:00:00");
+ return d.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+}
+
+function optionTypeShort(t){
+ if(!t)return "";
+ const s=String(t).toLowerCase();
+ return s.startsWith("c")?"C":s.startsWith("p")?"P":"";
+}
+
+function optionTypeWord(t){
+ const s=String(t||"").toLowerCase();
+ return s.startsWith("c")?"Call":s.startsWith("p")?"Put":String(t||"");
+}
+
+function readableContractHTML(r,underlying){
+ const date=formatOptionDate(r.expiration);
+ const strike=r.strike==null?"—":fmt(r.strike,2).replace(/\.00$/,"");
+ const word=optionTypeWord(r.type);
+ const root=underlying||activeOptionsData?.ticker||"";
+ return `<div class="contractPrimary"><b>${root}</b> · ${date} · <b>$${strike} ${word}</b></div>
+         <div class="occSymbol">${r.symbol||""}</div>`;
+}
+
 function renderOptionsPanel(){
  const sum=document.getElementById("optionsSummary"),body=document.getElementById("optionsRows"),st=document.getElementById("optionsStatus");
  if(!activeOptionsData){sum.innerHTML="";return}
@@ -2758,11 +2797,19 @@ function renderOptionsPanel(){
  <div class="card"><div class="tiny">20D REALIZED VOL</div><b>${x.rv20==null?"—":fmt(x.rv20,1)+"%"}</b><div class="tiny">IV/RV ${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</div></div>`;
  const typ=document.getElementById("optTypeFilter").value,lf=document.getElementById("optLiquidityFilter").value,rank={Thin:0,Tradable:1,Liquid:2};
  const rows=(x.contracts||[]).filter(r=>(typ==="all"||r.type===typ)&&(lf==="all"||(lf==="Tradable"&&rank[r.liquidity]>=1)||(lf==="Liquid"&&r.liquidity==="Liquid"))).slice(0,60);
- body.innerHTML=rows.length?rows.map(r=>`<tr><td><b>${r.symbol}</b><div class="tiny">${r.type||""}</div></td>
- <td>${dteFromExpiration(r.expiration)??"—"}</td><td>${r.strike==null?"—":"$"+fmt(r.strike,2)}<div class="tiny">${r.moneyness_pct==null?"":fmt(r.moneyness_pct,1)+"%"}</div></td>
- <td>${r.bid==null?"—":"$"+fmt(r.bid,2)}</td><td>${r.ask==null?"—":"$"+fmt(r.ask,2)}</td><td>${r.spread_pct==null?"—":fmt(r.spread_pct,1)+"%"}</td>
- <td>${r.volume??0}</td><td>${r.open_interest??0}</td><td>${r.iv==null?"—":fmt(r.iv,1)+"%"}</td><td>${r.delta==null?"—":fmt(r.delta,2)}</td>
- <td>${optionBadgeHTML({liquidity:r.liquidity,iv_state:""})}</td></tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
+ body.innerHTML=rows.length?rows.map(r=>`<tr>
+ <td>${readableContractHTML(r,x.ticker)}</td>
+ <td><b>${dteFromExpiration(r.expiration)??"—"}</b><div class="tiny">${formatOptionDate(r.expiration)}</div></td>
+ <td><b>${r.mid==null?"—":"$"+fmt(r.mid,2)}</b></td>
+ <td>${r.bid==null?"—":"$"+fmt(r.bid,2)}</td>
+ <td>${r.ask==null?"—":"$"+fmt(r.ask,2)}</td>
+ <td>${r.spread_pct==null?"—":fmt(r.spread_pct,1)+"%"}</td>
+ <td>${r.volume??0}</td>
+ <td>${r.open_interest??0}</td>
+ <td>${r.iv==null?"—":fmt(r.iv,1)+"%"}</td>
+ <td>${r.delta==null?"—":fmt(r.delta,2)}</td>
+ <td>${optionBadgeHTML({liquidity:r.liquidity,iv_state:""})}</td>
+ </tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
 }
 async function loadOptionsTicker(ticker){
  focusOptionsPanel();
