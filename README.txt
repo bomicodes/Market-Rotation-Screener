@@ -438,3 +438,23 @@ v18.9 — OPTIONS UI CLEANUP
 - Blue Alpaca setup button automatically hides after the app confirms Alpaca is connected.
 - Connected status remains visible in the green status box.
 - No options scoring, data source, or RRG calculations changed.
+
+v18.10 — UNDERLYING PRICE CONTEXT
+- Added a visible underlying-price strip directly above the options contract table.
+- Example: UNDERLYING PRICE · DVN $45.36.
+- Keeps contract labels simple while letting the user compare stock price vs strike manually.
+- No ITM/ATM/OTM percentages or badges added.
+- No options scoring, data source, or RRG calculations changed.
+
+v18.11 — OPTIONS HEADER + CALLS/PUTS
+- Underlying price moved into the compact options filter/header row.
+- Removed the separate large underlying-price box.
+- Calls + puts remain the default contract view.
+- Type filter can still switch to Calls only or Puts only.
+- Contract rows are ordered by expiration, strike, then option type for easier scanning.
+- Increased visible chain limit to 120 contracts so both calls and puts can display together.
+- No options scoring, data source, or RRG calculations changed.
+
+v18.12 — CURRENT PRICE WORDING
+- Renamed options price context from Underlying to Current price.
+- No other UI, options, or RRG logic changes.

@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.9"
+APP_VERSION = "18.12"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1902,6 +1902,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   #optionsRows td{min-width:72px}
   #optionsRows td:first-child{min-width:165px}
 }
+
 </style>
 <div class="wrap">
 <h1>Market Rotation Screener</h1>
@@ -2006,6 +2007,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
       <label class="note">Liquidity</label>
       <select id="optLiquidityFilter"><option value="all">Any</option><option value="Tradable">Tradable+</option><option value="Liquid">Liquid only</option></select>
+      <span id="optionsUnderlying" class="note"></span>
       <span id="optionsStatus" class="status"></span>
     </div>
     <div id="alpacaSetupBox" class="setupBox">
@@ -2788,15 +2790,23 @@ function readableContractHTML(r,underlying){
 }
 
 function renderOptionsPanel(){
- const sum=document.getElementById("optionsSummary"),body=document.getElementById("optionsRows"),st=document.getElementById("optionsStatus");
- if(!activeOptionsData){sum.innerHTML="";return}
+ const sum=document.getElementById("optionsSummary"),body=document.getElementById("optionsRows"),st=document.getElementById("optionsStatus"),under=document.getElementById("optionsUnderlying");
+ if(!activeOptionsData){
+   sum.innerHTML="";
+   if(under)under.textContent="";
+   return
+ }
  const x=activeOptionsData;st.textContent=`${x.ticker} · ${x.feed||""}`;
- sum.innerHTML=`<div class="card"><div class="tiny">UNDERLYING</div><b>${x.ticker} · $${fmt(x.spot,2)}</b></div>
+ if(under)under.innerHTML=`<span class="tiny">Current price</span> <b>${x.ticker} $${fmt(x.spot,2)}</b>`;
+ sum.innerHTML=`<div class="card"><div class="tiny">CURRENT PRICE</div><b>${x.ticker} · $${fmt(x.spot,2)}</b></div>
  <div class="card"><div class="tiny">LIQUIDITY</div><b>${x.liquidity}</b><div class="tiny">${x.liquid_contracts} liquid · ${x.tradable_contracts} tradable</div></div>
  <div class="card"><div class="tiny">ATM IV</div><b>${x.atm_iv==null?"—":fmt(x.atm_iv,1)+"%"}</b><div class="tiny">${x.iv_state}</div></div>
  <div class="card"><div class="tiny">20D REALIZED VOL</div><b>${x.rv20==null?"—":fmt(x.rv20,1)+"%"}</b><div class="tiny">IV/RV ${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</div></div>`;
  const typ=document.getElementById("optTypeFilter").value,lf=document.getElementById("optLiquidityFilter").value,rank={Thin:0,Tradable:1,Liquid:2};
- const rows=(x.contracts||[]).filter(r=>(typ==="all"||r.type===typ)&&(lf==="all"||(lf==="Tradable"&&rank[r.liquidity]>=1)||(lf==="Liquid"&&r.liquidity==="Liquid"))).slice(0,60);
+ const rows=(x.contracts||[])
+   .filter(r=>(typ==="all"||String(r.type||"").toLowerCase()===typ)&&(lf==="all"||(lf==="Tradable"&&rank[r.liquidity]>=1)||(lf==="Liquid"&&r.liquidity==="Liquid")))
+   .sort((a,b)=>String(a.expiration||"").localeCompare(String(b.expiration||"")) || (Number(a.strike||0)-Number(b.strike||0)) || String(a.type||"").localeCompare(String(b.type||"")))
+   .slice(0,120);
  body.innerHTML=rows.length?rows.map(r=>`<tr>
  <td>${readableContractHTML(r,x.ticker)}</td>
  <td><b>${dteFromExpiration(r.expiration)??"—"}</b><div class="tiny">${formatOptionDate(r.expiration)}</div></td>
