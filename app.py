@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.13"
+APP_VERSION = "18.14"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1253,7 +1253,7 @@ def option_contract_row(symbol,snap,meta,spot):
 def options_quality_payload(ticker):
     ticker=ticker.upper().strip()
     today=pd.Timestamp.now().normalize()
-    start=(today+pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    start=today.strftime("%Y-%m-%d")
     end=(today+pd.Timedelta(days=30)).strftime("%Y-%m-%d")
     rv20,spot=realized_vol_20d(ticker)
     if spot is None: raise RuntimeError(f"Could not determine current price for {ticker}.")
@@ -1280,7 +1280,7 @@ def options_quality_payload(ticker):
     rank={"Liquid":0,"Tradable":1,"Thin":2}
     rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
     return {
-        "ticker":ticker,"spot":round(spot,2),"dte_min":7,"dte_max":30,"feed":"Alpaca indicative",
+        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"feed":"Alpaca indicative",
         "rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
         "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
@@ -1566,7 +1566,7 @@ def api_historical_rrg():
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"options-v18:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
+        payload,stale,err=cached_refresh_safe(f"options-v18-14:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -1587,7 +1587,7 @@ def api_options_scan():
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
             try:
-                p,stale,err=cached_refresh_safe(f"options-v18:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                p,stale,err=cached_refresh_safe(f"options-v18-14:{sym}",lambda:options_quality_payload(sym),ttl=600)
                 return {"ok":True,**p,"stale":stale}
             except Exception as e:
                 return {"ok":False,"ticker":sym,"error":str(e)}
@@ -2000,7 +2000,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
   <div class="panel" id="optionsPanel">
     <div class="row">
-      <strong>Options · 7–30 DTE</strong>
+      <strong>Options · 0–30 DTE</strong>
       <span class="note">Alpaca indicative feed for screening; verify live OPRA in Webull before entry.</span>
       <a id="alpacaSignupBtn" href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="setupBtn">Connect Alpaca / Get API Key ↗</a>
       <label class="note">Type</label>
@@ -2028,7 +2028,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <div id="optionsSummary" class="cards"></div>
       <div class="scroll"><table>
         <thead><tr><th>Contract</th><th>DTE</th><th>Mid</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
-        <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Analyze Ticker for a human-readable 7–30 DTE chain. Mid premium is highlighted; the raw OCC symbol is shown in small text.</td></tr></tbody>
+        <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Analyze Ticker for a human-readable 0–30 DTE chain, including weekly contracts under 7 DTE. Mid premium is highlighted; the raw OCC symbol is shown in small text.</td></tr></tbody>
       </table></div>
     </div>
   </div>

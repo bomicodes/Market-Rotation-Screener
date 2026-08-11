@@ -466,3 +466,10 @@ v18.13 — SECTOR SWITCH DATA-INTEGRITY FIX
 - Old rows are cleared immediately while the newly selected ETF loads.
 - Search state is reset when changing ETFs so a prior sector's expanded holdings cannot bleed into the new one.
 - No RRG calculations changed.
+
+v18.14 — WEEKLY OPTIONS
+- Expanded options chain from 7–30 DTE to 0–30 DTE.
+- Includes weekly contracts with fewer than 7 calendar days remaining.
+- Calls and puts remain included.
+- Cache key bumped so previously cached 7–30 DTE scans do not hide the new weeklies.
+- No RRG calculations or options liquidity thresholds changed.
