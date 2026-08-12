@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "19.0"
+APP_VERSION = "19.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1628,14 +1628,14 @@ def api_chart_preview(ticker):
     ticker=ticker.upper().strip()
     try:
         period=(request.args.get("period") or "1m").lower()
-        if period not in ("1w","1m"):
+        if period not in ("1d","1w","1m"):
             period="1m"
         # Daily bars are sufficient for a compact swing-trade preview.
         df=dl_ohlc(ticker,"3mo")
         if df is None or len(df)==0:
             return jsonify({"ok":False,"error":"No price history available."}),404
         df=df.dropna(subset=["Close"]).copy()
-        bars=5 if period=="1w" else 22
+        bars=2 if period=="1d" else (5 if period=="1w" else 22)
         df=df.tail(bars)
         rows=[]
         for idx,row in df.iterrows():
@@ -2090,7 +2090,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   </div>
   <div class="grid2">
     <div class="panel"><canvas id="stockChart" width="900" height="540"></canvas></div>
-    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
   </div>
 
   <div class="grid2">
@@ -2102,6 +2102,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="panel" id="previewPanel">
       <div class="row">
         <strong id="previewTitle">Chart Preview</strong>
+        <button id="preview1D" class="previewPeriodBtn">1D</button>
         <button id="preview1W" class="previewPeriodBtn">1W</button>
         <button id="preview1M" class="previewPeriodBtn active">1M</button>
         <span id="previewStatus" class="status">Select a ticker to preview price.</span>
@@ -2150,12 +2151,12 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="row">
       <strong>★ Live Watchlist</strong>
       <span class="note">Saved locally in this browser.</span>
-      <button id="clearLiveWatchlist">Clear all</button>
+      <button id="refreshLiveWatchlist">Refresh prices/options</button><button id="clearLiveWatchlist">Clear all</button>
       <span id="liveWatchStatus" class="status"></span>
     </div>
     <div class="scroll">
       <table>
-        <thead><tr><th></th><th>Ticker</th><th>ETF</th><th>Fast</th><th>Trend</th><th>Tail</th></tr></thead>
+        <thead><tr><th></th><th>Ticker</th><th>ETF</th><th>Added</th><th>Price</th><th>Since add</th><th>Rotation</th><th>Options</th><th>Opportunity</th></tr></thead>
         <tbody id="liveWatchRows"></tbody>
       </table>
     </div>
@@ -2281,12 +2282,22 @@ function liveBookmarkButtonHTML(ticker){
 }
 
 function currentLiveWatchItem(x){
+ const opt=optionScanMap[x.ticker]||{};
+ const spot=(activeOptionsData?.ticker===x.ticker?activeOptionsData.spot:opt.spot);
  return {
    ticker:x.ticker,
    etf:currentSector||"—",
    fast:x.fast?.quadrant||x.quadrant||"—",
    trend:x.trend?.quadrant||"—",
-   tail:effectiveTailSignal(x)||x.tail_trajectory||"—"
+   tail:effectiveTailSignal(x)||x.tail_trajectory||"—",
+   stage:rotationStage(x).label,
+   stage_level:rotationStage(x).level,
+   added_price:spot??null,
+   current_price:spot??null,
+   iv_state:opt.iv_state||null,
+   liquidity:opt.liquidity||null,
+   opportunity:opportunityScore(x),
+   added_at:new Date().toISOString()
  };
 }
 
@@ -2312,17 +2323,29 @@ function renderLiveWatchlist(){
  const rows=document.getElementById("liveWatchRows");
  if(!rows)return;
  if(!liveWatchlist.length){
-   rows.innerHTML=`<tr><td colspan="6"><span class="note">No saved tickers yet. Click ☆ beside a live RRG ticker.</span></td></tr>`;
+   rows.innerHTML=`<tr><td colspan="9"><span class="note">No saved tickers yet. Click ☆ beside a live RRG ticker.</span></td></tr>`;
  }else{
-   rows.innerHTML=liveWatchlist.map(x=>`<tr>
+   rows.innerHTML=liveWatchlist.map(x=>{
+     const ret=(x.added_price!=null&&x.current_price!=null)?(x.current_price/x.added_price-1)*100:null;
+     const added=x.added_at?new Date(x.added_at).toLocaleDateString("en-US",{month:"short",day:"numeric"}):"—";
+     return `<tr class="clickrow" data-watch-open="${x.ticker}">
      <td><button class="bookmarkBtn saved" data-live-watch-remove="${x.ticker}" title="Remove">★</button></td>
      <td><b>${x.ticker}</b></td>
      <td>${x.etf||"—"}</td>
-     <td>${x.fast||"—"}</td>
-     <td>${x.trend||"—"}</td>
-     <td>${x.tail||"—"}</td>
-   </tr>`).join("");
+     <td>${added}<div class="tiny">${x.added_price==null?"price pending":"$"+fmt(x.added_price,2)}</div></td>
+     <td>${x.current_price==null?"—":"$"+fmt(x.current_price,2)}</td>
+     <td class="${ret==null?"":ret>=0?"up":"down"}">${ret==null?"—":pct(ret)}</td>
+     <td>${x.stage_level?`${x.stage_level}/4 · `:""}${x.stage||x.fast||"—"}<div class="tiny">${x.tail||"—"}</div></td>
+     <td>${x.liquidity||"—"}<div class="tiny">${x.iv_state||"IV pending"}</div></td>
+     <td>${x.opportunity==null?"—":x.opportunity+"/10"}</td>
+   </tr>`}).join("");
 
+   document.querySelectorAll("[data-watch-open]").forEach(row=>row.addEventListener("click",evt=>{
+     if(evt.target.closest("[data-live-watch-remove]"))return;
+     const t=row.dataset.watchOpen;if(!t)return;
+     loadChartPreview(t);
+     if(alpacaConfigured!==false)loadOptionsTicker(t,{scroll:false});
+   }));
    document.querySelectorAll("[data-live-watch-remove]").forEach(btn=>btn.addEventListener("click",()=>{
      const key=liveWatchKey(btn.dataset.liveWatchRemove);
      liveWatchlist=liveWatchlist.filter(x=>liveWatchKey(x.ticker)!==key);
@@ -2332,6 +2355,39 @@ function renderLiveWatchlist(){
  const st=document.getElementById("liveWatchStatus");
  if(st)st.textContent=`${liveWatchlist.length} saved`;
 }
+async function refreshLiveWatchlistData(){
+ const st=document.getElementById("liveWatchStatus");
+ if(!liveWatchlist.length){if(st)st.textContent="No saved tickers.";return}
+ if(alpacaConfigured===false){if(st)st.textContent="Connect Alpaca to refresh watchlist prices/options.";return}
+ const btn=document.getElementById("refreshLiveWatchlist");if(btn)btn.disabled=true;
+ if(st)st.textContent=`Refreshing ${liveWatchlist.length} saved tickers…`;
+ try{
+   const symbols=liveWatchlist.map(x=>x.ticker);
+   const r=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols})});
+   const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Refresh failed");
+   (j.results||[]).forEach(o=>{
+     if(!o.ticker||o.ok===false)return;
+     optionScanMap[o.ticker]=o;
+     const i=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===liveWatchKey(o.ticker));
+     if(i<0)return;
+     if(liveWatchlist[i].added_price==null)liveWatchlist[i].added_price=o.spot??null;
+     liveWatchlist[i].current_price=o.spot??liveWatchlist[i].current_price??null;
+     liveWatchlist[i].iv_state=o.iv_state||null;
+     liveWatchlist[i].liquidity=o.liquidity||null;
+     const lx=liveStockData.find(x=>x.ticker===o.ticker);
+     if(lx){
+       liveWatchlist[i].stage=rotationStage(lx).label;
+       liveWatchlist[i].stage_level=rotationStage(lx).level;
+       liveWatchlist[i].tail=effectiveTailSignal(lx)||lx.tail_trajectory||liveWatchlist[i].tail;
+       liveWatchlist[i].opportunity=opportunityScore(lx);
+     }
+   });
+   saveLiveWatchlist();
+   if(st)st.textContent=`${liveWatchlist.length} saved · refreshed`;
+ }catch(e){if(st)st.innerHTML=`<span class="error">${e.message}</span>`}
+ finally{if(btn)btn.disabled=false}
+}
+
 const quadColors={Leading:"#22c55e",Improving:"#38bdf8",Lagging:"#ef4444",Weakening:"#f59e0b"};
 function fmt(v,n=2){return(v==null||!isFinite(v))?"—":Number(v).toFixed(n)}
 function pct(v){return(v==null)?"—":(v>=0?"+":"")+fmt(v,2)+"%"}
@@ -2997,7 +3053,7 @@ function renderOptionsPanel(){
  if(under)under.innerHTML=`<span class="tiny">Current price</span> <b>${x.ticker} $${fmt(x.spot,2)}</b>`;
  sum.innerHTML=`<div class="card"><div class="tiny">CURRENT PRICE</div><b>${x.ticker} · $${fmt(x.spot,2)}</b></div>
  <div class="card"><div class="tiny">LIQUIDITY</div><b>${x.liquidity}</b><div class="tiny">${x.liquid_contracts} liquid · ${x.tradable_contracts} tradable</div></div>
- <div class="card"><div class="tiny">ATM IV</div><b>${x.atm_iv==null?"—":fmt(x.atm_iv,1)+"%"}</b><div class="tiny">${x.iv_state}</div></div>
+ <div class="card"><div class="tiny">IV RELATIVE VALUE</div><b>${x.atm_iv==null?"—":fmt(x.atm_iv,1)+"%"}</b><div class="tiny">${x.iv_state} · IV/RV ${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</div></div>
  <div class="card"><div class="tiny">20D REALIZED VOL</div><b>${x.rv20==null?"—":fmt(x.rv20,1)+"%"}</b><div class="tiny">IV/RV ${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</div></div>`;
  const typ=document.getElementById("optTypeFilter").value,lf=document.getElementById("optLiquidityFilter").value,rank={Thin:0,Tradable:1,Liquid:2};
  const rows=(x.contracts||[])
@@ -3029,7 +3085,24 @@ async function loadOptionsTicker(ticker,opts={}){
  try{
    const r=await fetch(`/api/options/${encodeURIComponent(ticker)}`),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
-   activeOptionsData=j;optionScanMap[ticker]=j;renderOptionsPanel();renderLiveStocks();
+   activeOptionsData=j;optionScanMap[ticker]=j;
+   const wi=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===liveWatchKey(ticker));
+   if(wi>=0){
+     if(liveWatchlist[wi].added_price==null)liveWatchlist[wi].added_price=j.spot??null;
+     liveWatchlist[wi].current_price=j.spot??liveWatchlist[wi].current_price??null;
+     liveWatchlist[wi].iv_state=j.iv_state||liveWatchlist[wi].iv_state||null;
+     liveWatchlist[wi].liquidity=j.liquidity||liveWatchlist[wi].liquidity||null;
+     const lx=liveStockData.find(r=>r.ticker===ticker);
+     if(lx){
+       liveWatchlist[wi].stage=rotationStage(lx).label;
+       liveWatchlist[wi].stage_level=rotationStage(lx).level;
+       liveWatchlist[wi].tail=effectiveTailSignal(lx)||lx.tail_trajectory||liveWatchlist[wi].tail;
+       liveWatchlist[wi].opportunity=opportunityScore(lx);
+     }
+     try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){}
+     renderLiveWatchlist();
+   }
+   renderOptionsPanel();renderLiveStocks();
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
 }
 async function scanVisibleOptions(){
@@ -3090,6 +3163,7 @@ async function loadChartPreview(ticker,period=previewPeriod){
  const seq=++previewRequestSeq,st=document.getElementById("previewStatus"),title=document.getElementById("previewTitle");
  if(title)title.textContent=`${ticker} · Chart Preview`;
  if(st)st.textContent=`Loading ${period.toUpperCase()}…`;
+ document.getElementById("preview1D")?.classList.toggle("active",period==="1d");
  document.getElementById("preview1W")?.classList.toggle("active",period==="1w");
  document.getElementById("preview1M")?.classList.toggle("active",period==="1m");
  try{
@@ -3105,6 +3179,24 @@ async function loadChartPreview(ticker,period=previewPeriod){
    drawPricePreview({bars:[]});
  }
 }
+function opportunityScore(x){
+ let score=0;
+ const stage=rotationStage(x).level;
+ score+=stage*2;
+ const opt=optionScanMap[x.ticker];
+ if(opt&&opt.ok!==false){
+   score+=({Liquid:2,Tradable:1,Thin:0}[opt.liquidity]||0);
+   score+=({"Cheap / Crushed":2,"Normal":1,"Elevated":0,"Juiced":-2,"Unknown":0}[opt.iv_state]||0);
+ }
+ const f=x.fast||x;
+ if(f?.tail_trajectory==="Rotating In")score+=1;
+ if(f?.tail_trajectory==="Rotating Out")score-=1;
+ return Math.max(0,Math.min(10,score));
+}
+function opportunityHTML(x){
+ const s=opportunityScore(x),stars=Math.max(1,Math.min(5,Math.ceil(s/2)));
+ return `<b>${"★".repeat(stars)}${"☆".repeat(5-stars)}</b><div class="tiny">${s}/10 · rotation + options</div>`;
+}
 function renderLiveStocks(){
  const data=filteredLiveStocks();
  const stockState=rrgFocusState["stockChart"];
@@ -3112,7 +3204,7 @@ function renderLiveStocks(){
  drawRRG("stockChart",data);
  document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
  <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
- <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td>
+ <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td><td>${opportunityHTML(x)}</td>
  <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Analyze Ticker</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
  document.querySelectorAll("[data-options-ticker]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();loadOptionsTicker(btn.dataset.optionsTicker)}));
@@ -3401,7 +3493,8 @@ document.getElementById("groupFilter").addEventListener("change",renderGroups);d
    document.getElementById("sectorTitle").textContent=currentSector+" selected";
    loadSector();
  }
-});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1W").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1w")});
+});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1D").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1d")});
+document.getElementById("preview1W").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1w")});
 document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
 document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
 document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=>{
@@ -3414,6 +3507,7 @@ document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=
 document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
 document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
+document.getElementById("refreshLiveWatchlist").addEventListener("click",refreshLiveWatchlistData);
 document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  liveWatchlist=[];
  saveLiveWatchlist();

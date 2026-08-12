@@ -516,3 +516,12 @@ v19.0 — TRADER WORKFLOW UPGRADE
 - Added automatic 1W / 1M daily candlestick + volume chart preview (1M default).
 - Selecting/searching a live ticker loads both chart preview and options chain in the background.
 - No core RRG formula changed.
+
+v19.1 — TRADE REVIEW + WATCHLIST UPGRADE
+- Added 1D to chart preview (1D / 1W / 1M, 1M remains default).
+- Options summary now emphasizes IV relative value using the existing IV/20D-realized-volatility proxy.
+- Added Opportunity score (0–10) combining rotation stage, tail direction, options liquidity, and IV state. It is a ranking aid, not a buy/sell signal.
+- Watchlist now stores the state at bookmark time: date, price when available, ETF, rotation stage/tail, options IV/liquidity, opportunity score.
+- Watchlist displays current price and return since added.
+- Added Refresh prices/options for all saved watchlist names.
+- Clicking a watchlist row loads its chart preview and options chain.
