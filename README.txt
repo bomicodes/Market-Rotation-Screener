@@ -473,3 +473,10 @@ v18.14 — WEEKLY OPTIONS
 - Calls and puts remain included.
 - Cache key bumped so previously cached 7–30 DTE scans do not hide the new weeklies.
 - No RRG calculations or options liquidity thresholds changed.
+
+v18.15 — BARRICK + POST-EARNINGS SEARCH
+- Added Barrick Mining (B) to the XLB workflow universe.
+- B is available in both XLB stock RRG and XLB post-earnings discovery.
+- This is a workflow supplement only and does not assign a fake ETF weight.
+- Added Post-Earnings Search matching ticker or company name.
+- No RRG math, options scoring, or earnings calculations changed.

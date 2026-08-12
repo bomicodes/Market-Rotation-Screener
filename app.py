@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.14"
+APP_VERSION = "18.15"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -55,6 +55,20 @@ INDUSTRIES = {
     "PBW":"Clean Energy",
 }
 RRG_UNIVERSE = {**SECTORS, **INDUSTRIES}
+
+SECTOR_HOLDING_SUPPLEMENTS = {
+    "XLB": [{"ticker": "B", "name": "Barrick Mining Corporation", "weight": None}],
+}
+
+def apply_sector_supplements(etf, holdings):
+    out=[dict(h) for h in holdings]
+    seen={str(h.get("ticker") or h.get("symbol") or "").upper() for h in out}
+    for s in SECTOR_HOLDING_SUPPLEMENTS.get(etf, []):
+        sym=str(s.get("ticker") or "").upper()
+        if sym and sym not in seen:
+            out.append(dict(s))
+            seen.add(sym)
+    return out
 
 CACHE = {}
 CACHE_TTL = 60 * 15
@@ -1624,6 +1638,7 @@ def api_sector(etf):
             f"holdings:{etf}", lambda:get_fund_holdings(etf), force=force_holdings, ttl=3600
         )
         holdings, holdings_source = holding_bundle
+        holdings = apply_sector_supplements(etf, holdings)
         chosen=holdings if limit is None else holdings[:limit]
         tickers=[etf]+[h["ticker"] for h in chosen]
         prices=dl_prices(tickers,"18mo")
@@ -1663,6 +1678,7 @@ def api_postearnings(etf):
             lambda:get_fund_holdings(etf),
             ttl=3600
         )
+        holdings = apply_sector_supplements(etf, holdings)
         tickers = [h["ticker"] for h in holdings]
 
         # Calendar-level discovery only.
@@ -1796,7 +1812,7 @@ def api_diagnostics():
         "alpaca": {
             "configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
             "feed": "indicative",
-            "dte": "7-30"
+            "dte": "0-30"
         },
         "startup_network_calls": False
     })
@@ -2057,6 +2073,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <label class="note">Reported within</label><select id="earnDays"><option>5</option><option selected>10</option><option>14</option><option>20</option></select><span class="note">trading days (approx.)</span>
       <span class="note">All ETF holdings are scanned automatically</span>
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
+      <label class="note">Search</label><input id="earnTickerSearch" type="search" placeholder="Ticker / name…" autocomplete="off" style="width:120px">
       <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
     </div>
     <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles are loaded on demand when you tap Earnings history. If a free source cannot provide enough completed prior events, the row will now say so explicitly instead of appearing stuck.</div>
@@ -2907,7 +2924,14 @@ function compactRRG(r){
 }
 function moverHTML(p){if(!p)return'<span class="mover">LOAD DETAILS</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
 function renderEarnings(){
- let f=document.getElementById("moverFilter").value,arr=earnResults.filter(x=>{let l=(x.profile||{}).label||"UNKNOWN";return f==="all"||(f==="hm"&&(l==="HIGH"||l==="MODERATE"))||(f==="high"&&l==="HIGH")});
+ let f=document.getElementById("moverFilter").value;
+ const search=(document.getElementById("earnTickerSearch")?.value||"").trim().toUpperCase();
+ let arr=earnResults.filter(x=>{
+   let l=(x.profile||{}).label||"UNKNOWN";
+   const moverOk=f==="all"||(f==="hm"&&(l==="HIGH"||l==="MODERATE"))||(f==="high"&&l==="HIGH");
+   const searchOk=!search||String(x.ticker||"").toUpperCase().includes(search)||String(x.name||"").toUpperCase().includes(search);
+   return moverOk&&searchOk;
+ });
  document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>{
    const id=b.dataset.id;
@@ -3128,7 +3152,7 @@ document.getElementById("optLiquidityFilter").addEventListener("change",renderOp
 document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  liveWatchlist=[];
  saveLiveWatchlist();
-});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
+});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
 </script>
 """
 @app.errorhandler(500)
