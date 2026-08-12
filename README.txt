@@ -480,3 +480,30 @@ v18.15 — BARRICK + POST-EARNINGS SEARCH
 - This is a workflow supplement only and does not assign a fake ETF weight.
 - Added Post-Earnings Search matching ticker or company name.
 - No RRG math, options scoring, or earnings calculations changed.
+
+v18.16 — LIVE RRG SEARCH FIX
+- Enter in the Live RRG ticker search now explicitly searches the full selected ETF/group universe.
+- Exact ticker matches automatically focus/highlight that ticker and dim other displayed tails.
+- A single partial match also focuses automatically.
+- Typing still supports the existing debounced live filtering.
+
+v18.17 — GLOBAL LIVE TICKER SEARCH
+- Live RRG ticker search now works before choosing a sector/group.
+- Enter searches all configured sector and industry ETF holdings for the ticker/name.
+- An exact ticker match automatically selects its matching group, loads the full holdings universe, and focuses the ticker on the RRG.
+- Multiple ambiguous matches are shown in the status line so the exact ticker can be entered.
+
+v18.18 — AUTO-LOAD OPTIONS FROM TICKER SEARCH
+- A successful Live RRG ticker search now automatically loads that ticker's 0–30 DTE options chain.
+- Works whether the user already selected a sector/group or used global ticker search first.
+- Search auto-load does not force-scroll the page; the chain is ready when the user scrolls down.
+- Analyze Ticker still loads one chain manually.
+- Scan options remains the separate multi-ticker scanner.
+- No RRG or options scoring logic changed.
+
+v18.19 — AUTO-LOAD OPTIONS ON LIVE TICKER SELECT
+- Clicking any ticker row within a live sector/industry/theme RRG still highlights/dims the RRG as before.
+- The same click now automatically loads that ticker's 0–30 DTE options chain in the background.
+- The page does not auto-scroll; the chain is ready when the user reaches the options panel.
+- Analyze Ticker and Scan options remain available.
+- No RRG calculations or options scoring changed.

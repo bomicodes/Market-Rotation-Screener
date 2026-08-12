@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.15"
+APP_VERSION = "18.19"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1625,6 +1625,33 @@ def api_market():
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
+
+@app.get("/api/ticker-search")
+def api_ticker_search():
+    term=(request.args.get("q") or "").strip().upper()
+    if not term:
+        return jsonify({"ok":True,"query":"","matches":[]})
+    matches=[]
+    seen=set()
+    errors=[]
+    for etf,label in RRG_UNIVERSE.items():
+        try:
+            bundle=cached(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+            holdings,source=bundle
+            holdings=apply_sector_supplements(etf,holdings)
+            for h in holdings:
+                ticker=str(h.get("ticker") or "").upper()
+                name=str(h.get("name") or "")
+                if term==ticker or term in ticker or term in name.upper():
+                    key=(ticker,etf)
+                    if key not in seen:
+                        seen.add(key)
+                        matches.append({"ticker":ticker,"name":name,"etf":etf,"group_name":label,"source":source})
+        except Exception as e:
+            errors.append({"etf":etf,"error":str(e)})
+    matches.sort(key=lambda x:(0 if x["ticker"]==term else 1, len(x["ticker"]), x["ticker"], x["etf"]))
+    return jsonify({"ok":True,"query":term,"matches":matches[:30],"groups_checked":len(RRG_UNIVERSE),"groups_failed":len(errors)})
+
 @app.get("/api/sector/<etf>")
 def api_sector(etf):
     etf=etf.upper()
@@ -2002,6 +2029,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       </select>
       <label class="note">Search</label>
       <input id="liveTickerSearch" type="search" placeholder="Ticker / name…" autocomplete="off" style="width:96px">
+      <span class="tiny">Enter = find ticker + load options</span>
 
 
       <span id="sectorTitle" class="note">Choose a sector</span>
@@ -2678,7 +2706,32 @@ async function ensureLiveSearchUniverse(){
  }
  if(!currentSector){
    const st=document.getElementById("sstatus");
-   if(st)st.textContent="Choose an ETF/group before searching.";
+   if(st)st.textContent=`Finding ${term.toUpperCase()} across all sectors & groups…`;
+   try{
+     const r=await fetch(`/api/ticker-search?q=${encodeURIComponent(term)}`);
+     const j=await r.json();
+     if(!r.ok||!j.ok)throw Error(j.error||"Global ticker search failed");
+     const exact=(j.matches||[]).find(x=>x.ticker===term.toUpperCase());
+     const target=exact||((j.matches||[]).length===1?j.matches[0]:null);
+     if(target){
+       currentSector=target.etf;
+       const sel=document.getElementById("coreSectorSelect");
+       if(sel)sel.value=target.etf;
+       liveSearchData=[];
+       liveSearchSector=null;
+       document.getElementById("sectorTitle").textContent=`${target.etf} · ${target.group_name}`;
+       if(st)st.textContent=`Found ${target.ticker} in ${target.etf} · ${target.group_name}. Loading RRG + options…`;
+       await loadSector();
+       await ensureLiveSearchUniverse();
+     }else if((j.matches||[]).length){
+       const choices=j.matches.slice(0,6).map(x=>`${x.ticker} → ${x.etf}`).join(" · ");
+       if(st)st.textContent=`Multiple matches: ${choices}. Type the exact ticker.`;
+     }else{
+       if(st)st.textContent=`No ticker/name match found across the available sector & industry groups.`;
+     }
+   }catch(e){
+     if(st)st.innerHTML=`<span class="error">Global search failed: ${e.message}</span>`;
+   }
    return;
  }
  if(liveSearchSector===currentSector && liveSearchData.length){
@@ -2707,6 +2760,20 @@ async function ensureLiveSearchUniverse(){
      ? `${matches.length} match${matches.length===1?"":"es"} across all ${j.holdings_total||liveSearchData.length} ${currentSector} holdings`
      : `No match found across all ${j.holdings_total||liveSearchData.length} ${currentSector} holdings`;
    renderLiveStocks();
+   // If search resolves to an exact ticker (or a single match), focus it on the RRG.
+   const exact=matches.find(x=>String(x.ticker||"").toUpperCase()===term.toUpperCase());
+   const target=exact||(matches.length===1?matches[0]:null);
+   if(target){
+     const state=rrgFocusState["stockChart"]||(rrgFocusState["stockChart"]={selected:null});
+     state.selected=target.ticker;
+     renderLiveStocks();
+
+     // Ticker-search workflow: once a single stock is resolved, automatically
+     // load its options chain so the user does not need to click Analyze Ticker.
+     if(alpacaConfigured!==false){
+       loadOptionsTicker(target.ticker,{scroll:false});
+     }
+   }
  }catch(e){
    if(st)st.innerHTML=`<span class="error">Search failed: ${e.message}</span>`;
  }finally{
@@ -2865,8 +2932,8 @@ function renderOptionsPanel(){
  <td>${optionBadgeHTML({liquidity:r.liquidity,iv_state:""})}</td>
  </tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
 }
-async function loadOptionsTicker(ticker){
- focusOptionsPanel();
+async function loadOptionsTicker(ticker,opts={}){
+ if(opts.scroll!==false)focusOptionsPanel();
  const st=document.getElementById("optionsStatus");
  if(alpacaConfigured===false){
    st.innerHTML='<span class="error">Connect Alpaca first using the blue button above, then add the API key + secret in Render.</span>';
@@ -2909,7 +2976,13 @@ function renderLiveStocks(){
  <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Analyze Ticker</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
  document.querySelectorAll("[data-options-ticker]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();loadOptionsTicker(btn.dataset.optionsTicker)}));
- document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>toggleRRGFocus("stockChart",row.dataset.liveTicker)));
+ document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
+   const ticker=row.dataset.liveTicker;
+   toggleRRGFocus("stockChart",ticker);
+   if(ticker && alpacaConfigured!==false){
+     loadOptionsTicker(ticker,{scroll:false});
+   }
+ }));
  refreshLiveBookmarkButtons();syncLiveRowSelection();
 }
 
@@ -3145,7 +3218,14 @@ document.getElementById("groupFilter").addEventListener("change",renderGroups);d
    document.getElementById("sectorTitle").textContent=currentSector+" selected";
    loadSector();
  }
-});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
+});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
+document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=>{
+ if(e.key==="Enter"){
+   e.preventDefault();
+   clearTimeout(liveSearchTimer);
+   await ensureLiveSearchUniverse();
+ }
+});document.getElementById("refreshSector").addEventListener("click",()=>loadSector(true));
 document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
 document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
