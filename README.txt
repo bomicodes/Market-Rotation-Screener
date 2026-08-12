@@ -507,3 +507,12 @@ v18.19 — AUTO-LOAD OPTIONS ON LIVE TICKER SELECT
 - The page does not auto-scroll; the chain is ready when the user reaches the options panel.
 - Analyze Ticker and Scan options remain available.
 - No RRG calculations or options scoring changed.
+
+v19.0 — TRADER WORKFLOW UPGRADE
+- Added macro basket highlighting: Rate Sensitive, Cyclicals, Defensives, Inflation Sensitive.
+- Macro basket selection dims non-members while preserving the full Layer-1 RRG.
+- Added Internal Rotation breadth cards for the currently loaded sector/industry/theme.
+- Added four-stage rotation grading: Early Turn, Early Rotation, Confirmed Rotation, Confirmed/Aligned.
+- Added automatic 1W / 1M daily candlestick + volume chart preview (1M default).
+- Selecting/searching a live ticker loads both chart preview and options chain in the background.
+- No core RRG formula changed.

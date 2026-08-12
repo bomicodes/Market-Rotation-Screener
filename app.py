@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "18.19"
+APP_VERSION = "19.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -55,6 +55,13 @@ INDUSTRIES = {
     "PBW":"Clean Energy",
 }
 RRG_UNIVERSE = {**SECTORS, **INDUSTRIES}
+
+MACRO_BASKETS = {
+    "rate": ["XLK","XLC","XLU","XLRE","XLP"],
+    "cyclical": ["XLY","XLI","XLF","XLB"],
+    "defensive": ["XLV","XLP","XLU"],
+    "inflation": ["XLE","XLB"],
+}
 
 SECTOR_HOLDING_SUPPLEMENTS = {
     "XLB": [{"ticker": "B", "name": "Barrick Mining Corporation", "weight": None}],
@@ -1616,6 +1623,35 @@ def api_options_scan():
         return jsonify({"ok":False,"error":str(e)}),500
 
 
+@app.get("/api/chart-preview/<ticker>")
+def api_chart_preview(ticker):
+    ticker=ticker.upper().strip()
+    try:
+        period=(request.args.get("period") or "1m").lower()
+        if period not in ("1w","1m"):
+            period="1m"
+        # Daily bars are sufficient for a compact swing-trade preview.
+        df=dl_ohlc(ticker,"3mo")
+        if df is None or len(df)==0:
+            return jsonify({"ok":False,"error":"No price history available."}),404
+        df=df.dropna(subset=["Close"]).copy()
+        bars=5 if period=="1w" else 22
+        df=df.tail(bars)
+        rows=[]
+        for idx,row in df.iterrows():
+            rows.append({
+                "date":pd.Timestamp(idx).strftime("%Y-%m-%d"),
+                "open":None if pd.isna(row.get("Open")) else round(float(row.get("Open")),4),
+                "high":None if pd.isna(row.get("High")) else round(float(row.get("High")),4),
+                "low":None if pd.isna(row.get("Low")) else round(float(row.get("Low")),4),
+                "close":round(float(row.get("Close")),4),
+                "volume":None if pd.isna(row.get("Volume")) else int(row.get("Volume")),
+            })
+        return jsonify({"ok":True,"ticker":ticker,"period":period,"bars":rows})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
 @app.get("/api/market")
 def api_market():
     try:
@@ -1946,6 +1982,13 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   #optionsRows td:first-child{min-width:165px}
 }
 
+
+.macroDim{opacity:.16}
+.rotationStage{font-size:11px;font-weight:700;white-space:nowrap}
+.stage1{color:#fca5a5}.stage2{color:#fde68a}.stage3{color:#7dd3fc}.stage4{color:#86efac}
+.previewPeriodBtn.active{border-color:#60a5fa;color:#bfdbfe;background:#172033}
+#pricePreviewChart{height:300px}
+@media(max-width:700px){#pricePreviewChart{height:250px}}
 </style>
 <div class="wrap">
 <h1>Market Rotation Screener</h1>
@@ -1971,7 +2014,15 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   <div class="grid2">
     <div class="panel"><div class="row"><strong>Layer 1 · Groups vs SPY</strong><span class="note">Click a sector row or chart ticker to focus it; click again to clear.</span>
 <select id="groupFilter"><option value="all">All</option><option value="core">Core sectors</option><option value="industry">Industries / themes</option></select>
-<span class="note">Fast RRG = 10/5 daily · Trend RRG = 25/12 daily</span></div><canvas id="sectorChart" width="900" height="540"></canvas></div>
+<label class="note">Macro basket</label>
+<select id="macroBasketFilter">
+  <option value="all">All</option>
+  <option value="rate">Rate sensitive</option>
+  <option value="cyclical">Cyclicals</option>
+  <option value="defensive">Defensives</option>
+  <option value="inflation">Inflation sensitive</option>
+</select>
+<span class="note">Basket selection dims non-members; it does not remove them. Fast RRG = 10/5 daily · Trend RRG = 25/12 daily</span></div><canvas id="sectorChart" width="900" height="540"></canvas></div>
     <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
   </div>
   <div class="panel">
@@ -2039,7 +2090,25 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   </div>
   <div class="grid2">
     <div class="panel"><canvas id="stockChart" width="900" height="540"></canvas></div>
-    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Alignment</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+  </div>
+
+  <div class="grid2">
+    <div class="panel">
+      <div class="row"><strong>Internal Rotation</strong><span class="note">Breadth inside the currently selected sector / industry / theme.</span></div>
+      <div id="internalRotationCards" class="cards"></div>
+      <div id="internalRotationNote" class="note"></div>
+    </div>
+    <div class="panel" id="previewPanel">
+      <div class="row">
+        <strong id="previewTitle">Chart Preview</strong>
+        <button id="preview1W" class="previewPeriodBtn">1W</button>
+        <button id="preview1M" class="previewPeriodBtn active">1M</button>
+        <span id="previewStatus" class="status">Select a ticker to preview price.</span>
+      </div>
+      <canvas id="pricePreviewChart" width="900" height="360"></canvas>
+      <div class="tiny">Daily price + volume · intended as a quick confirmation before opening your full charting platform.</div>
+    </div>
   </div>
 
   <div class="panel" id="optionsPanel">
@@ -2175,7 +2244,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
 </div>
 <script>
-let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0;
+let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
 function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
@@ -2359,7 +2428,9 @@ function drawRRG(id,rows,focusTicker=undefined){
    if(!pts.length)return;
 
    const isSelected=selected===r.ticker;
-   const isFaded=selected && !isSelected;
+   const basket=(id==="sectorChart")?activeMacroBasket():null;
+   const outsideBasket=!!(basket && !basket.has(r.ticker));
+   const isFaded=(selected && !isSelected)||outsideBasket;
    const color=quadColors[r.quadrant];
 
    ctx.strokeStyle=color;
@@ -2466,6 +2537,10 @@ function installRRGInteractions(id){
    const ticker=hitTicker(evt);
    if(!ticker)return;
    toggleRRGFocus(id,ticker);
+   if(id==="stockChart"){
+     loadChartPreview(ticker);
+     if(alpacaConfigured!==false)loadOptionsTicker(ticker,{scroll:false});
+   }
    if(id==="sectorChart"){
      syncSectorRowSelection();
      currentSector=ticker;
@@ -2488,6 +2563,16 @@ function installRRGInteractions(id){
 installRRGInteractions("sectorChart");
 installRRGInteractions("stockChart");
 installRRGInteractions("historyChart");
+const MACRO_BASKETS={
+ rate:new Set(["XLK","XLC","XLU","XLRE","XLP"]),
+ cyclical:new Set(["XLY","XLI","XLF","XLB"]),
+ defensive:new Set(["XLV","XLP","XLU"]),
+ inflation:new Set(["XLE","XLB"])
+};
+function activeMacroBasket(){
+ const key=document.getElementById("macroBasketFilter")?.value||"all";
+ return key==="all"?null:MACRO_BASKETS[key];
+}
 function filteredGroups(){
  let f=document.getElementById("groupFilter")?.value||"all";
  return sectorData.filter(x=>f==="all"||(f==="core"&&x.group==="Core Sector")||(f==="industry"&&x.group==="Industry / Theme"));
@@ -2502,7 +2587,7 @@ function renderGroups(){
  }
 
  drawRRG("sectorChart",data);
- document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow sectorTickerRow" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
+ document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow sectorTickerRow ${activeMacroBasket()&&!activeMacroBasket().has(x.ticker)?"macroDim":""}" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
 
  document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",()=>{
    const t=el.dataset.sector;
@@ -2767,6 +2852,7 @@ async function ensureLiveSearchUniverse(){
      const state=rrgFocusState["stockChart"]||(rrgFocusState["stockChart"]={selected:null});
      state.selected=target.ticker;
      renderLiveStocks();
+     loadChartPreview(target.ticker);
 
      // Ticker-search workflow: once a single stock is resolved, automatically
      // load its options chain so the user does not need to click Analyze Ticker.
@@ -2965,6 +3051,60 @@ async function scanVisibleOptions(){
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}finally{btn.disabled=false}
 }
 
+function drawPricePreview(payload){
+ const c=document.getElementById("pricePreviewChart"),ctx=c?.getContext("2d");
+ if(!c||!ctx)return;
+ const rows=payload?.bars||[],W=c.width,H=c.height;
+ ctx.clearRect(0,0,W,H);ctx.fillStyle="#0d1217";ctx.fillRect(0,0,W,H);
+ if(!rows.length){ctx.fillStyle="#8b95a5";ctx.fillText("No price data",24,30);return}
+ const pad={l:48,r:18,t:18,b:62},volH=55;
+ const highs=rows.map(x=>x.high??x.close),lows=rows.map(x=>x.low??x.close);
+ let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.08;hi+=range*.08;
+ const priceBottom=H-pad.b-volH-8;
+ const X=i=>pad.l+(i+.5)*(W-pad.l-pad.r)/rows.length;
+ const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
+ ctx.strokeStyle="#27303a";ctx.lineWidth=1;
+ for(let k=0;k<4;k++){let y=pad.t+k*(priceBottom-pad.t)/3;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke()}
+ const maxVol=Math.max(1,...rows.map(x=>x.volume||0));
+ const bw=Math.max(3,Math.min(18,(W-pad.l-pad.r)/rows.length*.55));
+ rows.forEach((r,i)=>{
+   const x=X(i),up=(r.close??0)>=(r.open??r.close??0);
+   ctx.globalAlpha=.8;ctx.strokeStyle=up?"#22c55e":"#ef4444";ctx.fillStyle=up?"#22c55e":"#ef4444";
+   if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(r.high));ctx.lineTo(x,Y(r.low));ctx.stroke()}
+   const yo=Y(r.open??r.close),yc=Y(r.close),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));
+   ctx.fillRect(x-bw/2,top,bw,h);
+   const vh=(r.volume||0)/maxVol*volH;
+   ctx.globalAlpha=.35;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);
+ });
+ ctx.globalAlpha=1;ctx.fillStyle="#94a3b8";ctx.font="10px sans-serif";
+ ctx.fillText(`$${hi.toFixed(2)}`,4,pad.t+4);ctx.fillText(`$${lo.toFixed(2)}`,4,priceBottom);
+ const first=rows[0],last=rows[rows.length-1],chg=(last.close/first.close-1)*100;
+ ctx.font="bold 12px sans-serif";ctx.fillStyle=chg>=0?"#86efac":"#fca5a5";
+ ctx.fillText(`${last.close.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-18);
+ ctx.fillStyle="#64748b";ctx.font="10px sans-serif";
+ ctx.fillText(first.date,pad.l,H-4);ctx.textAlign="right";ctx.fillText(last.date,W-pad.r,H-4);ctx.textAlign="left";
+}
+async function loadChartPreview(ticker,period=previewPeriod){
+ if(!ticker)return;
+ previewTicker=ticker;previewPeriod=period;
+ const seq=++previewRequestSeq,st=document.getElementById("previewStatus"),title=document.getElementById("previewTitle");
+ if(title)title.textContent=`${ticker} · Chart Preview`;
+ if(st)st.textContent=`Loading ${period.toUpperCase()}…`;
+ document.getElementById("preview1W")?.classList.toggle("active",period==="1w");
+ document.getElementById("preview1M")?.classList.toggle("active",period==="1m");
+ try{
+   const r=await fetch(`/api/chart-preview/${encodeURIComponent(ticker)}?period=${period}`);
+   const j=await r.json();
+   if(seq!==previewRequestSeq)return;
+   if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
+   drawPricePreview(j);
+   if(st)st.textContent=`${period.toUpperCase()} · ${j.bars?.length||0} daily bars`;
+ }catch(e){
+   if(seq!==previewRequestSeq)return;
+   if(st)st.innerHTML=`<span class="error">${e.message}</span>`;
+   drawPricePreview({bars:[]});
+ }
+}
 function renderLiveStocks(){
  const data=filteredLiveStocks();
  const stockState=rrgFocusState["stockChart"];
@@ -2972,18 +3112,61 @@ function renderLiveStocks(){
  drawRRG("stockChart",data);
  document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
  <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
- <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td>
+ <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td>
  <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Analyze Ticker</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
  document.querySelectorAll("[data-options-ticker]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();loadOptionsTicker(btn.dataset.optionsTicker)}));
  document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
    const ticker=row.dataset.liveTicker;
    toggleRRGFocus("stockChart",ticker);
-   if(ticker && alpacaConfigured!==false){
-     loadOptionsTicker(ticker,{scroll:false});
+   if(ticker){
+     loadChartPreview(ticker);
+     if(alpacaConfigured!==false)loadOptionsTicker(ticker,{scroll:false});
    }
  }));
  refreshLiveBookmarkButtons();syncLiveRowSelection();
+ renderInternalRotation();
+}
+
+function rotationStage(x){
+ const f=x?.fast||x||{},t=x?.trend||{};
+ const bothFast=!!(f.rs_up&&f.mom_up),bothTrend=!!(t.rs_up&&t.mom_up);
+ if((f.quadrant==="Leading"||f.quadrant==="Improving")&&bothFast&&(t.quadrant==="Leading"||t.quadrant==="Improving")&&bothTrend)
+   return {level:4,label:"CONFIRMED / ALIGNED"};
+ if(f.quadrant==="Improving"&&bothFast)
+   return {level:3,label:"CONFIRMED ROTATION"};
+ if(f.mom_up&&f.rs_up)
+   return {level:2,label:"EARLY ROTATION"};
+ if(f.quadrant==="Lagging"&&f.mom_up)
+   return {level:1,label:"EARLY TURN"};
+ return {level:0,label:x?.alignment||"MIXED"};
+}
+function rotationStageHTML(x){
+ const s=rotationStage(x);
+ return `<span class="rotationStage stage${s.level}">${s.level?`${s.level}/4 · `:""}${s.label}</span>`;
+}
+
+function renderInternalRotation(){
+ const el=document.getElementById("internalRotationCards"),note=document.getElementById("internalRotationNote");
+ if(!el)return;
+ const data=liveStockData||[];
+ if(!currentSector||!data.length){
+   el.innerHTML='<div class="card"><div class="tiny">NO GROUP LOADED</div><b>—</b></div>';
+   if(note)note.textContent="Choose a sector / industry / theme to measure constituent participation.";
+   return;
+ }
+ const n=data.length;
+ const improving=data.filter(x=>["Improving","Leading"].includes(x.fast?.quadrant||x.quadrant)).length;
+ const rotating=data.filter(x=>{const s=rotationStage(x);return s.level>=2}).length;
+ const aligned=data.filter(x=>rotationStage(x).level>=4).length;
+ const early=data.filter(x=>rotationStage(x).level===1).length;
+ const p=v=>n?Math.round(v/n*100):0;
+ el.innerHTML=`
+   <div class="card"><div class="tiny">IMPROVING + LEADING</div><b>${p(improving)}%</b><div class="tiny">${improving}/${n} names</div></div>
+   <div class="card"><div class="tiny">ROTATION 2+/4</div><b>${p(rotating)}%</b><div class="tiny">${rotating}/${n} names</div></div>
+   <div class="card"><div class="tiny">FULLY ALIGNED</div><b>${p(aligned)}%</b><div class="tiny">${aligned}/${n} names</div></div>
+   <div class="card"><div class="tiny">EARLY TURNS</div><b>${p(early)}%</b><div class="tiny">${early}/${n} names</div></div>`;
+ if(note)note.textContent=`${currentSector} internal breadth · based on the ${n} holdings currently loaded.`;
 }
 
 function alignBadge(a){
@@ -3208,7 +3391,7 @@ document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
-document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
+document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("macroBasketFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
  if(e.target.value){
    currentSector=e.target.value;
    liveSearchData=[];
@@ -3218,7 +3401,9 @@ document.getElementById("groupFilter").addEventListener("change",renderGroups);d
    document.getElementById("sectorTitle").textContent=currentSector+" selected";
    loadSector();
  }
-});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
+});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1W").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1w")});
+document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
+document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
 document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=>{
  if(e.key==="Enter"){
    e.preventDefault();
