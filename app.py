@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "20.0"
+APP_VERSION = "21.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -22,6 +22,8 @@ ALPACA_TRADING_BASE_URL = os.environ.get("ALPACA_TRADING_BASE_URL", "https://pap
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 ALPACA_OPTIONS_FEED = os.environ.get("ALPACA_OPTIONS_FEED", "indicative").strip().lower() or "indicative"
 FLOW_MIN_PREMIUM = float(os.environ.get("FLOW_MIN_PREMIUM", "25000"))
+FLOW_MAX_CANDIDATES = int(os.environ.get("FLOW_MAX_CANDIDATES", "800"))
+FLOW_TRADE_WORKERS = max(1, min(6, int(os.environ.get("FLOW_TRADE_WORKERS", "4"))))
 
 
 SECTORS = {
@@ -1392,22 +1394,28 @@ def modeled_dealer_positioning(rows, spot):
     }
 
 def _option_trade_chunks(symbols, start_iso, end_iso, feed):
-    """Fetch today's option trades for a bounded contract sample."""
-    out=[]
-    # Small chunks prevent one very-active symbol from consuming an entire page.
-    for i in range(0,len(symbols),20):
-        chunk=symbols[i:i+20]
-        # Historical options /trades does NOT accept a `feed` query parameter.
-        # Alpaca selects the best feed available to the account; for users without
-        # real-time entitlement, `end` must be at least 15 minutes old (handled above).
+    """Fetch today's option trades across a high-coverage contract universe.
+
+    V21.2 prioritizes coverage because flow is being used as a decision-support layer.
+    Contract chunks are fetched concurrently, while each chunk is paginated deeply
+    enough that very-active names are less likely to crowd out other contracts.
+    """
+    chunks=[symbols[i:i+20] for i in range(0,len(symbols),20)]
+
+    def fetch_chunk(chunk):
+        local=[]
         params={"symbols":",".join(chunk),"start":start_iso,"end":end_iso,"limit":10000,"sort":"asc"}
         token=None
-        for _ in range(3):
+        for _ in range(5):
             if token: params["page_token"]=token
-            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=30)
+            elif "page_token" in params: params.pop("page_token",None)
+            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=35)
             if r.status_code in (401,403):
                 raise RuntimeError("Alpaca option-trade access was rejected. Check market-data permissions.")
-            if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while loading flow.")
+            if r.status_code==429:
+                time.sleep(1.0)
+                r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=35)
+            if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while loading high-coverage flow.")
             if r.status_code>=400:
                 try:
                     detail=(r.json() or {}).get("message") or r.text
@@ -1418,9 +1426,15 @@ def _option_trade_chunks(symbols, start_iso, end_iso, feed):
             trades=j.get("trades") or {}
             if isinstance(trades,dict):
                 for sym,arr in trades.items():
-                    for t in (arr or []): out.append((sym,t))
+                    for t in (arr or []): local.append((sym,t))
             token=j.get("next_page_token")
             if not token: break
+        return local
+
+    out=[]
+    with ThreadPoolExecutor(max_workers=min(FLOW_TRADE_WORKERS,max(1,len(chunks)))) as ex:
+        futs=[ex.submit(fetch_chunk,c) for c in chunks]
+        for f in as_completed(futs): out.extend(f.result())
     return out
 
 def _parse_trade_ts(v):
@@ -1490,13 +1504,16 @@ def _cluster_institutional_events(raw, meta):
         if e["premium"] < FLOW_MIN_PREMIUM and e["max_print"] < FLOW_MIN_PREMIUM: continue
         premium=e["premium"]
         # 0-100 relevance score. This estimates "institutional-looking", not bullish/bearish.
-        premium_pts=min(55.0, max(0.0,(math.log10(max(premium,1))-4.0)*22.0))
-        ratio_pts=0.0 if ratio in (None,0) else min(20.0, (ratio if ratio<999 else 4.0)*5.0)
-        repeat_pts=min(15.0,max(0,e["prints"]-1)*3.0)
-        block_pts=min(10.0,e["max_print"]/250000.0*10.0)
+        # Recalibrated in V21.2: a genuine ~$500K block should not be buried as
+        # "Watch" simply because volume/OI is quiet. Premium and block size lead;
+        # turnover and repeated execution add confidence.
+        premium_pts=min(60.0, max(0.0, math.log10((premium/FLOW_MIN_PREMIUM)+1.0)*35.0))
+        ratio_pts=0.0 if ratio in (None,0) else min(18.0, (ratio if ratio<999 else 4.0)*4.5)
+        repeat_pts=min(12.0,max(0,e["prints"]-1)*2.0)
+        block_pts=min(15.0,e["max_print"]/500000.0*15.0)
         score=min(100.0,premium_pts+ratio_pts+repeat_pts+block_pts)
-        if score>=75: relevance="High"
-        elif score>=50: relevance="Medium"
+        if score>=60: relevance="High"
+        elif score>=40: relevance="Medium"
         else: relevance="Watch"
         events.append({
             "symbol":e["symbol"],"type":e.get("type"),"expiration":e.get("expiration"),"strike":e.get("strike"),
@@ -1510,11 +1527,11 @@ def _cluster_institutional_events(raw, meta):
 
 
 def flow_payload(ticker, options_payload=None):
-    """V21.1 institutional-flow engine from Alpaca option trades.
+    """V21.2 high-coverage institutional-flow engine from Alpaca option trades.
 
-    Broad chain discovery -> institutional candidate prefilter -> raw trade history ->
-    fragmented-print clustering -> unusualness scoring. Direction is intentionally
-    left unclassified until contemporaneous NBBO alignment is available.
+    Broad chain discovery -> institutional candidate prefilter -> near-complete candidate
+    coverage -> raw trade history -> fragmented-print clustering -> unusualness scoring.
+    Direction is intentionally left unclassified until contemporaneous NBBO alignment is available.
     """
     ticker=ticker.upper().strip()
     x=options_payload or options_quality_payload(ticker)
@@ -1532,7 +1549,22 @@ def flow_payload(ticker, options_payload=None):
         last_notional=last_size*px*100.0
         if ((vol>=50 and gross_activity>=100000) or ratio>=1.5 or last_notional>=FLOW_MIN_PREMIUM or vol>=500):
             r=dict(r); r["institutional_candidate_score"]=_institutional_candidate_score(r); eligible.append(r)
-    candidates=sorted(eligible,key=lambda r:r.get("institutional_candidate_score",0),reverse=True)[:240]
+    eligible=sorted(eligible,key=lambda r:r.get("institutional_candidate_score",0),reverse=True)
+    eligible_total=len(eligible)
+    # Accuracy-first coverage: scan every institutional candidate whenever practical.
+    # For enormous chains, cap at FLOW_MAX_CANDIDATES (default 800), which still
+    # captures ~97% of an 821-candidate chain such as the supplied GOOGL example.
+    candidates=eligible if eligible_total<=FLOW_MAX_CANDIDATES else eligible[:FLOW_MAX_CANDIDATES]
+    candidate_coverage_pct=(100.0*len(candidates)/eligible_total) if eligible_total else 0.0
+    def activity_weight(r):
+        vol=float(r.get("volume") or 0); px=float(r.get("last") or r.get("mid") or 0); last_size=float(r.get("last_size") or 0)
+        return max(0.0,vol*px*100.0)+max(0.0,last_size*px*100.0)
+    eligible_activity=sum(activity_weight(r) for r in eligible)
+    selected_activity=sum(activity_weight(r) for r in candidates)
+    activity_coverage_pct=(100.0*selected_activity/eligible_activity) if eligible_activity>0 else candidate_coverage_pct
+    if candidate_coverage_pct>=90 and activity_coverage_pct>=95: coverage_confidence="High"
+    elif candidate_coverage_pct>=70 and activity_coverage_pct>=85: coverage_confidence="Medium"
+    else: coverage_confidence="Low"
     meta={r["symbol"]:r for r in candidates if r.get("symbol")}; symbols=list(meta)
     if not symbols:
         return {"ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"prints":0,"premium":0,"note":"No institutional-candidate contracts found in the current broad chain."}
@@ -1575,8 +1607,9 @@ def flow_payload(ticker, options_payload=None):
     unusual=sorted(unusual,key=lambda z:(z["premium"],z.get("vol_oi") or 0),reverse=True)[:12]
 
     return {
-        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"engine_version":"21.1",
+        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"engine_version":"21.2",
         "contracts_sampled":len(symbols),"eligible_contracts":len(eligible),"universe_contracts":len(rows),
+        "candidate_coverage_pct":round(candidate_coverage_pct,1),"activity_coverage_pct":round(activity_coverage_pct,1),"coverage_confidence":coverage_confidence,
         "start":start_iso,"end":end_iso,"all_prints":allprints,"gross_premium":round(total,2),
         "call_premium":round(callprem,2),"put_premium":round(putprem,2),
         "call_pct":round(callprem/total*100,1) if total else None,"put_pct":round(putprem/total*100,1) if total else None,
@@ -1586,7 +1619,7 @@ def flow_payload(ticker, options_payload=None):
         "institutional_put_pct":round(event_puts/event_total*100,1) if event_total else None,
         "high_relevance_events":high,"medium_relevance_events":med,
         "largest":events[:15],"events":events[:40],"unusual":unusual,"direction_available":False,
-        "note":"V21.1 Institutional Flow Engine: broad ~900-day/wide-strike chain, institutional-relevance prefilter, then fragmented prints are clustered into contract events and scored for unusualness. Institutional premium is the sum of qualifying clustered events, not all sampled transaction premium. Call/put describes contract type only; bullish/bearish direction remains unconfirmed without contemporaneous NBBO alignment."
+        "note":"V21.2 Institutional Flow Engine: broad ~900-day/wide-strike chain with accuracy-first candidate coverage (all institutional candidates up to the configurable safety ceiling), deeper paginated trade retrieval, fragmented-print clustering, and recalibrated unusualness scoring. Institutional premium is qualifying clustered-event premium, not all sampled premium. Contract mix is calls vs puts only; bullish/bearish direction remains unconfirmed without contemporaneous NBBO alignment."
     }
 
 def options_quality_payload(ticker):
@@ -1912,7 +1945,7 @@ def api_historical_rrg():
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"options-v21:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
+        payload,stale,err=cached_refresh_safe(f"options-v21-2:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -1921,8 +1954,8 @@ def api_options(ticker):
 def api_flow(ticker):
     try:
         force=request.args.get("refresh") in ("1","true","yes")
-        base,_,_=cached_refresh_safe(f"options-v21:{ticker.upper()}",lambda:options_quality_payload(ticker),ttl=600)
-        payload,stale,err=cached_refresh_safe(f"flow-v21:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=180)
+        base,_,_=cached_refresh_safe(f"options-v21-2:{ticker.upper()}",lambda:options_quality_payload(ticker),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"flow-v21-2:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=180)
         return jsonify({"ok":True,"stale":stale,"refresh_error":err,**payload})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -1943,7 +1976,7 @@ def api_options_scan():
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
             try:
-                p,stale,err=cached_refresh_safe(f"options-v21:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                p,stale,err=cached_refresh_safe(f"options-v21-2:{sym}",lambda:options_quality_payload(sym),ttl=600)
                 return {"ok":True,**p,"stale":stale}
             except Exception as e:
                 return {"ok":False,"ticker":sym,"error":str(e)}
@@ -2452,10 +2485,6 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <strong>Options · 0–30 DTE</strong>
       <span class="note">Alpaca options data for screening. Positioning is modeled; flow is sampled and does not infer buyer/seller intent.</span>
       <a id="alpacaSignupBtn" href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="setupBtn">Connect Alpaca / Get API Key ↗</a>
-      <label class="note">Type</label>
-      <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
-      <label class="note">Liquidity</label>
-      <select id="optLiquidityFilter"><option value="all">Any</option><option value="Tradable">Tradable+</option><option value="Liquid">Liquid only</option></select>
       <span id="optionsUnderlying" class="note"></span>
       <span id="optionsStatus" class="status"></span>
     </div>
@@ -2479,18 +2508,25 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div id="optionsScanSection" style="display:none">
       <div class="row" style="margin-top:10px">
         <strong>Scan Results</strong>
-        <span class="note">Ranked across all currently filtered RRG tickers. Click Analyze Ticker for the full chain.</span>
+        <span class="note">Ranked across all currently filtered RRG tickers. Select a ticker row above to load its full chain automatically.</span>
       </div>
       <div class="scroll"><table>
-        <thead><tr><th>#</th><th>Ticker</th><th>Liquidity</th><th>ATM IV</th><th>IV state</th><th>IV/RV</th><th>Liquid contracts</th><th>Tradable contracts</th><th>Action</th></tr></thead>
+        <thead><tr><th>#</th><th>Ticker</th><th>Liquidity</th><th>ATM IV</th><th>IV state</th><th>IV/RV</th><th>Liquid contracts</th><th>Tradable contracts</th></tr></thead>
         <tbody id="optionsScanRows"></tbody>
       </table></div>
     </div>
     <div id="optionsDetailSection">
       <div id="optionsSummary" class="cards"></div>
+      <div class="row" style="margin:10px 0 6px 0">
+        <strong>Options chain</strong>
+        <label class="note">Call / Put</label>
+        <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
+        <label class="note">Liquidity</label>
+        <select id="optLiquidityFilter"><option value="all">Any</option><option value="Tradable">Tradable+</option><option value="Liquid">Liquid only</option></select>
+      </div>
       <div class="scroll"><table>
         <thead><tr><th>Contract</th><th>DTE</th><th>Mid</th><th>Bid</th><th>Ask</th><th>Spread</th><th>Vol</th><th>OI</th><th>IV</th><th>Delta</th><th>Liquidity</th></tr></thead>
-        <tbody id="optionsRows"><tr><td colspan="11" class="note">Click Analyze Ticker for a human-readable 0–30 DTE chain, including weekly contracts under 7 DTE. Mid premium is highlighted; the raw OCC symbol is shown in small text.</td></tr></tbody>
+        <tbody id="optionsRows"><tr><td colspan="11" class="note">Select a ticker in the RRG/table to load a human-readable 0–30 DTE chain, including weekly contracts under 7 DTE. Mid premium is highlighted; the raw OCC symbol is shown in small text.</td></tr></tbody>
       </table></div>
     </div>
   </div>
@@ -3342,7 +3378,7 @@ function renderOptionsScanResults(results){
  section.style.display="block";
  body.innerHTML=arr.map((x,k)=>{
    if(x.ok===false||x.error){
-     return `<tr><td>${k+1}</td><td><b>${x.ticker||"—"}</b></td><td colspan="6"><span class="error">${x.error||"Scan failed"}</span></td><td><button class="optionsBtn scanAnalyzeBtn" data-scan-analyze="${x.ticker||""}">Analyze Ticker</button></td></tr>`;
+     return `<tr><td>${k+1}</td><td><b>${x.ticker||"—"}</b></td><td colspan="6"><span class="error">${x.error||"Scan failed"}</span></td></tr>`;
    }
    return `<tr>
      <td>${k+1}</td>
@@ -3353,14 +3389,8 @@ function renderOptionsScanResults(results){
      <td>${x.iv_rv_ratio==null?"—":fmt(x.iv_rv_ratio,2)}</td>
      <td>${x.liquid_contracts??0}</td>
      <td>${x.tradable_contracts??0}</td>
-     <td><button class="optionsBtn scanAnalyzeBtn" data-scan-analyze="${x.ticker}">Analyze Ticker</button></td>
    </tr>`;
  }).join("");
- document.querySelectorAll("[data-scan-analyze]").forEach(btn=>btn.addEventListener("click",evt=>{
-   evt.stopPropagation();
-   const t=btn.dataset.scanAnalyze;
-   if(t)loadOptionsTicker(t);
- }));
 }
 
 
@@ -3408,13 +3438,16 @@ function renderPositioning(p,spot){
 let activeFlowData=null;
 function renderFlow(x){
  const sec=document.getElementById("flowSection"),sum=document.getElementById("flowSummary"),rows=document.getElementById("flowRows"),disc=document.getElementById("flowDisclosure"),un=document.getElementById("unusualFlow"),st=document.getElementById("flowStatus");
- if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · v${x.engine_version||"21"} · ${x.contracts_sampled||0} scanned / ${x.eligible_contracts||0} institutional candidates / ${x.universe_contracts||x.contracts_sampled||0} active`;
+ if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · v${x.engine_version||"21"} · ${x.contracts_sampled||0}/${x.eligible_contracts||0} candidates · ${x.candidate_coverage_pct==null?"—":fmt(x.candidate_coverage_pct,1)+"%"} coverage`;
  const cp=x.institutional_call_pct==null?0:x.institutional_call_pct,pp=x.institutional_put_pct==null?0:x.institutional_put_pct;
+ const conf=x.coverage_confidence||"Unknown", confCls=conf==="High"?"good":conf==="Medium"?"warn":"bad";
  sum.innerHTML=`<div class="metricCard"><div class="tiny">INSTITUTIONAL EVENT PREMIUM</div><div class="big">${moneyShort(x.institutional_premium)}</div><div class="tiny">${x.institutional_events||0} clustered events · ${x.high_relevance_events||0} high relevance</div></div>
- <div class="metricCard"><div class="tiny">RAW SAMPLE</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} prints · ${x.contracts_sampled||0}/${x.eligible_contracts||x.contracts_sampled||0} candidates</div></div>
- <div class="metricCard"><div class="tiny">INSTITUTIONAL CALL / PUT</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div><div class="tiny">${moneyShort(x.institutional_call_premium)} calls · ${moneyShort(x.institutional_put_premium)} puts</div></div>
+ <div class="metricCard"><div class="tiny">CANDIDATE COVERAGE</div><div class="big">${x.candidate_coverage_pct==null?"—":fmt(x.candidate_coverage_pct,1)+"%"}</div><div class="tiny">${x.contracts_sampled||0}/${x.eligible_contracts||0} candidates · ${x.activity_coverage_pct==null?"—":fmt(x.activity_coverage_pct,1)+"%"} est. activity</div></div>
+ <div class="metricCard ${confCls}"><div class="tiny">FLOW CONFIDENCE</div><div class="big">${conf}</div><div class="tiny">coverage confidence, not directional confidence</div></div>
+ <div class="metricCard"><div class="tiny">CONTRACT MIX · CALL / PUT</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div><div class="tiny">${moneyShort(x.institutional_call_premium)} calls · ${moneyShort(x.institutional_put_premium)} puts</div></div>
+ <div class="metricCard"><div class="tiny">DIRECTION</div><div class="big">Unconfirmed</div><div class="tiny">requires contemporaneous NBBO / aggressor classification</div></div>
  <div class="metricCard"><div class="tiny">LARGEST EVENT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)} · ${x.largest[0].prints||1} prints`:"No qualifying event"}</div></div>
- <div class="metricCard ${pp>=60?"warn":cp>=60?"good":""}"><div class="tiny">EVENT TYPE SKEW</div><div class="big">${pp>=60?"Put-heavy":cp>=60?"Call-heavy":"Balanced"}</div><div class="tiny">contract type only · direction unconfirmed</div></div>`;
+ <div class="metricCard"><div class="tiny">RAW SAMPLE</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} prints · context only</div></div>`;
  if(disc)disc.innerHTML=`<b>Important:</b> ${x.note||""}`;
  if(rows)rows.innerHTML=(x.largest||[]).length?(x.largest||[]).map(r=>`<tr><td>${readableContractHTML(r,x.ticker)}<div class="tiny">${r.relevance||""} relevance · score ${r.institutional_score==null?"—":fmt(r.institutional_score,0)} · ${r.prints||1} prints</div></td><td>$${fmt(r.price,2)}</td><td>${r.size}</td><td><b>${moneyShort(r.premium)}</b></td><td>${r.timestamp?new Date(r.timestamp).toLocaleTimeString([], {hour:"numeric",minute:"2-digit",second:"2-digit"}):"—"}</td></tr>`).join(""):'<tr><td colspan="5" class="note">No qualifying institutional events in the current sample.</td></tr>';
  if(un){const a=(x.unusual||[]).slice(0,8);un.innerHTML=a.length?`<b>Volume/OI anomalies:</b> `+a.map(r=>`${formatOptionDate(r.expiration)} $${fmt(r.strike,0)} ${optionTypeShort(r.type)} · ${r.vol_oi==null?"new OI":fmt(r.vol_oi,1)+"× OI"} · ${moneyShort(r.premium)}`).join(" &nbsp; | &nbsp; "):""}
@@ -3587,9 +3620,8 @@ function renderLiveStocks(){
  document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
  <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
  <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td><td>${opportunityHTML(x)}</td>
- <td><button class="optionsBtn" data-options-ticker="${x.ticker}">Analyze Ticker</button><div>${optionBadgeHTML(optionScanMap[x.ticker])}</div></td></tr>`).join("");
+ <td>${optionBadgeHTML(optionScanMap[x.ticker])}</td></tr>`).join("");
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
- document.querySelectorAll("[data-options-ticker]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();loadOptionsTicker(btn.dataset.optionsTicker)}));
  document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
    const ticker=row.dataset.liveTicker;
    toggleRRGFocus("stockChart",ticker);

@@ -1,3 +1,20 @@
+MARKET ROTATION SCREENER v21.2 — HIGH-COVERAGE FLOW
+=====================================================
+
+NEW IN v21.2
+- Removed the redundant Analyze Ticker buttons. Selecting a ticker now loads its options details automatically.
+- Moved Call/Put and Liquidity filters directly above the 0–30 DTE options chain.
+- Institutional Flow now scans every institutional candidate when there are <= 800 candidates (configurable with FLOW_MAX_CANDIDATES).
+- Very large chains scan the top 800 candidates by institutional relevance; the UI reports exact candidate coverage and estimated-activity coverage.
+- Added Flow Confidence based on observed coverage. This is confidence in coverage, NOT bullish/bearish direction.
+- Contract mix is explicitly separated from direction. Calls vs puts no longer receives a bullish/bearish label.
+- Institutional-event scoring was recalibrated so genuine large blocks can reach High relevance even when volume/OI is quiet.
+- Historical trade retrieval now paginates more deeply and parallelizes contract chunks to keep high-coverage scans practical.
+- Default safety settings: FLOW_MAX_CANDIDATES=800 and FLOW_TRADE_WORKERS=4.
+
+IMPORTANT FLOW NOTE
+Call/put mix describes the option contract type only. Buyer/seller direction remains unconfirmed until contemporaneous NBBO/aggressor classification is added. Keep FlowMS as a directional cross-check for now.
+
 MARKET ROTATION SCREENER v9 — CLOUD / MOBILE
 ================================================
 
