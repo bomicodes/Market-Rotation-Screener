@@ -1423,35 +1423,123 @@ def _option_trade_chunks(symbols, start_iso, end_iso, feed):
             if not token: break
     return out
 
-def flow_payload(ticker, options_payload=None):
-    """Build a transparent, sampled intraday flow view from Alpaca trades.
+def _parse_trade_ts(v):
+    if not v: return None
+    try:
+        return pd.Timestamp(v).to_pydatetime()
+    except Exception:
+        return None
 
-    We intentionally do NOT label transactions as bought/sold because Alpaca's
-    documented historical options API exposes trades but not a historical NBBO
-    endpoint that lets us reliably align each print to the contemporaneous quote.
+
+def _institutional_candidate_score(r):
+    """Rank contracts for flow inspection without reusing the user's trade-selector rules."""
+    vol=float(r.get("volume") or 0); oi=float(r.get("open_interest") or 0)
+    px=float(r.get("last") or r.get("mid") or 0)
+    last_size=float(r.get("last_size") or 0)
+    gross_activity=max(0.0, vol*px*100.0)
+    last_notional=max(0.0, last_size*px*100.0)
+    ratio=(vol/oi) if oi>0 else (6.0 if vol>0 else 0.0)
+    ratio=min(ratio,10.0)
+    # Reward large dollar activity first, then abnormal turnover and block-like last prints.
+    score=(math.log10(gross_activity+1)*2.2)+(min(vol,5000)/5000.0)*1.5+ratio*0.9+(math.log10(last_notional+1))*0.7
+    return score
+
+
+def _cluster_institutional_events(raw, meta):
+    """Cluster fragmented prints into contract-level institutional flow events.
+
+    This is intentionally *not* directional classification. It groups nearby prints
+    in the same contract when they occur within 90 seconds and at similar prices,
+    which helps keep split/block executions from appearing as dozens of unrelated prints.
+    """
+    seed=[]
+    for sym,t in raw:
+        p=_safe_float(t.get("p",t.get("price"))); sz=_safe_float(t.get("s",t.get("size")))
+        if p is None or sz is None or p<=0 or sz<=0: continue
+        ts=_parse_trade_ts(t.get("t",t.get("timestamp")))
+        prem=p*sz*100.0
+        seed.append((sym,ts,p,int(sz),prem,t))
+    seed.sort(key=lambda z:((z[0] or ""), z[1] or datetime.min))
+    clusters=[]; cur=None
+    for sym,ts,p,sz,prem,t in seed:
+        if cur is not None and cur["symbol"]==sym and ts is not None and cur["end_dt"] is not None:
+            gap=(ts-cur["end_dt"]).total_seconds()
+            ref=max(cur["vwap"],.01)
+            similar=abs(p-ref)/ref<=0.075
+            if gap<=90 and similar:
+                oldprem=cur["premium"]
+                cur["premium"]+=prem; cur["size"]+=sz; cur["prints"]+=1
+                cur["vwap"]=(cur["vwap"]*oldprem+p*prem)/max(cur["premium"],1)
+                cur["end_dt"]=ts; cur["end_timestamp"]=t.get("t",t.get("timestamp"))
+                cur["max_print"]=max(cur["max_print"],prem)
+                continue
+        if cur is not None: clusters.append(cur)
+        r=meta.get(sym,{})
+        cur={"symbol":sym,"type":r.get("type"),"expiration":r.get("expiration"),"strike":r.get("strike"),
+             "start_dt":ts,"end_dt":ts,"start_timestamp":t.get("t",t.get("timestamp")),"end_timestamp":t.get("t",t.get("timestamp")),
+             "vwap":p,"size":sz,"premium":prem,"prints":1,"max_print":prem,
+             "volume":int(r.get("volume") or 0),"open_interest":int(r.get("open_interest") or 0)}
+    if cur is not None: clusters.append(cur)
+
+    events=[]
+    for e in clusters:
+        oi=float(e.get("open_interest") or 0); vol=float(e.get("volume") or 0)
+        ratio=(vol/oi) if oi>0 else (None if vol<=0 else 999.0)
+        # An event can qualify through aggregate premium, a block-sized child print,
+        # or repeated prints whose combined premium crosses the institutional threshold.
+        if e["premium"] < FLOW_MIN_PREMIUM and e["max_print"] < FLOW_MIN_PREMIUM: continue
+        premium=e["premium"]
+        # 0-100 relevance score. This estimates "institutional-looking", not bullish/bearish.
+        premium_pts=min(55.0, max(0.0,(math.log10(max(premium,1))-4.0)*22.0))
+        ratio_pts=0.0 if ratio in (None,0) else min(20.0, (ratio if ratio<999 else 4.0)*5.0)
+        repeat_pts=min(15.0,max(0,e["prints"]-1)*3.0)
+        block_pts=min(10.0,e["max_print"]/250000.0*10.0)
+        score=min(100.0,premium_pts+ratio_pts+repeat_pts+block_pts)
+        if score>=75: relevance="High"
+        elif score>=50: relevance="Medium"
+        else: relevance="Watch"
+        events.append({
+            "symbol":e["symbol"],"type":e.get("type"),"expiration":e.get("expiration"),"strike":e.get("strike"),
+            "price":round(e["vwap"],4),"size":int(e["size"]),"premium":round(premium,2),"prints":int(e["prints"]),
+            "max_print":round(e["max_print"],2),"timestamp":e.get("start_timestamp"),"end_timestamp":e.get("end_timestamp"),
+            "volume":int(vol),"open_interest":int(oi),"vol_oi":(round(ratio,2) if ratio is not None and ratio<999 else None),
+            "institutional_score":round(score,1),"relevance":relevance
+        })
+    events.sort(key=lambda z:(z["institutional_score"],z["premium"]), reverse=True)
+    return events
+
+
+def flow_payload(ticker, options_payload=None):
+    """V21.1 institutional-flow engine from Alpaca option trades.
+
+    Broad chain discovery -> institutional candidate prefilter -> raw trade history ->
+    fragmented-print clustering -> unusualness scoring. Direction is intentionally
+    left unclassified until contemporaneous NBBO alignment is available.
     """
     ticker=ticker.upper().strip()
     x=options_payload or options_quality_payload(ticker)
     spot=_safe_float(x.get("spot"))
     if not spot: raise RuntimeError(f"Could not determine current price for {ticker} flow scan.")
-    # V21: institutional-flow discovery is intentionally independent of the
-    # 0-30 DTE contract selector. Include LEAPS and wider strikes, then rank by
-    # today's displayed activity/premium so large institutional contracts survive.
     rows=broad_flow_universe(ticker,spot)
-    candidates=[r for r in rows if (r.get("volume") or 0)>0]
-    def activity_score(r):
-        px=(r.get("last") or r.get("mid") or 0); vol=(r.get("volume") or 0); oi=(r.get("open_interest") or 0)
-        return (vol*px*100.0, vol, oi)
-    candidates=sorted(candidates,key=activity_score,reverse=True)[:160]
-    meta={r["symbol"]:r for r in candidates if r.get("symbol")}
-    symbols=list(meta)
+
+    # Institutional relevance prefilter. This avoids simply taking the highest-volume
+    # 160 contracts, which biased V21 toward retail-heavy activity.
+    eligible=[]
+    for r in rows:
+        vol=float(r.get("volume") or 0); oi=float(r.get("open_interest") or 0)
+        px=float(r.get("last") or r.get("mid") or 0); last_size=float(r.get("last_size") or 0)
+        gross_activity=vol*px*100.0; ratio=(vol/oi) if oi>0 else (999.0 if vol>0 else 0.0)
+        last_notional=last_size*px*100.0
+        if ((vol>=50 and gross_activity>=100000) or ratio>=1.5 or last_notional>=FLOW_MIN_PREMIUM or vol>=500):
+            r=dict(r); r["institutional_candidate_score"]=_institutional_candidate_score(r); eligible.append(r)
+    candidates=sorted(eligible,key=lambda r:r.get("institutional_candidate_score",0),reverse=True)[:240]
+    meta={r["symbol"]:r for r in candidates if r.get("symbol")}; symbols=list(meta)
     if not symbols:
-        return {"ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"prints":0,"premium":0,"note":"No active contracts in the current sample."}
+        return {"ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"prints":0,"premium":0,"note":"No institutional-candidate contracts found in the current broad chain."}
+
     try:
         from zoneinfo import ZoneInfo
-        et=ZoneInfo("America/New_York")
-        now=datetime.now(et)
-        day=now.date()
+        et=ZoneInfo("America/New_York"); now=datetime.now(et); day=now.date()
         while day.weekday()>=5: day-=timedelta(days=1)
         start=datetime(day.year,day.month,day.day,9,30,tzinfo=et)
         end=min(now,datetime(day.year,day.month,day.day,16,0,tzinfo=et)) if day==now.date() else datetime(day.year,day.month,day.day,16,0,tzinfo=et)
@@ -1460,39 +1548,45 @@ def flow_payload(ticker, options_payload=None):
         start_iso=start.isoformat(); end_iso=end.isoformat()
     except Exception:
         day=datetime.utcnow().date(); start_iso=f"{day.isoformat()}T13:30:00Z"; end_iso=f"{day.isoformat()}T20:00:00Z"
+
     raw=_option_trade_chunks(symbols,start_iso,end_iso,ALPACA_OPTIONS_FEED)
-    notable=[]; total=callprem=putprem=0.0; allprints=0
-    contract_prem={}; contract_prints={}
+    total=callprem=putprem=0.0; allprints=0; contract_prem={}; contract_prints={}
     for sym,t in raw:
         p=_safe_float(t.get("p",t.get("price"))); sz=_safe_float(t.get("s",t.get("size")))
         if p is None or sz is None or p<=0 or sz<=0: continue
         prem=p*sz*100.0; allprints+=1; total+=prem
-        r=meta.get(sym,{})
-        typ=str(r.get("type") or "").lower()
+        r=meta.get(sym,{}); typ=str(r.get("type") or "").lower()
         if typ.startswith("c"): callprem+=prem
         elif typ.startswith("p"): putprem+=prem
         contract_prem[sym]=contract_prem.get(sym,0.0)+prem; contract_prints[sym]=contract_prints.get(sym,0)+1
-        if prem>=FLOW_MIN_PREMIUM:
-            notable.append({"symbol":sym,"type":r.get("type"),"expiration":r.get("expiration"),"strike":r.get("strike"),"price":p,"size":int(sz),"premium":round(prem,2),"timestamp":t.get("t",t.get("timestamp")),"conditions":t.get("c",t.get("conditions")) or []})
-    notable.sort(key=lambda z:z["premium"],reverse=True)
+
+    events=_cluster_institutional_events(raw,meta)
+    event_total=sum(e["premium"] for e in events)
+    event_calls=sum(e["premium"] for e in events if str(e.get("type") or "").lower().startswith("c"))
+    event_puts=sum(e["premium"] for e in events if str(e.get("type") or "").lower().startswith("p"))
+    high=sum(1 for e in events if e.get("relevance")=="High"); med=sum(1 for e in events if e.get("relevance")=="Medium")
+
     unusual=[]
     for sym,r in meta.items():
         vol=float(r.get("volume") or 0); oi=float(r.get("open_interest") or 0)
-        ratio=(vol/oi) if oi>0 else (999.0 if vol>0 else 0.0)
-        prem=contract_prem.get(sym,0.0)
+        ratio=(vol/oi) if oi>0 else (999.0 if vol>0 else 0.0); prem=contract_prem.get(sym,0.0)
         if ratio>=1.5 or prem>=250000:
             unusual.append({"symbol":sym,"type":r.get("type"),"expiration":r.get("expiration"),"strike":r.get("strike"),"volume":int(vol),"open_interest":int(oi),"vol_oi":round(ratio,2) if ratio<999 else None,"premium":round(prem,2),"prints":contract_prints.get(sym,0)})
     unusual=sorted(unusual,key=lambda z:(z["premium"],z.get("vol_oi") or 0),reverse=True)[:12]
-    notable_premium=sum(z["premium"] for z in notable)
+
     return {
-        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"contracts_sampled":len(symbols),"universe_contracts":len(rows),
+        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"engine_version":"21.1",
+        "contracts_sampled":len(symbols),"eligible_contracts":len(eligible),"universe_contracts":len(rows),
         "start":start_iso,"end":end_iso,"all_prints":allprints,"gross_premium":round(total,2),
         "call_premium":round(callprem,2),"put_premium":round(putprem,2),
         "call_pct":round(callprem/total*100,1) if total else None,"put_pct":round(putprem/total*100,1) if total else None,
-        "notable_threshold":FLOW_MIN_PREMIUM,"notable_prints":len(notable),"notable_premium":round(notable_premium,2),
-        "largest":notable[:12],"unusual":unusual,
-        "direction_available":False,
-        "note":"V21 broad institutional-flow scan: up to 160 highest-activity contracts from a ~900-day, wide-strike universe, separate from the 0–30 DTE trade selector. Premium is gross transaction premium, not net buying. Bid/ask aggressor direction is not inferred without contemporaneous historical NBBO alignment."
+        "notable_threshold":FLOW_MIN_PREMIUM,"institutional_events":len(events),"institutional_premium":round(event_total,2),
+        "institutional_call_premium":round(event_calls,2),"institutional_put_premium":round(event_puts,2),
+        "institutional_call_pct":round(event_calls/event_total*100,1) if event_total else None,
+        "institutional_put_pct":round(event_puts/event_total*100,1) if event_total else None,
+        "high_relevance_events":high,"medium_relevance_events":med,
+        "largest":events[:15],"events":events[:40],"unusual":unusual,"direction_available":False,
+        "note":"V21.1 Institutional Flow Engine: broad ~900-day/wide-strike chain, institutional-relevance prefilter, then fragmented prints are clustered into contract events and scored for unusualness. Institutional premium is the sum of qualifying clustered events, not all sampled transaction premium. Call/put describes contract type only; bullish/bearish direction remains unconfirmed without contemporaneous NBBO alignment."
     }
 
 def options_quality_payload(ticker):
@@ -2376,7 +2470,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <div id="positioningLevels" class="tiny"></div>
     </div>
     <div id="flowSection" style="display:none;margin-top:12px">
-      <div class="row"><strong>Options Flow · broad scan</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
+      <div class="row"><strong>Institutional Flow · event engine</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
       <div id="flowSummary" class="flowGrid"></div>
       <div id="flowDisclosure" class="flowDisclosure tiny"></div>
       <div class="scroll flowTable"><table><thead><tr><th>Contract</th><th>Trade</th><th>Size</th><th>Premium</th><th>Time</th></tr></thead><tbody id="flowRows"></tbody></table></div>
@@ -3314,15 +3408,15 @@ function renderPositioning(p,spot){
 let activeFlowData=null;
 function renderFlow(x){
  const sec=document.getElementById("flowSection"),sum=document.getElementById("flowSummary"),rows=document.getElementById("flowRows"),disc=document.getElementById("flowDisclosure"),un=document.getElementById("unusualFlow"),st=document.getElementById("flowStatus");
- if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · ${x.contracts_sampled||0} scanned of ${x.universe_contracts||x.contracts_sampled||0} active contracts`;
- const cp=x.call_pct==null?0:x.call_pct,pp=x.put_pct==null?0:x.put_pct;
- sum.innerHTML=`<div class="metricCard"><div class="tiny">NOTABLE PREMIUM ≥ ${moneyShort(x.notable_threshold)}</div><div class="big">${moneyShort(x.notable_premium)}</div><div class="tiny">${x.notable_prints||0} notable prints</div></div>
- <div class="metricCard"><div class="tiny">GROSS SAMPLED PREMIUM</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} total prints</div></div>
- <div class="metricCard"><div class="tiny">CALL / PUT PREMIUM</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div></div>
- <div class="metricCard"><div class="tiny">LARGEST PRINT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)}`:"No notable print"}</div></div>
- <div class="metricCard ${pp>=60?"warn":cp>=60?"good":""}"><div class="tiny">OPTIONS FLOW LEAN</div><div class="big">${pp>=60?"Put-heavy":cp>=60?"Call-heavy":"Balanced"}</div><div class="tiny">gross premium only · direction unconfirmed</div></div>`;
+ if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · v${x.engine_version||"21"} · ${x.contracts_sampled||0} scanned / ${x.eligible_contracts||0} institutional candidates / ${x.universe_contracts||x.contracts_sampled||0} active`;
+ const cp=x.institutional_call_pct==null?0:x.institutional_call_pct,pp=x.institutional_put_pct==null?0:x.institutional_put_pct;
+ sum.innerHTML=`<div class="metricCard"><div class="tiny">INSTITUTIONAL EVENT PREMIUM</div><div class="big">${moneyShort(x.institutional_premium)}</div><div class="tiny">${x.institutional_events||0} clustered events · ${x.high_relevance_events||0} high relevance</div></div>
+ <div class="metricCard"><div class="tiny">RAW SAMPLE</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} prints · ${x.contracts_sampled||0}/${x.eligible_contracts||x.contracts_sampled||0} candidates</div></div>
+ <div class="metricCard"><div class="tiny">INSTITUTIONAL CALL / PUT</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div><div class="tiny">${moneyShort(x.institutional_call_premium)} calls · ${moneyShort(x.institutional_put_premium)} puts</div></div>
+ <div class="metricCard"><div class="tiny">LARGEST EVENT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)} · ${x.largest[0].prints||1} prints`:"No qualifying event"}</div></div>
+ <div class="metricCard ${pp>=60?"warn":cp>=60?"good":""}"><div class="tiny">EVENT TYPE SKEW</div><div class="big">${pp>=60?"Put-heavy":cp>=60?"Call-heavy":"Balanced"}</div><div class="tiny">contract type only · direction unconfirmed</div></div>`;
  if(disc)disc.innerHTML=`<b>Important:</b> ${x.note||""}`;
- if(rows)rows.innerHTML=(x.largest||[]).length?(x.largest||[]).map(r=>`<tr><td>${readableContractHTML(r,x.ticker)}</td><td>$${fmt(r.price,2)}</td><td>${r.size}</td><td><b>${moneyShort(r.premium)}</b></td><td>${r.timestamp?new Date(r.timestamp).toLocaleTimeString([], {hour:"numeric",minute:"2-digit",second:"2-digit"}):"—"}</td></tr>`).join(""):'<tr><td colspan="5" class="note">No prints above the notable-premium threshold in the sampled contracts.</td></tr>';
+ if(rows)rows.innerHTML=(x.largest||[]).length?(x.largest||[]).map(r=>`<tr><td>${readableContractHTML(r,x.ticker)}<div class="tiny">${r.relevance||""} relevance · score ${r.institutional_score==null?"—":fmt(r.institutional_score,0)} · ${r.prints||1} prints</div></td><td>$${fmt(r.price,2)}</td><td>${r.size}</td><td><b>${moneyShort(r.premium)}</b></td><td>${r.timestamp?new Date(r.timestamp).toLocaleTimeString([], {hour:"numeric",minute:"2-digit",second:"2-digit"}):"—"}</td></tr>`).join(""):'<tr><td colspan="5" class="note">No qualifying institutional events in the current sample.</td></tr>';
  if(un){const a=(x.unusual||[]).slice(0,8);un.innerHTML=a.length?`<b>Volume/OI anomalies:</b> `+a.map(r=>`${formatOptionDate(r.expiration)} $${fmt(r.strike,0)} ${optionTypeShort(r.type)} · ${r.vol_oi==null?"new OI":fmt(r.vol_oi,1)+"× OI"} · ${moneyShort(r.premium)}`).join(" &nbsp; | &nbsp; "):""}
 }
 async function loadFlowTicker(ticker,force=false){
