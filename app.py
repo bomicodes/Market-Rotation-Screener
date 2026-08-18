@@ -1247,6 +1247,41 @@ def alpaca_option_chain(ticker,start_date,end_date,spot):
         if not token: break
     return out
 
+def alpaca_option_chain_broad(ticker,start_date,end_date,spot):
+    """Broader snapshot universe for institutional-flow discovery.
+
+    Deliberately separate from the 0-30 DTE trade-selection chain: flow may live
+    in LEAPS or farther-from-spot strikes. Pagination is bounded for Render/API safety.
+    """
+    url=f"{ALPACA_DATA_BASE_URL}/v1beta1/options/snapshots/{ticker}"
+    params={
+        "feed":ALPACA_OPTIONS_FEED,"expiration_date_gte":start_date,"expiration_date_lte":end_date,
+        "strike_price_gte":round(max(.01,spot*.45),2),"strike_price_lte":round(spot*1.65,2),"limit":1000
+    }
+    out={}; token=None
+    for _ in range(10):
+        if token: params["page_token"]=token
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=30)
+        if r.status_code in (401,403): raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} broad-chain access was rejected.")
+        if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while building broad flow universe.")
+        r.raise_for_status(); j=r.json() or {}; part=j.get("snapshots") or {}
+        if isinstance(part,dict): out.update(part)
+        token=j.get("next_page_token")
+        if not token: break
+    return out
+
+def broad_flow_universe(ticker,spot):
+    today=pd.Timestamp.now().normalize(); start=today.strftime("%Y-%m-%d")
+    end=(today+pd.Timedelta(days=900)).strftime("%Y-%m-%d")
+    contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+    snaps=alpaca_option_chain_broad(ticker,start,end,spot)
+    rows=[]
+    for sym,snap in snaps.items():
+        if sym not in meta: continue
+        r=option_contract_row(sym,snap,meta[sym],spot)
+        if r.get("expiration") and r.get("moneyness_pct") is not None: rows.append(r)
+    return rows
+
 def option_contract_row(symbol,snap,meta,spot):
     q=(snap or {}).get("latestQuote") or (snap or {}).get("latest_quote") or {}
     t=(snap or {}).get("latestTrade") or (snap or {}).get("latest_trade") or {}
@@ -1397,10 +1432,17 @@ def flow_payload(ticker, options_payload=None):
     """
     ticker=ticker.upper().strip()
     x=options_payload or options_quality_payload(ticker)
-    rows=x.get("contracts") or []
-    # Prioritize contracts with actual activity and stay near spot.
-    candidates=[r for r in rows if (r.get("volume") or 0)>0 and abs(r.get("moneyness_pct") or 999)<=15]
-    candidates=sorted(candidates,key=lambda r:((r.get("volume") or 0)*(r.get("mid") or r.get("last") or 0),r.get("open_interest") or 0),reverse=True)[:40]
+    spot=_safe_float(x.get("spot"))
+    if not spot: raise RuntimeError(f"Could not determine current price for {ticker} flow scan.")
+    # V21: institutional-flow discovery is intentionally independent of the
+    # 0-30 DTE contract selector. Include LEAPS and wider strikes, then rank by
+    # today's displayed activity/premium so large institutional contracts survive.
+    rows=broad_flow_universe(ticker,spot)
+    candidates=[r for r in rows if (r.get("volume") or 0)>0]
+    def activity_score(r):
+        px=(r.get("last") or r.get("mid") or 0); vol=(r.get("volume") or 0); oi=(r.get("open_interest") or 0)
+        return (vol*px*100.0, vol, oi)
+    candidates=sorted(candidates,key=activity_score,reverse=True)[:160]
     meta={r["symbol"]:r for r in candidates if r.get("symbol")}
     symbols=list(meta)
     if not symbols:
@@ -1443,14 +1485,14 @@ def flow_payload(ticker, options_payload=None):
     unusual=sorted(unusual,key=lambda z:(z["premium"],z.get("vol_oi") or 0),reverse=True)[:12]
     notable_premium=sum(z["premium"] for z in notable)
     return {
-        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"contracts_sampled":len(symbols),
+        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"contracts_sampled":len(symbols),"universe_contracts":len(rows),
         "start":start_iso,"end":end_iso,"all_prints":allprints,"gross_premium":round(total,2),
         "call_premium":round(callprem,2),"put_premium":round(putprem,2),
         "call_pct":round(callprem/total*100,1) if total else None,"put_pct":round(putprem/total*100,1) if total else None,
         "notable_threshold":FLOW_MIN_PREMIUM,"notable_prints":len(notable),"notable_premium":round(notable_premium,2),
         "largest":notable[:12],"unusual":unusual,
         "direction_available":False,
-        "note":"Sampled from the 40 most-active near-money contracts. Premium is gross transaction premium, not net buying. Bid/ask direction is intentionally not inferred without contemporaneous historical NBBO alignment."
+        "note":"V21 broad institutional-flow scan: up to 160 highest-activity contracts from a ~900-day, wide-strike universe, separate from the 0–30 DTE trade selector. Premium is gross transaction premium, not net buying. Bid/ask aggressor direction is not inferred without contemporaneous historical NBBO alignment."
     }
 
 def options_quality_payload(ticker):
@@ -1776,7 +1818,7 @@ def api_historical_rrg():
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"options-v20:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
+        payload,stale,err=cached_refresh_safe(f"options-v21:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -1785,8 +1827,8 @@ def api_options(ticker):
 def api_flow(ticker):
     try:
         force=request.args.get("refresh") in ("1","true","yes")
-        base,_,_=cached_refresh_safe(f"options-v20:{ticker.upper()}",lambda:options_quality_payload(ticker),ttl=600)
-        payload,stale,err=cached_refresh_safe(f"flow-v20:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=180)
+        base,_,_=cached_refresh_safe(f"options-v21:{ticker.upper()}",lambda:options_quality_payload(ticker),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"flow-v21:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=180)
         return jsonify({"ok":True,"stale":stale,"refresh_error":err,**payload})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -1807,7 +1849,7 @@ def api_options_scan():
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
             try:
-                p,stale,err=cached_refresh_safe(f"options-v20:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                p,stale,err=cached_refresh_safe(f"options-v21:{sym}",lambda:options_quality_payload(sym),ttl=600)
                 return {"ok":True,**p,"stale":stale}
             except Exception as e:
                 return {"ok":False,"ticker":sym,"error":str(e)}
@@ -2334,7 +2376,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <div id="positioningLevels" class="tiny"></div>
     </div>
     <div id="flowSection" style="display:none;margin-top:12px">
-      <div class="row"><strong>Options Flow · sampled</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
+      <div class="row"><strong>Options Flow · broad scan</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
       <div id="flowSummary" class="flowGrid"></div>
       <div id="flowDisclosure" class="flowDisclosure tiny"></div>
       <div class="scroll flowTable"><table><thead><tr><th>Contract</th><th>Trade</th><th>Size</th><th>Premium</th><th>Time</th></tr></thead><tbody id="flowRows"></tbody></table></div>
@@ -3272,12 +3314,13 @@ function renderPositioning(p,spot){
 let activeFlowData=null;
 function renderFlow(x){
  const sec=document.getElementById("flowSection"),sum=document.getElementById("flowSummary"),rows=document.getElementById("flowRows"),disc=document.getElementById("flowDisclosure"),un=document.getElementById("unusualFlow"),st=document.getElementById("flowStatus");
- if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · ${x.contracts_sampled||0} contracts sampled`;
+ if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · ${x.contracts_sampled||0} scanned of ${x.universe_contracts||x.contracts_sampled||0} active contracts`;
  const cp=x.call_pct==null?0:x.call_pct,pp=x.put_pct==null?0:x.put_pct;
  sum.innerHTML=`<div class="metricCard"><div class="tiny">NOTABLE PREMIUM ≥ ${moneyShort(x.notable_threshold)}</div><div class="big">${moneyShort(x.notable_premium)}</div><div class="tiny">${x.notable_prints||0} notable prints</div></div>
  <div class="metricCard"><div class="tiny">GROSS SAMPLED PREMIUM</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} total prints</div></div>
  <div class="metricCard"><div class="tiny">CALL / PUT PREMIUM</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div></div>
- <div class="metricCard"><div class="tiny">LARGEST PRINT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)}`:"No notable print"}</div></div>`;
+ <div class="metricCard"><div class="tiny">LARGEST PRINT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)}`:"No notable print"}</div></div>
+ <div class="metricCard ${pp>=60?"warn":cp>=60?"good":""}"><div class="tiny">OPTIONS FLOW LEAN</div><div class="big">${pp>=60?"Put-heavy":cp>=60?"Call-heavy":"Balanced"}</div><div class="tiny">gross premium only · direction unconfirmed</div></div>`;
  if(disc)disc.innerHTML=`<b>Important:</b> ${x.note||""}`;
  if(rows)rows.innerHTML=(x.largest||[]).length?(x.largest||[]).map(r=>`<tr><td>${readableContractHTML(r,x.ticker)}</td><td>$${fmt(r.price,2)}</td><td>${r.size}</td><td><b>${moneyShort(r.premium)}</b></td><td>${r.timestamp?new Date(r.timestamp).toLocaleTimeString([], {hour:"numeric",minute:"2-digit",second:"2-digit"}):"—"}</td></tr>`).join(""):'<tr><td colspan="5" class="note">No prints above the notable-premium threshold in the sampled contracts.</td></tr>';
  if(un){const a=(x.unusual||[]).slice(0,8);un.innerHTML=a.length?`<b>Volume/OI anomalies:</b> `+a.map(r=>`${formatOptionDate(r.expiration)} $${fmt(r.strike,0)} ${optionTypeShort(r.type)} · ${r.vol_oi==null?"new OI":fmt(r.vol_oi,1)+"× OI"} · ${moneyShort(r.premium)}`).join(" &nbsp; | &nbsp; "):""}

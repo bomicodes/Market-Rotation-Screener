@@ -572,3 +572,9 @@ V20.1 FLOW HOTFIX
 - The /v1beta1/options/trades endpoint does not accept a `feed` query parameter; Alpaca automatically uses the best feed available to the account.
 - Flow requests still enforce a 16-minute delay when the configured chain feed is indicative so non-real-time accounts do not request an ineligible end time.
 - Error messages now surface Alpaca's response message rather than only the generated URL.
+
+
+V21.0 POSITIONING/FLOW UPDATE
+- Broad institutional flow is separated from 0-30 DTE contract selection.
+- Flow universe extends about 900 days with wider strikes and up to 160 high-activity contracts.
+- Adds call-heavy / put-heavy / balanced gross-premium lean without claiming buyer/seller intent.
