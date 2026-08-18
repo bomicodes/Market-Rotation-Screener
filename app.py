@@ -1362,15 +1362,24 @@ def _option_trade_chunks(symbols, start_iso, end_iso, feed):
     # Small chunks prevent one very-active symbol from consuming an entire page.
     for i in range(0,len(symbols),20):
         chunk=symbols[i:i+20]
-        params={"symbols":",".join(chunk),"start":start_iso,"end":end_iso,"limit":10000,"feed":feed,"sort":"asc"}
+        # Historical options /trades does NOT accept a `feed` query parameter.
+        # Alpaca selects the best feed available to the account; for users without
+        # real-time entitlement, `end` must be at least 15 minutes old (handled above).
+        params={"symbols":",".join(chunk),"start":start_iso,"end":end_iso,"limit":10000,"sort":"asc"}
         token=None
         for _ in range(3):
             if token: params["page_token"]=token
             r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=30)
             if r.status_code in (401,403):
-                raise RuntimeError(f"Alpaca {feed} trade access was rejected. Check market-data permissions.")
+                raise RuntimeError("Alpaca option-trade access was rejected. Check market-data permissions.")
             if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while loading flow.")
-            r.raise_for_status(); j=r.json() or {}
+            if r.status_code>=400:
+                try:
+                    detail=(r.json() or {}).get("message") or r.text
+                except Exception:
+                    detail=r.text
+                raise RuntimeError(f"Alpaca historical options trades returned {r.status_code}: {detail}")
+            j=r.json() or {}
             trades=j.get("trades") or {}
             if isinstance(trades,dict):
                 for sym,arr in trades.items():

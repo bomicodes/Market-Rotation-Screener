@@ -564,3 +564,11 @@ OPTIONAL FLOW SETTING
 - Default notable-print threshold is $25,000 gross premium per transaction.
 - Override in Render if desired:
       FLOW_MIN_PREMIUM = 25000
+
+
+V20.1 FLOW HOTFIX
+------------------
+- Fixed HTTP 400 from Alpaca historical options trades.
+- The /v1beta1/options/trades endpoint does not accept a `feed` query parameter; Alpaca automatically uses the best feed available to the account.
+- Flow requests still enforce a 16-minute delay when the configured chain feed is indicative so non-real-time accounts do not request an ineligible end time.
+- Error messages now surface Alpaca's response message rather than only the generated URL.
