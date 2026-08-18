@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "19.1"
+APP_VERSION = "20.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -20,6 +20,8 @@ ALPACA_API_KEY = os.environ.get("APCA_API_KEY_ID", os.environ.get("ALPACA_API_KE
 ALPACA_API_SECRET = os.environ.get("APCA_API_SECRET_KEY", os.environ.get("ALPACA_API_SECRET", "")).strip()
 ALPACA_TRADING_BASE_URL = os.environ.get("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
+ALPACA_OPTIONS_FEED = os.environ.get("ALPACA_OPTIONS_FEED", "indicative").strip().lower() or "indicative"
+FLOW_MIN_PREMIUM = float(os.environ.get("FLOW_MIN_PREMIUM", "25000"))
 
 
 SECTORS = {
@@ -1227,7 +1229,7 @@ def alpaca_option_contracts(ticker,start_date,end_date):
 def alpaca_option_chain(ticker,start_date,end_date,spot):
     url=f"{ALPACA_DATA_BASE_URL}/v1beta1/options/snapshots/{ticker}"
     params={
-        "feed":"indicative","expiration_date_gte":start_date,"expiration_date_lte":end_date,
+        "feed":ALPACA_OPTIONS_FEED,"expiration_date_gte":start_date,"expiration_date_lte":end_date,
         "strike_price_gte":round(max(.01,spot*.75),2),"strike_price_lte":round(spot*1.25,2),"limit":1000
     }
     out={}; token=None
@@ -1235,7 +1237,7 @@ def alpaca_option_chain(ticker,start_date,end_date,spot):
         if token: params["page_token"]=token
         r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
         if r.status_code in (401,403):
-            raise RuntimeError("Alpaca indicative option-chain access was rejected. Check API credentials.")
+            raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} option-chain access was rejected. Check API credentials/feed permissions.")
         if r.status_code==429: raise RuntimeError("Alpaca rate limit reached. Try again shortly.")
         r.raise_for_status()
         j=r.json() or {}
@@ -1251,7 +1253,7 @@ def option_contract_row(symbol,snap,meta,spot):
     dbar=(snap or {}).get("dailyBar") or (snap or {}).get("daily_bar") or {}
     g=(snap or {}).get("greeks") or {}
     bid=_safe_float(q.get("bp",q.get("bid_price"))); ask=_safe_float(q.get("ap",q.get("ask_price")))
-    last=_safe_float(t.get("p",t.get("price"))); vol=_safe_float(dbar.get("v",dbar.get("volume"))) or 0
+    last=_safe_float(t.get("p",t.get("price"))); last_size=_safe_float(t.get("s",t.get("size"))) or 0; vol=_safe_float(dbar.get("v",dbar.get("volume"))) or 0
     iv=_safe_float((snap or {}).get("impliedVolatility",(snap or {}).get("implied_volatility")))
     oi=_safe_float((meta or {}).get("open_interest")) or 0
     strike=_safe_float((meta or {}).get("strike_price"))
@@ -1265,10 +1267,181 @@ def option_contract_row(symbol,snap,meta,spot):
     else: liq="Thin"
     return {
         "symbol":symbol,"type":(meta or {}).get("type"),"expiration":(meta or {}).get("expiration_date"),
-        "strike":strike,"bid":bid,"ask":ask,"mid":mid,"last":last,"volume":int(vol),"open_interest":int(oi),
+        "strike":strike,"bid":bid,"ask":ask,"mid":mid,"last":last,"last_size":int(last_size),"trade_ts":t.get("t",t.get("timestamp")),"quote_ts":q.get("t",q.get("timestamp")),"volume":int(vol),"open_interest":int(oi),
         "iv":(iv*100 if iv is not None and iv<=5 else iv),"delta":_safe_float(g.get("delta")),
         "gamma":_safe_float(g.get("gamma")),"theta":_safe_float(g.get("theta")),"vega":_safe_float(g.get("vega")),
         "spread_pct":spread,"moneyness_pct":moneyness,"liquidity":liq
+    }
+
+
+def modeled_dealer_positioning(rows, spot):
+    """Heuristic dealer-positioning map from current chain gamma + OI.
+
+    Calls are assigned +gamma and puts -gamma. This is a transparent screening
+    convention, not knowledge of dealers' actual inventory. Exposures are
+    reported as dollar-gamma per ~1% underlying move.
+    """
+    by_strike={}
+    usable=0
+    for r in rows:
+        gamma=_safe_float(r.get("gamma")); oi=_safe_float(r.get("open_interest")); strike=_safe_float(r.get("strike"))
+        if gamma is None or oi is None or oi<=0 or strike is None: continue
+        typ=str(r.get("type") or "").lower()
+        sign=1.0 if typ.startswith("c") else (-1.0 if typ.startswith("p") else 0.0)
+        if not sign: continue
+        # gamma * contracts * multiplier * S^2 * 1% move
+        gex=sign*gamma*oi*100.0*(spot**2)*0.01
+        b=by_strike.setdefault(float(strike),{"call_gex":0.0,"put_gex":0.0,"net_gex":0.0,"call_oi":0,"put_oi":0})
+        if sign>0:
+            b["call_gex"]+=abs(gex); b["call_oi"]+=int(oi)
+        else:
+            b["put_gex"]-=abs(gex); b["put_oi"]+=int(oi)
+        b["net_gex"]+=gex; usable+=1
+    if not by_strike:
+        return {"available":False,"reason":"No gamma/open-interest rows available."}
+    levels=[]
+    for k in sorted(by_strike):
+        b=by_strike[k]
+        levels.append({"strike":k,"call_gex":b["call_gex"],"put_gex":b["put_gex"],"net_gex":b["net_gex"],"call_oi":b["call_oi"],"put_oi":b["put_oi"]})
+    total=sum(x["net_gex"] for x in levels)
+    call_wall=max(levels,key=lambda x:x["call_gex"])["strike"]
+    put_wall=min(levels,key=lambda x:x["put_gex"])["strike"]
+    # Model a zero-gamma level by re-pricing Black-Scholes gamma across
+    # hypothetical spot prices, using each contract's current IV and time to expiry.
+    # Calls are + and puts - under the same transparent inventory convention.
+    def bs_gamma(S,K,sigma,T,r=.04):
+        if not S or not K or not sigma or sigma<=0 or T<=0: return 0.0
+        try:
+            d1=(math.log(S/K)+(r+.5*sigma*sigma)*T)/(sigma*math.sqrt(T))
+            phi=math.exp(-.5*d1*d1)/math.sqrt(2*math.pi)
+            return phi/(S*sigma*math.sqrt(T))
+        except Exception:
+            return 0.0
+    today=datetime.now().date(); model_rows=[]
+    for r in rows:
+        oi=_safe_float(r.get("open_interest")); K=_safe_float(r.get("strike")); iv=_safe_float(r.get("iv")); exp=r.get("expiration")
+        typ=str(r.get("type") or "").lower(); sign=1.0 if typ.startswith("c") else (-1.0 if typ.startswith("p") else 0.0)
+        if not oi or oi<=0 or not K or not iv or not exp or not sign: continue
+        sigma=iv/100.0 if iv>5 else iv
+        try: d=datetime.strptime(str(exp)[:10],"%Y-%m-%d").date(); T=max(1/365.0,(d-today).days/365.0)
+        except Exception: continue
+        model_rows.append((K,sigma,T,oi,sign))
+    flip=None
+    if model_rows:
+        grid=np.linspace(max(.01,spot*.70),spot*1.30,121)
+        vals=[]
+        for S in grid:
+            net=0.0
+            for K,sigma,T,oi,sign in model_rows:
+                gam=bs_gamma(float(S),K,sigma,T)
+                net += sign*gam*oi*100.0*(float(S)**2)*0.01
+            vals.append(net)
+        for i in range(1,len(grid)):
+            a,b=vals[i-1],vals[i]
+            if a==0:
+                flip=float(grid[i-1]); break
+            if (a<0<b) or (a>0>b):
+                x0,x1=float(grid[i-1]),float(grid[i])
+                flip=x0 + (0-a)*(x1-x0)/(b-a) if b!=a else x0
+                break
+    # focus display on strikes reasonably close to spot
+    near=[x for x in levels if abs(x["strike"]/spot-1)<=0.18]
+    near=sorted(near,key=lambda x:abs(x["net_gex"]),reverse=True)[:12]
+    return {
+        "available":True,"method":"call + / put - gamma × OI heuristic","contracts_used":usable,
+        "net_gex":round(total,2),"net_gex_millions":round(total/1e6,2),
+        "gamma_regime":"Positive / dampening" if total>=0 else "Negative / amplifying",
+        "call_wall":call_wall,"put_wall":put_wall,"modeled_flip":round(flip,2) if flip is not None else None,
+        "levels":near,
+        "warning":"Modeled from chain gamma/OI using a call-positive / put-negative inventory convention. The flip re-prices Black-Scholes gamma across hypothetical spot levels; it is not actual dealer inventory or a vendor-equivalent level."
+    }
+
+def _option_trade_chunks(symbols, start_iso, end_iso, feed):
+    """Fetch today's option trades for a bounded contract sample."""
+    out=[]
+    # Small chunks prevent one very-active symbol from consuming an entire page.
+    for i in range(0,len(symbols),20):
+        chunk=symbols[i:i+20]
+        params={"symbols":",".join(chunk),"start":start_iso,"end":end_iso,"limit":10000,"feed":feed,"sort":"asc"}
+        token=None
+        for _ in range(3):
+            if token: params["page_token"]=token
+            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=30)
+            if r.status_code in (401,403):
+                raise RuntimeError(f"Alpaca {feed} trade access was rejected. Check market-data permissions.")
+            if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while loading flow.")
+            r.raise_for_status(); j=r.json() or {}
+            trades=j.get("trades") or {}
+            if isinstance(trades,dict):
+                for sym,arr in trades.items():
+                    for t in (arr or []): out.append((sym,t))
+            token=j.get("next_page_token")
+            if not token: break
+    return out
+
+def flow_payload(ticker, options_payload=None):
+    """Build a transparent, sampled intraday flow view from Alpaca trades.
+
+    We intentionally do NOT label transactions as bought/sold because Alpaca's
+    documented historical options API exposes trades but not a historical NBBO
+    endpoint that lets us reliably align each print to the contemporaneous quote.
+    """
+    ticker=ticker.upper().strip()
+    x=options_payload or options_quality_payload(ticker)
+    rows=x.get("contracts") or []
+    # Prioritize contracts with actual activity and stay near spot.
+    candidates=[r for r in rows if (r.get("volume") or 0)>0 and abs(r.get("moneyness_pct") or 999)<=15]
+    candidates=sorted(candidates,key=lambda r:((r.get("volume") or 0)*(r.get("mid") or r.get("last") or 0),r.get("open_interest") or 0),reverse=True)[:40]
+    meta={r["symbol"]:r for r in candidates if r.get("symbol")}
+    symbols=list(meta)
+    if not symbols:
+        return {"ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"prints":0,"premium":0,"note":"No active contracts in the current sample."}
+    try:
+        from zoneinfo import ZoneInfo
+        et=ZoneInfo("America/New_York")
+        now=datetime.now(et)
+        day=now.date()
+        while day.weekday()>=5: day-=timedelta(days=1)
+        start=datetime(day.year,day.month,day.day,9,30,tzinfo=et)
+        end=min(now,datetime(day.year,day.month,day.day,16,0,tzinfo=et)) if day==now.date() else datetime(day.year,day.month,day.day,16,0,tzinfo=et)
+        if end<=start: end=datetime(day.year,day.month,day.day,16,0,tzinfo=et)
+        if ALPACA_OPTIONS_FEED=="indicative" and day==now.date(): end=min(end,now-timedelta(minutes=16))
+        start_iso=start.isoformat(); end_iso=end.isoformat()
+    except Exception:
+        day=datetime.utcnow().date(); start_iso=f"{day.isoformat()}T13:30:00Z"; end_iso=f"{day.isoformat()}T20:00:00Z"
+    raw=_option_trade_chunks(symbols,start_iso,end_iso,ALPACA_OPTIONS_FEED)
+    notable=[]; total=callprem=putprem=0.0; allprints=0
+    contract_prem={}; contract_prints={}
+    for sym,t in raw:
+        p=_safe_float(t.get("p",t.get("price"))); sz=_safe_float(t.get("s",t.get("size")))
+        if p is None or sz is None or p<=0 or sz<=0: continue
+        prem=p*sz*100.0; allprints+=1; total+=prem
+        r=meta.get(sym,{})
+        typ=str(r.get("type") or "").lower()
+        if typ.startswith("c"): callprem+=prem
+        elif typ.startswith("p"): putprem+=prem
+        contract_prem[sym]=contract_prem.get(sym,0.0)+prem; contract_prints[sym]=contract_prints.get(sym,0)+1
+        if prem>=FLOW_MIN_PREMIUM:
+            notable.append({"symbol":sym,"type":r.get("type"),"expiration":r.get("expiration"),"strike":r.get("strike"),"price":p,"size":int(sz),"premium":round(prem,2),"timestamp":t.get("t",t.get("timestamp")),"conditions":t.get("c",t.get("conditions")) or []})
+    notable.sort(key=lambda z:z["premium"],reverse=True)
+    unusual=[]
+    for sym,r in meta.items():
+        vol=float(r.get("volume") or 0); oi=float(r.get("open_interest") or 0)
+        ratio=(vol/oi) if oi>0 else (999.0 if vol>0 else 0.0)
+        prem=contract_prem.get(sym,0.0)
+        if ratio>=1.5 or prem>=250000:
+            unusual.append({"symbol":sym,"type":r.get("type"),"expiration":r.get("expiration"),"strike":r.get("strike"),"volume":int(vol),"open_interest":int(oi),"vol_oi":round(ratio,2) if ratio<999 else None,"premium":round(prem,2),"prints":contract_prints.get(sym,0)})
+    unusual=sorted(unusual,key=lambda z:(z["premium"],z.get("vol_oi") or 0),reverse=True)[:12]
+    notable_premium=sum(z["premium"] for z in notable)
+    return {
+        "ticker":ticker,"feed":ALPACA_OPTIONS_FEED,"sampled":True,"contracts_sampled":len(symbols),
+        "start":start_iso,"end":end_iso,"all_prints":allprints,"gross_premium":round(total,2),
+        "call_premium":round(callprem,2),"put_premium":round(putprem,2),
+        "call_pct":round(callprem/total*100,1) if total else None,"put_pct":round(putprem/total*100,1) if total else None,
+        "notable_threshold":FLOW_MIN_PREMIUM,"notable_prints":len(notable),"notable_premium":round(notable_premium,2),
+        "largest":notable[:12],"unusual":unusual,
+        "direction_available":False,
+        "note":"Sampled from the 40 most-active near-money contracts. Premium is gross transaction premium, not net buying. Bid/ask direction is intentionally not inferred without contemporaneous historical NBBO alignment."
     }
 
 def options_quality_payload(ticker):
@@ -1301,12 +1474,12 @@ def options_quality_payload(ticker):
     rank={"Liquid":0,"Tradable":1,"Thin":2}
     rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
     return {
-        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"feed":"Alpaca indicative",
+        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
         "rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
         "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
         "iv_state":ivstate,"liquidity":liq,"liquid_contracts":liquid,"tradable_contracts":tradable,
-        "contracts_checked":len(rows),"contracts":rows[:120]
+        "contracts_checked":len(rows),"positioning":modeled_dealer_positioning(rows,spot),"contracts":rows[:120]
     }
 
 
@@ -1450,6 +1623,13 @@ button {
   font-weight: 700;
 }
 .err { color: #fca5a5; }
+
+.positioningGrid,.flowGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-top:10px}
+.metricCard{background:#101820;border:1px solid #26313b;border-radius:10px;padding:10px}
+.metricCard .big{font-size:18px;font-weight:800;margin-top:3px}
+.metricCard.good .big{color:#34d399}.metricCard.warn .big{color:#f59e0b}.metricCard.bad .big{color:#f87171}
+.flowSplit{height:9px;border-radius:8px;overflow:hidden;background:#24303b;display:flex;margin-top:6px}.flowSplit span:first-child{background:#34d399}.flowSplit span:last-child{background:#f87171}
+.flowTable{margin-top:8px}.flowDisclosure{margin-top:8px;padding:8px;border-left:3px solid #f59e0b;background:#111820}
 </style>
 </head>
 <body>
@@ -1587,8 +1767,18 @@ def api_historical_rrg():
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"options-v18-14:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
+        payload,stale,err=cached_refresh_safe(f"options-v20:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+@app.get("/api/flow/<ticker>")
+def api_flow(ticker):
+    try:
+        force=request.args.get("refresh") in ("1","true","yes")
+        base,_,_=cached_refresh_safe(f"options-v20:{ticker.upper()}",lambda:options_quality_payload(ticker),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"flow-v20:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=180)
+        return jsonify({"ok":True,"stale":stale,"refresh_error":err,**payload})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
@@ -1608,7 +1798,7 @@ def api_options_scan():
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
             try:
-                p,stale,err=cached_refresh_safe(f"options-v18-14:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                p,stale,err=cached_refresh_safe(f"options-v20:{sym}",lambda:options_quality_payload(sym),ttl=600)
                 return {"ok":True,**p,"stale":stale}
             except Exception as e:
                 return {"ok":False,"ticker":sym,"error":str(e)}
@@ -1874,7 +2064,7 @@ def api_diagnostics():
         "version": APP_VERSION,
         "alpaca": {
             "configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
-            "feed": "indicative",
+            "feed": ALPACA_OPTIONS_FEED,
             "dte": "0-30"
         },
         "startup_network_calls": False
@@ -2115,7 +2305,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
   <div class="panel" id="optionsPanel">
     <div class="row">
       <strong>Options · 0–30 DTE</strong>
-      <span class="note">Alpaca indicative feed for screening; verify live OPRA in Webull before entry.</span>
+      <span class="note">Alpaca options data for screening. Positioning is modeled; flow is sampled and does not infer buyer/seller intent.</span>
       <a id="alpacaSignupBtn" href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="setupBtn">Connect Alpaca / Get API Key ↗</a>
       <label class="note">Type</label>
       <select id="optTypeFilter"><option value="all">Calls + puts</option><option value="call">Calls</option><option value="put">Puts</option></select>
@@ -2127,6 +2317,19 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div id="alpacaSetupBox" class="setupBox">
       <b>Alpaca setup</b>
       <span class="note">Create a free Alpaca account, then add <code>APCA_API_KEY_ID</code> and <code>APCA_API_SECRET_KEY</code> in Render → Environment. Redeploy after saving.</span>
+    </div>
+
+    <div id="positioningSection" style="display:none;margin-top:10px">
+      <div class="row"><strong>Dealer Positioning · modeled</strong><span class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</span></div>
+      <div id="positioningSummary" class="positioningGrid"></div>
+      <div id="positioningLevels" class="tiny"></div>
+    </div>
+    <div id="flowSection" style="display:none;margin-top:12px">
+      <div class="row"><strong>Options Flow · sampled</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
+      <div id="flowSummary" class="flowGrid"></div>
+      <div id="flowDisclosure" class="flowDisclosure tiny"></div>
+      <div class="scroll flowTable"><table><thead><tr><th>Contract</th><th>Trade</th><th>Size</th><th>Premium</th><th>Time</th></tr></thead><tbody id="flowRows"></tbody></table></div>
+      <div id="unusualFlow" class="tiny" style="margin-top:8px"></div>
     </div>
     <div id="optionsScanSection" style="display:none">
       <div class="row" style="margin-top:10px">
@@ -2948,7 +3151,7 @@ async function checkAlpacaStatus(){
      const signup=document.getElementById("alpacaSignupBtn");
      if(alpacaConfigured){
        box.classList.add("ready");
-       box.innerHTML='<b>✓ Alpaca connected</b><span class="note">Options screening is ready. Quotes use the indicative feed; verify live OPRA in Webull before entry.</span>';
+       box.innerHTML='<b>✓ Alpaca connected</b><span class="note">Options screening is ready. Dealer positioning + sampled flow will load with each analyzed ticker.</span>';
        if(signup)signup.style.display="none";
      }else{
        box.classList.remove("ready");
@@ -3042,6 +3245,39 @@ function readableContractHTML(r,underlying){
          <div class="occSymbol">${r.symbol||""}</div>`;
 }
 
+
+function moneyShort(v){
+ if(v==null||!isFinite(Number(v)))return "—";v=Number(v);const a=Math.abs(v);
+ if(a>=1e9)return "$"+fmt(v/1e9,2)+"B";if(a>=1e6)return "$"+fmt(v/1e6,2)+"M";if(a>=1e3)return "$"+fmt(v/1e3,1)+"K";return "$"+fmt(v,0);
+}
+function renderPositioning(p,spot){
+ const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary"),lev=document.getElementById("positioningLevels");
+ if(!sec||!sum)return;if(!p||!p.available){sec.style.display="none";return}sec.style.display="block";
+ const regimeCls=String(p.gamma_regime||"").startsWith("Positive")?"good":"warn";
+ sum.innerHTML=`<div class="metricCard ${regimeCls}"><div class="tiny">GAMMA REGIME</div><div class="big">${p.gamma_regime||"—"}</div><div class="tiny">Net ${moneyShort(p.net_gex)}</div></div>
+ <div class="metricCard"><div class="tiny">CALL WALL</div><div class="big">$${fmt(p.call_wall,2)}</div><div class="tiny">${spot?fmt((p.call_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
+ <div class="metricCard"><div class="tiny">PUT WALL</div><div class="big">$${fmt(p.put_wall,2)}</div><div class="tiny">${spot?fmt((p.put_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
+ <div class="metricCard warn"><div class="tiny">MODELED FLIP*</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">approximation</div></div>`;
+ if(lev){const top=(p.levels||[]).slice(0,6).map(x=>`$${fmt(x.strike,0)} ${x.net_gex>=0?"+":""}${moneyShort(x.net_gex)}`).join(" · ");lev.innerHTML=`Largest modeled strike exposures: ${top||"—"}<br><span class="note">* ${p.warning||""}</span>`}
+}
+let activeFlowData=null;
+function renderFlow(x){
+ const sec=document.getElementById("flowSection"),sum=document.getElementById("flowSummary"),rows=document.getElementById("flowRows"),disc=document.getElementById("flowDisclosure"),un=document.getElementById("unusualFlow"),st=document.getElementById("flowStatus");
+ if(!sec||!sum)return;sec.style.display="block";if(st)st.textContent=`${x.ticker||""} · ${x.feed||""} · ${x.contracts_sampled||0} contracts sampled`;
+ const cp=x.call_pct==null?0:x.call_pct,pp=x.put_pct==null?0:x.put_pct;
+ sum.innerHTML=`<div class="metricCard"><div class="tiny">NOTABLE PREMIUM ≥ ${moneyShort(x.notable_threshold)}</div><div class="big">${moneyShort(x.notable_premium)}</div><div class="tiny">${x.notable_prints||0} notable prints</div></div>
+ <div class="metricCard"><div class="tiny">GROSS SAMPLED PREMIUM</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} total prints</div></div>
+ <div class="metricCard"><div class="tiny">CALL / PUT PREMIUM</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div></div>
+ <div class="metricCard"><div class="tiny">LARGEST PRINT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)}`:"No notable print"}</div></div>`;
+ if(disc)disc.innerHTML=`<b>Important:</b> ${x.note||""}`;
+ if(rows)rows.innerHTML=(x.largest||[]).length?(x.largest||[]).map(r=>`<tr><td>${readableContractHTML(r,x.ticker)}</td><td>$${fmt(r.price,2)}</td><td>${r.size}</td><td><b>${moneyShort(r.premium)}</b></td><td>${r.timestamp?new Date(r.timestamp).toLocaleTimeString([], {hour:"numeric",minute:"2-digit",second:"2-digit"}):"—"}</td></tr>`).join(""):'<tr><td colspan="5" class="note">No prints above the notable-premium threshold in the sampled contracts.</td></tr>';
+ if(un){const a=(x.unusual||[]).slice(0,8);un.innerHTML=a.length?`<b>Volume/OI anomalies:</b> `+a.map(r=>`${formatOptionDate(r.expiration)} $${fmt(r.strike,0)} ${optionTypeShort(r.type)} · ${r.vol_oi==null?"new OI":fmt(r.vol_oi,1)+"× OI"} · ${moneyShort(r.premium)}`).join(" &nbsp; | &nbsp; "):""}
+}
+async function loadFlowTicker(ticker,force=false){
+ const st=document.getElementById("flowStatus"),sec=document.getElementById("flowSection");if(sec)sec.style.display="block";if(st)st.textContent=`Loading ${ticker} flow…`;
+ try{const r=await fetch(`/api/flow/${encodeURIComponent(ticker)}${force?"?refresh=1":""}`),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");activeFlowData=j;renderFlow(j)}catch(e){if(st)st.innerHTML=`<span class="error">${e.message}</span>`}
+}
+
 function renderOptionsPanel(){
  const sum=document.getElementById("optionsSummary"),body=document.getElementById("optionsRows"),st=document.getElementById("optionsStatus"),under=document.getElementById("optionsUnderlying");
  if(!activeOptionsData){
@@ -3049,7 +3285,7 @@ function renderOptionsPanel(){
    if(under)under.textContent="";
    return
  }
- const x=activeOptionsData;st.textContent=`${x.ticker} · ${x.feed||""}`;
+ const x=activeOptionsData;st.textContent=`${x.ticker} · ${x.feed||""}`; renderPositioning(x.positioning,x.spot);
  if(under)under.innerHTML=`<span class="tiny">Current price</span> <b>${x.ticker} $${fmt(x.spot,2)}</b>`;
  sum.innerHTML=`<div class="card"><div class="tiny">CURRENT PRICE</div><b>${x.ticker} · $${fmt(x.spot,2)}</b></div>
  <div class="card"><div class="tiny">LIQUIDITY</div><b>${x.liquidity}</b><div class="tiny">${x.liquid_contracts} liquid · ${x.tradable_contracts} tradable</div></div>
@@ -3102,7 +3338,7 @@ async function loadOptionsTicker(ticker,opts={}){
      try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){}
      renderLiveWatchlist();
    }
-   renderOptionsPanel();renderLiveStocks();
+   renderOptionsPanel();renderLiveStocks();loadFlowTicker(ticker,false);
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
 }
 async function scanVisibleOptions(){
@@ -3507,6 +3743,7 @@ document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=
 document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
 document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
+document.getElementById("refreshFlow")?.addEventListener("click",()=>{if(activeOptionsData?.ticker)loadFlowTicker(activeOptionsData.ticker,true)});
 document.getElementById("refreshLiveWatchlist").addEventListener("click",refreshLiveWatchlistData);
 document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  liveWatchlist=[];

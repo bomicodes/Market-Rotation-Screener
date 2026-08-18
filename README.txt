@@ -525,3 +525,42 @@ v19.1 — TRADE REVIEW + WATCHLIST UPGRADE
 - Watchlist displays current price and return since added.
 - Added Refresh prices/options for all saved watchlist names.
 - Clicking a watchlist row loads its chart preview and options chain.
+
+v20.0 — DEALER POSITIONING + SAMPLED OPTIONS FLOW
+- Preserves v19.1 rotation, chart preview, watchlist, earnings, and options-quality workflow.
+- Added modeled Dealer Positioning to each analyzed ticker:
+    Net modeled GEX
+    Gamma regime (positive/dampening vs negative/amplifying)
+    Call wall
+    Put wall
+    Modeled zero-gamma flip
+    Largest strike-level modeled exposures
+- Dealer positioning uses a transparent call-positive / put-negative gamma × open-interest convention.
+- Modeled GEX is expressed as approximate dollar gamma for a 1% underlying move.
+- The modeled flip re-prices Black-Scholes gamma across hypothetical spot prices using current IV and time to expiry.
+- IMPORTANT: these are screening estimates, not actual dealer inventory and not intended to reproduce a proprietary vendor's GEX model exactly.
+
+- Added sampled intraday Options Flow for the currently analyzed ticker:
+    Gross sampled premium
+    Call vs put premium
+    Total sampled prints
+    Notable prints above a configurable premium threshold
+    Largest premium prints
+    Volume/open-interest anomalies
+- Flow is intentionally loaded only for the selected/analyzed ticker, not for the full multi-ticker Scan Options batch, to keep Render/API load manageable.
+- The flow engine samples up to 40 of the most-active near-money 0–30 DTE contracts from the existing Alpaca chain, then requests that day's trades for those contracts.
+- IMPORTANT: gross premium does NOT mean net buying. The app intentionally does not label historical prints as bought/sold or bullish/bearish because the currently documented Alpaca historical options interface does not provide a historical NBBO endpoint that lets this build reliably align every trade to its contemporaneous bid/ask.
+- This makes the flow panel useful for locating concentrated activity while preserving FlowMS/another vendor as a cross-check for proprietary trade-direction classification.
+
+OPTION DATA FEED
+- Existing default remains:
+      ALPACA_OPTIONS_FEED = indicative
+- If your Alpaca account itself has OPRA market-data permission, set in Render:
+      ALPACA_OPTIONS_FEED = opra
+- The app will then request OPRA on chain + flow endpoints.
+- A Webull OPRA subscription does not automatically grant Alpaca OPRA API access.
+
+OPTIONAL FLOW SETTING
+- Default notable-print threshold is $25,000 gross premium per transaction.
+- Override in Render if desired:
+      FLOW_MIN_PREMIUM = 25000
