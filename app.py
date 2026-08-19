@@ -1383,14 +1383,15 @@ def modeled_dealer_positioning(rows, spot):
                 flip=x0 + (0-a)*(x1-x0)/(b-a) if b!=a else x0
                 break
     # focus display on strikes reasonably close to spot
-    near=[x for x in levels if abs(x["strike"]/spot-1)<=0.18]
-    near=sorted(near,key=lambda x:abs(x["net_gex"]),reverse=True)[:12]
+    near_all=[x for x in levels if abs(x["strike"]/spot-1)<=0.18]
+    near=sorted(near_all,key=lambda x:abs(x["net_gex"]),reverse=True)[:12]
+    landscape_levels=sorted(near_all,key=lambda x:x["strike"])
     return {
         "available":True,"method":"call + / put - gamma × OI heuristic","contracts_used":usable,
         "net_gex":round(total,2),"net_gex_millions":round(total/1e6,2),
         "gamma_regime":"Positive / dampening" if total>=0 else "Negative / amplifying",
         "call_wall":call_wall,"put_wall":put_wall,"modeled_flip":round(flip,2) if flip is not None else None,
-        "levels":near,
+        "levels":near,"landscape_levels":landscape_levels,
         "warning":"Modeled from chain gamma/OI using a call-positive / put-negative inventory convention. The flip re-prices Black-Scholes gamma across hypothetical spot levels; it is not actual dealer inventory or a vendor-equivalent level."
     }
 
@@ -2375,6 +2376,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .heatMeta{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.45}.heatTags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.heatTag{font-size:10px;border:1px solid #334155;border-radius:999px;padding:2px 6px;color:#cbd5e1}.heatLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:8px}
 @media(max-width:700px){.heatGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.heatTile{min-height:108px;padding:9px}.heatTicker{font-size:16px}}
 #pricePreviewChart{height:300px}
+#gammaLandscape{width:100%;height:430px;display:block;background:#0d1217;border:1px solid #273244;border-radius:12px;margin-top:10px;cursor:crosshair}
+.gammaLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:7px}.gammaLegend b{color:var(--text)}
+.gammaLevelDetail{min-height:22px;margin-top:7px;color:#cbd5e1}
 @media(max-width:700px){#pricePreviewChart{height:250px}}
 </style>
 <div class="wrap">
@@ -2535,6 +2539,10 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <div class="row"><strong>Dealer Positioning · modeled</strong><span class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</span></div>
       <div id="positioningSummary" class="positioningGrid"></div>
       <div id="positioningLevels" class="tiny"></div>
+      <div class="row" style="margin-top:10px"><strong>Gamma Landscape</strong><span class="note">Modeled call/put GEX by strike around spot. Click a strike to inspect it.</span></div>
+      <canvas id="gammaLandscape" width="1200" height="430"></canvas>
+      <div class="gammaLegend"><span><b>Green</b> call GEX</span><span><b>Red</b> put GEX</span><span><b>White</b> spot</span><span><b>Blue</b> call wall</span><span><b>Orange</b> put wall</span><span><b>Purple</b> modeled flip</span></div>
+      <div id="gammaLevelDetail" class="gammaLevelDetail tiny">Click a strike bar for details.</div>
     </div>
     <div id="flowSection" style="display:none;margin-top:12px">
       <div class="row"><strong>Institutional Flow · event engine</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
@@ -3464,6 +3472,34 @@ function moneyShort(v){
  if(v==null||!isFinite(Number(v)))return "—";v=Number(v);const a=Math.abs(v);
  if(a>=1e9)return "$"+fmt(v/1e9,2)+"B";if(a>=1e6)return "$"+fmt(v/1e6,2)+"M";if(a>=1e3)return "$"+fmt(v/1e3,1)+"K";return "$"+fmt(v,0);
 }
+let gammaLandscapeHitboxes=[];
+function drawGammaLandscape(p,spot){
+ const c=document.getElementById("gammaLandscape"),ctx=c?.getContext("2d");if(!c||!ctx)return;
+ const rows=(p?.landscape_levels||p?.levels||[]).filter(x=>Number.isFinite(Number(x.strike))).sort((a,b)=>a.strike-b.strike);
+ const W=c.width,H=c.height;ctx.clearRect(0,0,W,H);ctx.fillStyle="#0d1217";ctx.fillRect(0,0,W,H);gammaLandscapeHitboxes=[];
+ if(!rows.length||!spot){ctx.fillStyle="#94a3b8";ctx.font="13px sans-serif";ctx.fillText("No modeled strike landscape available",24,32);return}
+ const pad={l:72,r:72,t:28,b:34},mid=W/2,gap=70,plotL=pad.l,plotR=W-pad.r,rowH=(H-pad.t-pad.b)/rows.length;
+ const maxCall=Math.max(1,...rows.map(x=>Math.abs(Number(x.call_gex)||0))),maxPut=Math.max(1,...rows.map(x=>Math.abs(Number(x.put_gex)||0)));
+ const leftMax=mid-gap/2-plotL,rightMax=plotR-(mid+gap/2);
+ ctx.font="11px sans-serif";ctx.textBaseline="middle";
+ rows.forEach((r,i)=>{
+   const y=pad.t+(i+.5)*rowH,call=Math.abs(Number(r.call_gex)||0),put=Math.abs(Number(r.put_gex)||0);
+   const cw=call/maxCall*leftMax,pw=put/maxPut*rightMax;
+   ctx.globalAlpha=.18;ctx.strokeStyle="#25303b";ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();
+   ctx.globalAlpha=.72;ctx.fillStyle="#22c55e";ctx.fillRect(mid-gap/2-cw,y-rowH*.34,cw,Math.max(2,rowH*.68));
+   ctx.fillStyle="#ef4444";ctx.fillRect(mid+gap/2,y-rowH*.34,pw,Math.max(2,rowH*.68));
+   ctx.globalAlpha=1;ctx.fillStyle="#cbd5e1";ctx.textAlign="center";ctx.fillText(`$${Number(r.strike).toFixed(r.strike<100?1:0)}`,mid,y);
+   gammaLandscapeHitboxes.push({x:plotL,y:y-rowH/2,w:plotR-plotL,h:rowH,row:r});
+ });
+ ctx.globalAlpha=1;ctx.textAlign="left";ctx.fillStyle="#86efac";ctx.font="bold 11px sans-serif";ctx.fillText("CALL GEX",plotL,14);ctx.textAlign="right";ctx.fillStyle="#fca5a5";ctx.fillText("PUT GEX",plotR,14);
+ const minS=rows[0].strike,maxS=rows[rows.length-1].strike;
+ const yForStrike=v=>pad.t+(Number(v)-minS)/(Math.max(.0001,maxS-minS))*(H-pad.t-pad.b);
+ function rail(v,color,label,dash=[]){if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 11px sans-serif";ctx.textAlign="right";ctx.fillText(`${label} $${Number(v).toFixed(2)}`,plotR-4,y-8);ctx.restore()}
+ rail(spot,"#f8fafc","SPOT",[]);rail(p.call_wall,"#60a5fa","CALL WALL",[5,4]);rail(p.put_wall,"#f59e0b","PUT WALL",[5,4]);rail(p.modeled_flip,"#a78bfa","FLIP",[3,5]);
+}
+function inspectGammaLandscape(evt){
+ const c=document.getElementById("gammaLandscape"),d=document.getElementById("gammaLevelDetail");if(!c||!d)return;const rect=c.getBoundingClientRect(),sx=c.width/rect.width,sy=c.height/rect.height,x=(evt.clientX-rect.left)*sx,y=(evt.clientY-rect.top)*sy;const h=gammaLandscapeHitboxes.find(b=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h);if(!h)return;const r=h.row;d.innerHTML=`<b>$${fmt(r.strike,2)} strike</b> · Call GEX ${moneyShort(r.call_gex)} · Put GEX ${moneyShort(r.put_gex)} · Net ${r.net_gex>=0?"+":""}${moneyShort(r.net_gex)} · Call OI ${(r.call_oi||0).toLocaleString()} · Put OI ${(r.put_oi||0).toLocaleString()}`;
+}
 function renderPositioning(p,spot){
  const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary"),lev=document.getElementById("positioningLevels");
  if(!sec||!sum)return;if(!p||!p.available){sec.style.display="none";return}sec.style.display="block";
@@ -3473,6 +3509,7 @@ function renderPositioning(p,spot){
  <div class="metricCard"><div class="tiny">PUT WALL</div><div class="big">$${fmt(p.put_wall,2)}</div><div class="tiny">${spot?fmt((p.put_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
  <div class="metricCard warn"><div class="tiny">MODELED FLIP*</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">approximation</div></div>`;
  if(lev){const top=(p.levels||[]).slice(0,6).map(x=>`$${fmt(x.strike,0)} ${x.net_gex>=0?"+":""}${moneyShort(x.net_gex)}`).join(" · ");lev.innerHTML=`Largest modeled strike exposures: ${top||"—"}<br><span class="note">* ${p.warning||""}</span>`}
+ drawGammaLandscape(p,spot);
 }
 let activeFlowData=null;
 function renderFlow(x){
@@ -3603,9 +3640,16 @@ function drawPricePreview(payload){
    const vh=(r.volume||0)/maxVol*volH;
    ctx.globalAlpha=.35;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);
  });
- ctx.globalAlpha=1;ctx.fillStyle="#94a3b8";ctx.font="10px sans-serif";
+ ctx.globalAlpha=1;
+ // Current/last price line + right-edge label makes support/resistance context easier to read.
+ const last=rows[rows.length-1],lastPx=Number(last.close);
+ if(Number.isFinite(lastPx)){
+   const py=Y(lastPx);ctx.save();ctx.setLineDash([6,5]);ctx.strokeStyle="#e5e7eb";ctx.lineWidth=1.25;ctx.beginPath();ctx.moveTo(pad.l,py);ctx.lineTo(W-pad.r,py);ctx.stroke();ctx.setLineDash([]);
+   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12;ctx.fillStyle="#e5e7eb";ctx.fillRect(W-pad.r-tw,py-10,tw,20);ctx.fillStyle="#111827";ctx.font="bold 11px sans-serif";ctx.textAlign="center";ctx.fillText(label,W-pad.r-tw/2,py+4);ctx.textAlign="left";ctx.restore();
+ }
+ ctx.fillStyle="#94a3b8";ctx.font="10px sans-serif";
  ctx.fillText(`$${hi.toFixed(2)}`,4,pad.t+4);ctx.fillText(`$${lo.toFixed(2)}`,4,priceBottom);
- const first=rows[0],last=rows[rows.length-1],chg=(last.close/first.close-1)*100;
+ const first=rows[0],chg=(last.close/first.close-1)*100;
  ctx.font="bold 12px sans-serif";ctx.fillStyle=chg>=0?"#86efac":"#fca5a5";
  ctx.fillText(`${last.close.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-18);
  ctx.fillStyle="#64748b";ctx.font="10px sans-serif";
@@ -3654,10 +3698,10 @@ function renderHeatMap(){
  let sectors=(sectorData||[]).filter(x=>gf==="all"||(gf==="core"&&x.group==="Core Sector")||(gf==="industry"&&x.group==="Industry / Theme"));
  sectors=[...sectors].sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a));
  sg.innerHTML=sectors.length?sectors.map(x=>{const sc=sectorHeatScore(x),st=rotationStage(x);return `<div class="heatTile ${heatTone(sc)} ${currentSector===x.ticker?'selected':''}" data-heat-sector="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.name||x.group||''}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${st.label} · Fast ${x.fast?.quadrant||'—'} · Trend ${x.trend?.quadrant||'—'}</div><div class="heatTags">${heatTagsFor(x,false)}</div></div>`}).join(""):'<div class="note">Refresh market data to build the sector heat map.</div>';
- document.querySelectorAll("[data-heat-sector]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatSector;currentSector=t;const sel=document.getElementById("coreSectorSelect");if(sel&&[...sel.options].some(o=>o.value===t))sel.value=t;document.getElementById("sectorTitle").textContent=t+" selected";renderHeatMap();await loadSector();renderHeatMap();}));
+ document.querySelectorAll("[data-heat-sector]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatSector,hs=document.getElementById("heatStatus");currentSector=t;const sel=document.getElementById("coreSectorSelect");if(sel&&[...sel.options].some(o=>o.value===t))sel.value=t;const st=document.getElementById("sectorTitle");if(st)st.textContent=t+" selected";if(hs)hs.textContent=`Loading ${t} holdings…`;document.querySelectorAll("[data-heat-sector]").forEach(n=>n.classList.toggle("selected",n.dataset.heatSector===t));try{await loadSector();if(hs)hs.textContent=`${t} loaded · click a stock tile to open its chart/positioning`;renderHeatMap();document.getElementById("stockHeatTitle")?.scrollIntoView({behavior:"smooth",block:"start"});}catch(e){if(hs)hs.innerHTML=`<span class="error">${e.message}</span>`}}));
  const stocks=filteredLiveStocks?filteredLiveStocks():(liveStockData||[]); if(title)title.textContent=currentSector?`${currentSector} · Stock Map`:'Stock Map';
  tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
- document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",()=>{const t=el.dataset.heatStock;loadChartPreview(t);if(alpacaConfigured!==false)loadOptionsTicker(t,{scroll:false});document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));}));
+ document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatStock,hs=document.getElementById("heatStatus");document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));if(hs)hs.textContent=`Opening ${t} chart + positioning…`;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view==="rotation"));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id==="rotation"));await loadChartPreview(t);if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);}));
 }
 function opportunityScore(x){
  let score=0;
@@ -3965,6 +4009,7 @@ document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
 document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
 document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
+document.getElementById("gammaLandscape")?.addEventListener("click",inspectGammaLandscape);
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
 document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
 document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
