@@ -1848,7 +1848,7 @@ button {
 
 
 /* v22.5 layout cleanup */
-/* v22.7 candlestick proportion fix */
+/* v22.8 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -2531,7 +2531,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.7</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.8</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3316,7 +3316,7 @@ async function auditHoldings(){
 function applyMarketPayload(j,fromCache=false){
  sectorData=j.sectors||[];
  const st=document.getElementById("mstatus");
- st.textContent=fromCache?`Cached · through ${j.asof||"—"}`:(j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`);
+ if(st) st.textContent=fromCache?`Cached · through ${j.asof||"—"}`:(j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`);
  const i=j.internals||{};
 
  const arrow=v=>v==null?"→":v>0?"↑":v<0?"↓":"→";
@@ -3378,6 +3378,9 @@ async function loadMarket(force=false){
    applyMarketPayload(j,false);
  }catch(e){
    if(st)st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`;
+   const du=document.getElementById("dashboardUpdated");
+   if(du)du.innerHTML=`<span class="error">Data load failed: ${e.message}</span>`;
+   console.error("Market load failed",e);
  }
 }
 
