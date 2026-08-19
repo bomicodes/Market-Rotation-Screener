@@ -2384,6 +2384,19 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .stage1{color:#fca5a5}.stage2{color:#fde68a}.stage3{color:#7dd3fc}.stage4{color:#86efac}
 .previewPeriodBtn.active{border-color:#60a5fa;color:#bfdbfe;background:#172033}
 
+.priceChartPanel{background:linear-gradient(180deg,#0b131b,#091018);border-color:#223244;overflow:hidden}
+.priceChartHeader{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:8px;padding:2px 2px 0}
+.priceChartTitle{display:flex;align-items:baseline;gap:10px;font-size:15px;letter-spacing:.15px}
+.priceChartLast{font-size:13px;font-weight:800;color:#dce6f0}
+.priceChartMeta{margin-top:3px;font-size:10px;color:#7f8c9d;letter-spacing:.3px}
+.priceChartControls{display:flex;gap:6px;align-items:center}
+.priceChartControls .previewPeriodBtn{min-width:44px;padding:6px 10px;border-radius:7px;background:#0c151e;border-color:#2a3a4b;color:#9eacbb;font-size:10px;font-weight:800}
+.priceChartControls .previewPeriodBtn.active{background:#0f2740;border-color:#2563eb;color:#dbeafe;box-shadow:inset 0 0 0 1px rgba(59,130,246,.15)}
+.priceChartCanvasWrap{border:1px solid #203142;border-radius:10px;background:linear-gradient(180deg,#081017,#070d13);overflow:hidden}
+#pricePreviewChart{width:100%;height:390px;display:block;background:transparent}
+.priceChartFooter{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-top:7px;color:#8290a1}
+@media(max-width:700px){.priceChartHeader{align-items:flex-start;flex-direction:column}.priceChartControls{width:100%}.priceChartControls .previewPeriodBtn{flex:1}#pricePreviewChart{height:300px}.priceChartFooter{align-items:flex-start;flex-direction:column}}
+
 .heatGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px;margin-top:12px}
 .heatTile{border:1px solid #273244;border-radius:12px;padding:12px;cursor:pointer;min-height:118px;background:#111821;transition:transform .12s ease,border-color .12s ease,background .12s ease}
 .heatTile:hover{transform:translateY(-1px);border-color:#64748b}.heatTile.selected{outline:2px solid #60a5fa;border-color:#60a5fa}
@@ -2391,12 +2404,10 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .heatHead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.heatTicker{font-size:18px;font-weight:800}.heatScore{font-size:17px;font-weight:800}
 .heatMeta{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.45}.heatTags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.heatTag{font-size:10px;border:1px solid #334155;border-radius:999px;padding:2px 6px;color:#cbd5e1}.heatLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:8px}
 @media(max-width:700px){.heatGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.heatTile{min-height:108px;padding:9px}.heatTicker{font-size:16px}}
-#pricePreviewChart{height:300px}
 #gammaLandscape{width:100%;height:430px;display:block;background:#0d1217;border:1px solid #273244;border-radius:12px;margin-top:10px;cursor:crosshair}
 .chainFreshness{margin-left:auto;font-size:12px;color:#94a3b8;white-space:nowrap}.chainFreshness.fresh{color:#86efac}.chainFreshness.aging{color:#fbbf24}.chainFreshness.stale{color:#f87171}@media(max-width:780px){.chainFreshness{width:100%;margin-left:0;margin-top:3px}}
 .gammaLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:7px}.gammaLegend b{color:var(--text)}
 .gammaLevelDetail{min-height:22px;margin-top:7px;color:#cbd5e1}
-@media(max-width:700px){#pricePreviewChart{height:250px}}
 
 
 /* v22.1 GEX Landscape redesign */
@@ -2443,17 +2454,60 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
 @media(max-width:1100px){.dashboardGrid{grid-template-columns:1fr 1.7fr}.dashRight{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.dashRight .sideSection{margin:0}.marketOverviewGrid{grid-template-columns:repeat(2,1fr)}.dashHeatGrid{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:760px){.appHeader{position:sticky;align-items:flex-start;flex-wrap:wrap}.brand{min-width:0}.brandText b{font-size:13px}.tabs{order:3;width:100%;overflow:auto;flex-wrap:nowrap}.tab{white-space:nowrap;min-width:auto}.headerMeta{margin-left:auto}.dashboardGrid{grid-template-columns:1fr}.dashRight{grid-column:auto;display:block}.dashHeatGrid{grid-template-columns:repeat(4,1fr)}#sectorChart{height:390px}.selectedSectorCard{grid-template-columns:1fr 1fr}.selectedSectorCard>div:nth-child(2){border-right:0}.selectedSectorCard>div:nth-child(-n+2){border-bottom:1px solid #1e3040}.rotationLower{margin-top:8px}}
 
+
+/* v22.2 visual system overhaul — dashboard + GEX */
+:root{
+ --bg0:#060b10;--bg1:#08111a;--surface:#0c151e;--surface2:#101b26;--surface3:#132131;
+ --line:#203246;--lineHi:#2b425a;--text:#f1f5f9;--muted:#8fa0b3;
+ --green:#36e27a;--green2:#1fae59;--red:#ff4d55;--amber:#f7a51a;--purple:#b36cff;--blue:#2583ff;--cyan:#35c2ff;
+}
+*{box-sizing:border-box}
+body{background:radial-gradient(circle at 48% -15%,rgba(22,53,75,.40) 0,rgba(6,11,16,0) 34%),linear-gradient(180deg,#071019 0,#060b10 100%);color:var(--text)}
+.wrap{max-width:1760px;margin:0 auto;padding:0 18px 28px}
+.appHeader{margin:0 -18px 18px;padding:9px 18px;border-bottom:1px solid rgba(59,88,116,.48);background:rgba(5,10,15,.94);box-shadow:0 8px 28px rgba(0,0,0,.22)}
+.brand{min-width:315px}.brandMark{width:42px;height:42px;border-color:#2de075;background:radial-gradient(circle at 35% 25%,#123b35,#08151a 70%);box-shadow:0 0 0 1px rgba(53,194,255,.18),0 0 24px rgba(45,224,117,.12)}
+.brandText b{font-size:16px;letter-spacing:.2px}.brandText span{color:#27db75;font-size:9px;letter-spacing:1.55px;font-weight:800}
+.appNav{display:flex;align-items:stretch;gap:3px;overflow:auto}.appNav .tab,.navJump{border:0;background:transparent;color:#aab7c5;border-radius:8px;padding:7px 11px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:72px;font-size:10px;cursor:pointer;white-space:nowrap;transition:.16s}
+.appNav .tab:hover,.navJump:hover{background:#0d1822;color:#f3f7fb}.appNav .tab.active{background:linear-gradient(180deg,#123024,#0e211a);color:#67ec92;box-shadow:inset 0 -2px #2edb71}.navIcon{font-size:15px;line-height:1}.versionPill{border-radius:8px;background:#092217;border-color:#176d3b;box-shadow:0 0 0 1px rgba(34,197,94,.05)}
+.panel,.sideSection,.gexRailCard{background:linear-gradient(180deg,rgba(13,22,31,.98),rgba(8,15,22,.98));border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.14),inset 0 1px rgba(255,255,255,.018)}
+.panel{border-radius:13px;padding:14px}.dashCol .panel{margin-bottom:13px}.dashTitle,.gexRailTitle{color:#edf3f8;letter-spacing:.42px}.note,.tiny{color:var(--muted)}
+.dashboardGrid{grid-template-columns:minmax(285px,.82fr) minmax(620px,1.82fr) minmax(270px,.78fr);gap:14px}
+.marketOverviewGrid{border:1px solid #1e3042;border-radius:10px;background:#081018}.marketQuote{background:linear-gradient(180deg,#0c161f,#091119);padding:12px 10px}.marketQuote .sym{font-size:10px;font-weight:750;letter-spacing:.5px}.marketQuote .px{font-size:19px;letter-spacing:-.2px}.marketQuote .chg{font-weight:700}
+.dashHeatGrid{gap:7px}.dashHeatTile{min-height:99px;border-radius:9px;padding:10px;box-shadow:inset 0 1px rgba(255,255,255,.035),0 5px 14px rgba(0,0,0,.12)}.dashHeatTile:hover{transform:translateY(-2px);box-shadow:0 9px 22px rgba(0,0,0,.22)}.dashHeatTile.selected{outline:2px solid #48a2ff;box-shadow:0 0 0 4px rgba(72,162,255,.08)}.dashHeatTile.h0,.dashHeatTile.h1{background:linear-gradient(145deg,#64191f,#b92b32)}.dashHeatTile.h2,.dashHeatTile.h3{background:linear-gradient(145deg,#4a1c21,#7f282e)}.dashHeatTile.h4,.dashHeatTile.h5{background:linear-gradient(145deg,#1b2531,#253543)}.dashHeatTile.h6,.dashHeatTile.h7{background:linear-gradient(145deg,#143328,#1b5a3c)}.dashHeatTile.h8,.dashHeatTile.h9,.dashHeatTile.h10{background:linear-gradient(145deg,#0e472b,#177641)}.dashHeatTile .sym{font-size:15px}.dashHeatTile .score{font-size:22px}.miniSpark{height:19px;filter:drop-shadow(0 0 3px rgba(255,255,255,.1))}.heatScale{height:6px;background:linear-gradient(90deg,#bb2e33 0,#74252a 28%,#273746 50%,#1a6340 73%,#23b85d 100%)}
+.breadthRow{padding:10px 1px}.breadthRow .val{font-size:15px}.breadthRow .move{font-weight:750}
+.rrgHeader{margin-bottom:10px}.rrgHeader h2{font-size:15px;letter-spacing:.1px}.rrgToggle{border-color:#2b425a;background:#081018;border-radius:8px}.rrgToggle button{padding:8px 15px;font-weight:750}.rrgToggle button.active{background:linear-gradient(180deg,#297cff,#1d5bd8);box-shadow:0 0 0 1px rgba(72,154,255,.2)}
+#sectorChart,#stockChart,#pricePreviewChart{background:linear-gradient(180deg,#09121a,#071018);border:1px solid #1e3042;border-radius:10px}.selectedSectorCard{border-color:#22384b;border-radius:10px;background:#09131c}.selectedSectorCard>div{border-color:#203244}.sscValue{font-size:13px}.sectorSummaryPanel table tbody tr:hover{background:#0f2030}.sectorSummaryPanel th{color:#90a2b5;text-transform:uppercase;font-size:9px;letter-spacing:.45px}.sectorSummaryPanel td{border-color:#1b2a37}
+.sideSection{border-radius:11px;padding:13px}.sideSection h3{font-size:10px;color:#cfd8e3;letter-spacing:.65px}.sideSection select,input[type=search]{background:#0a121a;border:1px solid #2a3c4e;border-radius:8px;color:#e8eef5;padding:8px}.sideSeg button,.filterPill,.quickBtn{border-radius:7px}.quickBtn{padding:9px 10px}.quickBtn:hover{background:#132231}
+.rotationLower>.panel:first-child{border-left:3px solid #23435c}.rotationLower .grid2>.panel{border-radius:12px}.row strong{letter-spacing:.1px}
+table{border-collapse:separate;border-spacing:0}th{background:#0c151e;color:#93a4b7;font-size:9px;text-transform:uppercase;letter-spacing:.45px;position:sticky;top:0;z-index:2}td,th{border-bottom:1px solid rgba(34,50,66,.72)}tbody tr:hover td{background:rgba(23,38,51,.55)}
+button,select,input{font-family:inherit}button{transition:.15s}button.primary{background:linear-gradient(180deg,#2379ef,#185aca);border-color:#3b82f6;box-shadow:0 4px 14px rgba(37,131,255,.12)}
+/* GEX page treatment */
+.gexDashboard{margin-top:14px!important;padding:16px!important;border:1px solid #1f3447!important;border-radius:14px!important;background:radial-gradient(circle at 50% -20%,rgba(24,56,77,.26),transparent 34%),linear-gradient(180deg,#09131c,#070e15)!important;box-shadow:0 18px 40px rgba(0,0,0,.22)!important}
+.gexTopline{align-items:center;margin-bottom:13px}.gexTopline>div>strong{font-size:17px}.modeledTag{background:#111c27;border-color:#39516a;color:#a9bad0;font-weight:800}.chainFreshness{font-weight:750}
+.positioningGrid.gammaSummary{grid-template-columns:repeat(6,minmax(150px,1fr));gap:11px;margin:10px 0 14px}.gexDashboard .metricCard{position:relative;overflow:hidden;min-height:115px;border:1px solid #213549;border-radius:12px;padding:16px 14px 13px 72px;background:linear-gradient(160deg,#0f1a24,#0a121a);box-shadow:0 8px 24px rgba(0,0,0,.13),inset 0 1px rgba(255,255,255,.025)}.gexDashboard .metricCard:before{position:absolute;left:16px;top:19px;width:42px;height:42px;border-radius:50%;display:grid;place-items:center;font-size:24px;font-weight:900;background:#0b151e;border:1px solid #2a3b4b;color:#d8e2ed}.metricCard.callWall:before{content:"↟";color:#39e57a;border-color:#17663b;background:#0b2017}.metricCard.flipCard:before{content:"↔";color:#b36cff;border-color:#57327c;background:#171021}.metricCard.putWall:before{content:"↡";color:#ff4d55;border-color:#74252d;background:#210d10}.metricCard.spotCard:before{content:"∿";color:#f2f6fa}.metricCard.netGex:before{content:"⚖";color:#48e57d;border-color:#17663b;background:#0b2017}.metricCard.exposureCard:before{content:"★";color:#f6b62b;border-color:#6e5221;background:#211b0d}.gexDashboard .metricCard .tiny:first-child{font-size:10px}.gexDashboard .metricCard .big{font-size:24px;letter-spacing:-.35px}.metricCard.callWall .big{color:#49e880}.metricCard.flipCard .big{color:#b77aff}.metricCard.putWall .big{color:#ff545c}.metricCard.spotCard.good .tiny:last-child,.metricCard.spotCard .good{color:#49e880}.metricCard.exposureCard{padding-left:67px}.exposureMini{font-size:11px}
+.gexWorkspace{grid-template-columns:minmax(0,1fr) 320px;gap:14px}.gexSectionHead{padding:2px 2px 0}.gexSectionHead strong{font-size:16px}.gexHelpText{margin-top:3px}.gexViewTools{display:flex;align-items:center;gap:6px}.gexViewBtn{font-size:10px;padding:7px 18px;border:1px solid #2a4056;background:#0a141d;color:#8fa0b3;border-radius:6px}.gexViewBtn.active{background:linear-gradient(180deg,#0e4c88,#0c3562);border-color:#2583ff;color:#cde9ff}.gammaLegendTop{display:flex;gap:16px;padding:0 2px;margin:8px 0 7px;font-weight:700}
+#gammaLandscape{height:610px;border-radius:12px;border-color:#22384c;background:linear-gradient(180deg,#08131b,#071018);box-shadow:inset 0 1px rgba(255,255,255,.018)}
+.gexRail{gap:12px}.gexRailCard{border-radius:12px;padding:14px;background:linear-gradient(180deg,#0d1822,#09121a)}.gexRailTitle{font-size:11px;margin-bottom:10px}.gexStatRow,.gexLevelRow,.gexLargestRow,.gexLegendRow{font-size:11px;padding:5px 0}.gexMiniBar{height:9px;background:#101b26}.gammaSelectedDetail{border-radius:10px;padding:11px 13px;background:#0b1721;border-color:#284158}.gexDisclosure{background:#08131c;border-left-color:#2583ff;border-radius:8px;padding:10px 12px}
+#flowSection{border-top:1px solid #1f3344;padding-top:14px;margin-top:18px!important}.flowGrid .metricCard{border-radius:10px;background:linear-gradient(180deg,#0e1821,#091119)}
+#optionsDetailSection .cards .metricCard{border-radius:10px}
+@media(max-width:1280px){.dashboardGrid{grid-template-columns:minmax(260px,.85fr) minmax(520px,1.7fr)}.dashRight{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.positioningGrid.gammaSummary{grid-template-columns:repeat(3,minmax(150px,1fr))}.gexWorkspace{grid-template-columns:1fr}.gexRail{grid-template-columns:repeat(2,minmax(0,1fr))}.appNav .tab,.navJump{min-width:64px;padding:7px 8px}}
+@media(max-width:760px){.wrap{padding:0 10px 20px}.appHeader{margin:0 -10px 12px;padding:8px 10px}.brand{min-width:0}.brandText span{display:none}.appNav{order:3;width:100%}.appNav .tab,.navJump{min-width:72px}.dashboardGrid{grid-template-columns:1fr}.dashRight{display:block}.positioningGrid.gammaSummary{grid-template-columns:repeat(2,minmax(0,1fr))}.gexDashboard .metricCard{padding-left:58px;min-height:105px}.gexDashboard .metricCard:before{left:11px;width:36px;height:36px;font-size:20px}.gexRail{grid-template-columns:1fr}.gexViewTools .tiny{display:none}#gammaLandscape{height:500px}}
+
 </style>
 <div class="wrap">
 <header class="appHeader">
   <div class="brand"><div class="brandMark">↗</div><div class="brandText"><b>MARKET ROTATION SCREENER</b><span>ROTATION · POSITIONING · OPTIONS</span></div></div>
-  <nav class="tabs">
-    <button class="tab active" data-view="rotation">▦ Dashboard</button>
-    <button class="tab" data-view="history">◉ RRG Historical</button>
-    <button class="tab" data-view="earnings">◫ Earnings Movers</button>
-    <button class="tab" data-view="heatmap">▦ Heat Map</button>
+  <nav class="tabs appNav">
+    <button class="tab active" data-view="rotation"><span class="navIcon">▦</span><span>Dashboard</span></button>
+    <button class="navJump" id="navRrgLive"><span class="navIcon">◉</span><span>RRG Live</span></button>
+    <button class="tab" data-view="history"><span class="navIcon">⌁</span><span>RRG Historical</span></button>
+    <button class="navJump" id="navGex"><span class="navIcon">⌗</span><span>GEX Landscape</span></button>
+    <button class="tab" data-view="earnings"><span class="navIcon">◫</span><span>Earnings Movers</span></button>
+    <button class="navJump" id="navOptions"><span class="navIcon">▤</span><span>Options Scanner</span></button>
+    <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
+    <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><span class="versionPill">v22.1</span></div>
+  <div class="headerMeta"><span class="versionPill">v22.2</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -2591,16 +2645,20 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
       <div id="internalRotationCards" class="cards"></div>
       <div id="internalRotationNote" class="note"></div>
     </div>
-    <div class="panel" id="previewPanel">
-      <div class="row">
-        <strong id="previewTitle">Chart Preview</strong>
-        <button id="preview1M" class="previewPeriodBtn active">1M</button>
-        <button id="preview3M" class="previewPeriodBtn">3M</button>
-        <button id="preview6M" class="previewPeriodBtn">6M</button>
-        <span id="previewStatus" class="status">Select a ticker to preview price.</span>
+    <div class="panel priceChartPanel" id="previewPanel">
+      <div class="priceChartHeader">
+        <div>
+          <div class="priceChartTitle"><strong id="previewTitle">Chart Preview</strong><span id="previewLastPrice" class="priceChartLast"></span></div>
+          <div id="previewMeta" class="priceChartMeta">Daily candles · select a ticker to preview</div>
+        </div>
+        <div class="priceChartControls">
+          <button id="preview1M" class="previewPeriodBtn active">1M</button>
+          <button id="preview3M" class="previewPeriodBtn">3M</button>
+          <button id="preview6M" class="previewPeriodBtn">6M</button>
+        </div>
       </div>
-      <canvas id="pricePreviewChart" width="900" height="360"></canvas>
-      <div class="tiny">Daily price + volume · intended as a quick confirmation before opening your full charting platform.</div>
+      <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1100" height="520"></canvas></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny">Daily price + volume · quick structure confirmation.</span></div>
     </div>
   </div>
 
@@ -2625,7 +2683,7 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
       <div id="positioningSummary" class="positioningGrid gammaSummary"></div>
       <div class="gexWorkspace">
         <div class="gexMain">
-          <div class="gexSectionHead"><div><strong>GEX Landscape</strong><span class="note"> Modeled GEX / OI positioning</span></div><span class="tiny">Click a strike to inspect it.</span></div>
+          <div class="gexSectionHead"><div><strong>GEX LANDSCAPE</strong><span class="note"> Modeled GEX / OI positioning</span><div class="tiny gexHelpText">Click a strike to view details, open interest, and net exposure.</div></div><div class="gexViewTools"><button class="gexViewBtn active" type="button">STRIKES</button><button class="gexViewBtn" type="button" title="Normalized view stays in the detailed chain for now">% OF SPOT</button><span class="tiny">Click a strike to inspect it.</span></div></div>
           <div class="gammaLegend gammaLegendTop"><span class="callDot">● CALL GEX</span><span class="putDot">● PUT GEX</span><span>○ SPOT</span><span class="flipDot">-- GAMMA FLIP</span><span class="callRailDot">-- CALL WALL</span><span class="putRailDot">-- PUT WALL</span></div>
           <canvas id="gammaLandscape" width="1200" height="560"></canvas>
           <div id="gammaLevelDetail" class="gammaSelectedDetail">Click a strike row for call GEX, put GEX, net GEX and open interest.</div>
@@ -2673,7 +2731,7 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
     </div>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="watchlistPanel">
     <div class="row">
       <strong>★ Live Watchlist</strong>
       <span class="note">Saved locally in this browser.</span>
@@ -3060,7 +3118,7 @@ function drawRRG(id,rows,focusTicker=undefined){
    const color=quadColors[r.quadrant];
 
    ctx.strokeStyle=color;
-   ctx.lineWidth=1.5;
+   ctx.lineWidth=1.65;
    ctx.globalAlpha=isFaded?.06:(isSelected?1:.72);
    ctx.beginPath();
    pts.forEach((pt,j)=>{
@@ -3677,7 +3735,7 @@ function gexSigned(v){
 function drawGammaLandscape(p,spot){
  const c=document.getElementById("gammaLandscape"),ctx=c?.getContext("2d");if(!c||!ctx)return;
  const rows=(p?.landscape_levels||p?.levels||[]).filter(x=>Number.isFinite(Number(x.strike))).sort((a,b)=>a.strike-b.strike);
- const W=c.width,H=c.height;ctx.clearRect(0,0,W,H);ctx.fillStyle="#0b1218";ctx.fillRect(0,0,W,H);gammaLandscapeHitboxes=[];
+ const W=c.width,H=c.height;ctx.clearRect(0,0,W,H);ctx.fillStyle="#071018";ctx.fillRect(0,0,W,H);gammaLandscapeHitboxes=[];
  if(!rows.length||!spot){ctx.fillStyle="#94a3b8";ctx.font="13px sans-serif";ctx.fillText("No modeled strike landscape available",24,32);return}
  const pad={l:86,r:86,t:38,b:40};
  const strikeW=66,netW=82,centerW=strikeW+netW,mid=W/2,strikeL=mid-centerW/2,strikeR=strikeL+strikeW,netR=mid+centerW/2;
@@ -3694,13 +3752,13 @@ function drawGammaLandscape(p,spot){
    const cw=call/maxCall*leftMax,pw=put/maxPut*rightMax;
    const isSelected=selectedGammaStrike!=null&&Math.abs(Number(r.strike)-Number(selectedGammaStrike))<1e-6;
    if(isSelected){ctx.fillStyle="rgba(59,130,246,.09)";ctx.fillRect(plotL,y-rowH/2,plotR-plotL,rowH)}
-   ctx.globalAlpha=.26;ctx.strokeStyle="#25303b";ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.globalAlpha=1;
+   ctx.globalAlpha=.22;ctx.strokeStyle="#1f3242";ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.globalAlpha=1;
    // value labels at edges
    ctx.font="10px sans-serif";ctx.textAlign="left";ctx.fillStyle="#4ade80";ctx.fillText(moneyShort(call),plotL,y);
    ctx.textAlign="right";ctx.fillStyle="#f87171";ctx.fillText(`(${moneyShort(put)})`,plotR,y);
    // bars
-   ctx.globalAlpha=.72;ctx.fillStyle="#22c55e";ctx.fillRect(strikeL-cw,y-rowH*.32,cw,Math.max(2,rowH*.64));
-   ctx.fillStyle="#ef4444";ctx.fillRect(netR,y-rowH*.32,pw,Math.max(2,rowH*.64));ctx.globalAlpha=1;
+   ctx.globalAlpha=.78;ctx.fillStyle="#21b95c";ctx.fillRect(strikeL-cw,y-rowH*.32,cw,Math.max(2,rowH*.64));
+   ctx.fillStyle="#e4474f";ctx.fillRect(netR,y-rowH*.32,pw,Math.max(2,rowH*.64));ctx.globalAlpha=1;
    // central ladder
    if(isSelected){ctx.fillStyle="#24344a";ctx.fillRect(strikeL+4,y-rowH*.42,strikeW-8,rowH*.84);ctx.strokeStyle="#60a5fa";ctx.strokeRect(strikeL+4,y-rowH*.42,strikeW-8,rowH*.84)}
    ctx.font="11px sans-serif";ctx.textAlign="center";ctx.fillStyle="#e2e8f0";ctx.fillText(`$${Number(r.strike).toFixed(r.strike<100?1:0)}`,strikeL+strikeW/2,y);
@@ -3710,7 +3768,7 @@ function drawGammaLandscape(p,spot){
  const minS=rows[0].strike,maxS=rows[rows.length-1].strike;
  const yForStrike=v=>pad.t+(Number(v)-minS)/(Math.max(.0001,maxS-minS))*(H-pad.t-pad.b);
  function rail(v,color,label,dash=[],side="left"){
-   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 10px sans-serif";ctx.textAlign=side==="left"?"left":"right";ctx.fillText(`${label} $${Number(v).toFixed(2)}`,side==="left"?plotL+4:plotR-4,y-8);ctx.restore();
+   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.65;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 10px sans-serif";ctx.textAlign=side==="left"?"left":"right";ctx.fillText(`${label} $${Number(v).toFixed(2)}`,side==="left"?plotL+4:plotR-4,y-8);ctx.restore();
  }
  rail(spot,"#f8fafc","SPOT",[],"left");
  rail(p.modeled_flip,"#a78bfa","GAMMA FLIP",[5,5],"left");
@@ -3777,9 +3835,9 @@ function renderPositioning(p,spot){
  <div class="metricCard callWall"><div class="tiny">CALL WALL</div><div class="subLabel">Upside Ceiling</div><div class="big">${p.call_wall==null?"—":"$"+fmt(p.call_wall,2)}</div><div class="tiny">${dist(p.call_wall)}</div></div>
  <div class="metricCard flipCard"><div class="tiny">GAMMA FLIP</div><div class="subLabel">Transition Zone</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">${dist(p.modeled_flip)}</div></div>
  <div class="metricCard putWall"><div class="tiny">PUT WALL</div><div class="subLabel">Downside Floor</div><div class="big">${p.put_wall==null?"—":"$"+fmt(p.put_wall,2)}</div><div class="tiny">${dist(p.put_wall)}</div></div>
- <div class="metricCard spotCard ${regimeCls}"><div class="tiny">SPOT / REGIME</div><div class="subLabel">Current Price</div><div class="big">${spot==null?"—":"$"+fmt(spot,2)}</div><div class="tiny">${p.gamma_regime||"—"}</div></div>
+ <div class="metricCard spotCard ${regimeCls}"><div class="tiny">SPOT / REGIME</div><div class="subLabel">Current Price</div><div class="big">${spot==null?"—":"$"+fmt(spot,2)}</div><div class="tiny ${net>=0?'positive':'negative'}">${p.gamma_regime||"—"}</div></div>
  <div class="metricCard netGex ${net<0?'negative':''}"><div class="tiny">NET GEX</div><div class="subLabel">Call − Put</div><div class="big">${gexSigned(net)}</div><div class="tiny">Modeled exposure</div></div>
- <div class="metricCard exposureCard"><div class="tiny">LARGEST EXPOSURES</div><div class="subLabel">By strike · net GEX</div><div class="exposureMini">${top.map(x=>`<div><b>$${fmt(x.strike,0)}</b> <span class="${x.net_gex>=0?'pos':'neg'}">${gexSigned(x.net_gex)}</span></div>`).join('')||'—'}</div></div>`;
+ <div class="metricCard exposureCard"><div class="tiny">LARGEST EXPOSURES</div><div class="subLabel">By strike · net GEX</div><div class="exposureMini">${top.map(x=>`<div><b>$${fmt(x.strike,0)}</b> <span class="${x.net_gex>=0?'pos':'neg'}">${gexSigned(x.net_gex)}</span> <em>${x.net_gex>=0?'Call':'Put'}</em></div>`).join('')||'—'}</div></div>`;
  selectedGammaStrike=null;renderGexRail(p,spot);drawGammaLandscape(p,spot);
 }
 let activeFlowData=null;
@@ -3890,40 +3948,28 @@ function drawPricePreview(payload){
  const c=document.getElementById("pricePreviewChart"),ctx=c?.getContext("2d");
  if(!c||!ctx)return;
  const rows=payload?.bars||[],W=c.width,H=c.height;
- ctx.clearRect(0,0,W,H);ctx.fillStyle="#0d1217";ctx.fillRect(0,0,W,H);
- if(!rows.length){ctx.fillStyle="#8b95a5";ctx.fillText("No price data",24,30);return}
- const pad={l:48,r:18,t:18,b:62},volH=55;
- const highs=rows.map(x=>x.high??x.close),lows=rows.map(x=>x.low??x.close);
- let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.08;hi+=range*.08;
- const priceBottom=H-pad.b-volH-8;
- const X=i=>pad.l+(i+.5)*(W-pad.l-pad.r)/rows.length;
+ ctx.clearRect(0,0,W,H);
+ const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+ if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load daily candles",24,34);return}
+ const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14;
+ const highs=rows.map(x=>Number(x.high??x.close)),lows=rows.map(x=>Number(x.low??x.close));
+ let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.07;hi+=range*.07;
+ const priceBottom=H-pad.b-volH-volGap,plotW=W-pad.l-pad.r;
+ const X=i=>pad.l+(i+.5)*plotW/rows.length;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
- ctx.strokeStyle="#27303a";ctx.lineWidth=1;ctx.font="10px sans-serif";
- for(let k=0;k<4;k++){let y=pad.t+k*(priceBottom-pad.t)/3;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();const level=hi-k*(hi-lo)/3;ctx.fillStyle="#64748b";ctx.textAlign="right";ctx.fillText(`$${level.toFixed(2)}`,W-pad.r-3,y-4);ctx.textAlign="left";}
- const maxVol=Math.max(1,...rows.map(x=>x.volume||0));
- const bw=Math.max(3,Math.min(18,(W-pad.l-pad.r)/rows.length*.55));
- rows.forEach((r,i)=>{
-   const x=X(i),up=(r.close??0)>=(r.open??r.close??0);
-   ctx.globalAlpha=.8;ctx.strokeStyle=up?"#22c55e":"#ef4444";ctx.fillStyle=up?"#22c55e":"#ef4444";
-   if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(r.high));ctx.lineTo(x,Y(r.low));ctx.stroke()}
-   const yo=Y(r.open??r.close),yc=Y(r.close),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));
-   ctx.fillRect(x-bw/2,top,bw,h);
-   const vh=(r.volume||0)/maxVol*volH;
-   ctx.globalAlpha=.35;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);
- });
- ctx.globalAlpha=1;
- // Keep candles unobstructed: show only a compact current-price badge at the right edge.
- const last=rows[rows.length-1],lastPx=Number(last.close);
- if(Number.isFinite(lastPx)){
-   const py=Y(lastPx);ctx.save();ctx.font="bold 10px sans-serif";const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+10;const bx=W-pad.r-tw,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));ctx.fillStyle="#e5e7eb";ctx.fillRect(bx,by,tw,18);ctx.fillStyle="#111827";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.textAlign="left";ctx.restore();
- }
- ctx.fillStyle="#94a3b8";ctx.font="10px sans-serif";
- const first=rows[0],chg=(last.close/first.close-1)*100;
- ctx.font="bold 12px sans-serif";ctx.fillStyle=chg>=0?"#86efac":"#fca5a5";
- ctx.fillText(`${last.close.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-18);
- ctx.fillStyle="#64748b";ctx.font="10px sans-serif";
- ctx.fillText(first.date,pad.l,H-4);ctx.textAlign="right";ctx.fillText(last.date,W-pad.r,H-4);ctx.textAlign="left";
+ ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";
+ const gridCount=5;
+ for(let k=0;k<gridCount;k++){const y=pad.t+k*(priceBottom-pad.t)/(gridCount-1),level=hi-k*(hi-lo)/(gridCount-1);ctx.strokeStyle="#1b2833";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.fillStyle="#758495";ctx.fillText(`$${level.toFixed(2)}`,W-pad.r+9,y+3)}
+ let lastMonth="";
+ rows.forEach((r,i)=>{const d=new Date(`${r.date}T00:00:00`);if(Number.isNaN(d.getTime()))return;const key=`${d.getFullYear()}-${d.getMonth()}`;if(key!==lastMonth){if(i>1){const x=X(i);ctx.strokeStyle="#101c25";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();ctx.fillStyle="#687789";ctx.textAlign="center";ctx.fillText(d.toLocaleString(undefined,{month:"short"}),x,H-15);ctx.textAlign="left"}lastMonth=key}});
+ const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0))),bw=Math.max(3,Math.min(15,plotW/rows.length*.58));
+ rows.forEach((r,i)=>{const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#16c784",bear="#ef4444";ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));ctx.fillRect(x-bw/2,top,bw,h);const vh=Number(r.volume||0)/maxVol*volH;ctx.globalAlpha=.42;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1});
+ ctx.strokeStyle="#17232d";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(W-pad.r,H-pad.b-volH-volGap/2);ctx.stroke();
+ const last=rows[rows.length-1],first=rows[0],lastPx=Number(last.close),firstPx=Number(first.close),chg=(lastPx/firstPx-1)*100;
+ if(Number.isFinite(lastPx)){const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12,bx=W-pad.r+4,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";ctx.lineWidth=1;ctx.beginPath();if(ctx.roundRect){ctx.roundRect(bx,by,tw,18,4)}else{ctx.rect(bx,by,tw,18)}ctx.fill();ctx.stroke();ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.restore()}
+ ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-15);
 }
+
 async function loadChartPreview(ticker,period=previewPeriod){
  if(!ticker)return;
  previewTicker=ticker;previewPeriod=period;
@@ -3939,7 +3985,11 @@ async function loadChartPreview(ticker,period=previewPeriod){
    if(seq!==previewRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
    drawPricePreview(j);
-   if(st)st.textContent=`${period.toUpperCase()} · ${j.bars?.length||0} daily candles`;
+   const bars=j.bars||[],last=bars[bars.length-1],first=bars[0];
+   const lp=document.getElementById("previewLastPrice"),meta=document.getElementById("previewMeta");
+   if(lp&&last){const ch=first&&Number(first.close)?(Number(last.close)/Number(first.close)-1)*100:0;lp.textContent=`$${Number(last.close).toFixed(2)}  ${ch>=0?"+":""}${ch.toFixed(2)}%`;lp.style.color=ch>=0?"#7ee2ad":"#f38b8b";}
+   if(meta)meta.textContent=`1D candles · ${period.toUpperCase()} range · ${bars.length} sessions`;
+   if(st)st.textContent=`${period.toUpperCase()} · ${bars.length} daily candles`;
  }catch(e){
    if(seq!==previewRequestSeq)return;
    if(st)st.innerHTML=`<span class="error">${e.message}</span>`;
@@ -4283,6 +4333,16 @@ document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
 document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
 document.getElementById("gammaLandscape")?.addEventListener("click",inspectGammaLandscape);
+
+function jumpToRotationTarget(id){
+  activateViewById("rotation");
+  setTimeout(()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"}),70);
+}
+document.getElementById("navRrgLive")?.addEventListener("click",()=>jumpToRotationTarget("sectorChart"));
+document.getElementById("navGex")?.addEventListener("click",()=>jumpToRotationTarget("positioningSection"));
+document.getElementById("navOptions")?.addEventListener("click",()=>jumpToRotationTarget("optionsPanel"));
+document.getElementById("navWatch")?.addEventListener("click",()=>jumpToRotationTarget("watchlistPanel"));
+
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
  document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
  document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
