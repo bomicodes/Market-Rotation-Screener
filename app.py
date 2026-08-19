@@ -3041,11 +3041,7 @@ function installRRGInteractions(id){
    }
    if(id==="sectorChart"){
      syncSectorRowSelection();
-     currentSector=ticker;
-     document.getElementById("sectorTitle").textContent=ticker+" selected";
-     const sel=document.getElementById("coreSectorSelect");
-     if(sel && [...sel.options].some(o=>o.value===ticker))sel.value=ticker;
-     loadSector();
+     selectSector(ticker,{source:"rrg"});
    }
  });
 
@@ -3087,18 +3083,10 @@ function renderGroups(){
  drawRRG("sectorChart",data);
  document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow sectorTickerRow ${activeMacroBasket()&&!activeMacroBasket().has(x.ticker)?"macroDim":""}" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
 
- document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",()=>{
+ document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",async()=>{
    const t=el.dataset.sector;
-
-   // Highlight/dim the sector RRG using the same toggle behavior as live/historical.
    toggleRRGFocus("sectorChart",t);
-
-   // Preserve the original behavior: select the ETF and load its holdings.
-   currentSector=t;
-   document.getElementById("sectorTitle").textContent=t+" selected";
-   const sel=document.getElementById("coreSectorSelect");
-   if(sel && [...sel.options].some(o=>o.value===t))sel.value=t;
-   loadSector();
+   await selectSector(t,{source:"rrg"});
  }));
 
  syncSectorRowSelection();
@@ -3162,9 +3150,19 @@ function applySectorPayload(j,fromCache=false,expectedSector=null){
  return true;
 }
 
-async function loadSector(force=false){
- if(!currentSector)return;
- const requestedSector=currentSector;
+async function loadSector(force=false,throwOnError=false){
+ // Event listeners can pass an Event object as the first argument. Only a literal
+ // true should force a refresh; this keeps sector clicks deterministic across browsers.
+ force=(force===true);
+ if(!currentSector)return false;
+ const requestedSector=String(currentSector||"").trim().toUpperCase();
+ if(!/^[A-Z0-9.^-]{1,12}$/.test(requestedSector)){
+   const err=new Error(`Invalid sector symbol: ${requestedSector}`);
+   if(throwOnError)throw err;
+   const st=document.getElementById("sstatus");if(st)st.innerHTML=`<span class="error">${err.message}</span>`;
+   return false;
+ }
+ currentSector=requestedSector;
  const requestId=++sectorRequestSeq;
 
  if(liveSearchSector && liveSearchSector!==requestedSector){
@@ -3192,7 +3190,9 @@ async function loadSector(force=false){
 
  st.textContent=`Updating ${requestedSector}…`;
  try{
-   const r=await fetch(`/api/sector/${requestedSector}?limit=${lim}`);
+   const params=new URLSearchParams({limit:String(lim)});
+   const url=`/api/sector/${encodeURIComponent(requestedSector)}?${params.toString()}`;
+   const r=await fetch(url,{headers:{"Accept":"application/json"}});
    const j=await r.json();
    if(!j.ok)throw Error(j.error);
 
@@ -3204,10 +3204,33 @@ async function loadSector(force=false){
    if(requestId!==sectorRequestSeq || requestedSector!==currentSector)return;
 
    applySectorPayload(j,false,requestedSector);
+   return true;
  }catch(e){
-   if(requestId!==sectorRequestSeq || requestedSector!==currentSector)return;
-   st.innerHTML=`<span class="error">${e.message}</span>`;
+   if(requestId!==sectorRequestSeq || requestedSector!==currentSector)return false;
+   const msg=(e&&e.message)?e.message:String(e);
+   st.innerHTML=`<span class="error">${msg}</span>`;
+   if(throwOnError)throw e;
+   return false;
  }
+}
+
+async function selectSector(ticker,{source="ui",scrollToStocks=false,force=false}={}){
+ const t=String(ticker||"").trim().toUpperCase();
+ if(!t)return false;
+ currentSector=t;
+ liveSearchData=[];liveSearchSector=null;
+ const search=document.getElementById("liveTickerSearch");if(search)search.value="";
+ const sel=document.getElementById("coreSectorSelect");if(sel&&[...sel.options].some(o=>o.value===t))sel.value=t;
+ const title=document.getElementById("sectorTitle");if(title)title.textContent=t+" selected";
+ const hs=document.getElementById("heatStatus");if(source==="heat"&&hs)hs.textContent=`Loading ${t} holdings…`;
+ document.querySelectorAll("[data-heat-sector]").forEach(n=>n.classList.toggle("selected",n.dataset.heatSector===t));
+ const ok=await loadSector(force,source==="heat");
+ if(ok){
+   renderHeatMap();
+   if(source==="heat"&&hs)hs.textContent=`${t} loaded · click a stock tile to open its chart/positioning`;
+   if(scrollToStocks)setTimeout(()=>document.getElementById("stockHeatTitle")?.scrollIntoView({behavior:"smooth",block:"start"}),50);
+ }
+ return ok;
 }
 
 
@@ -3711,7 +3734,11 @@ function renderHeatMap(){
  let sectors=(sectorData||[]).filter(x=>gf==="all"||(gf==="core"&&x.group==="Core Sector")||(gf==="industry"&&x.group==="Industry / Theme"));
  sectors=[...sectors].sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a));
  sg.innerHTML=sectors.length?sectors.map(x=>{const sc=sectorHeatScore(x),st=rotationStage(x);return `<div class="heatTile ${heatTone(sc)} ${currentSector===x.ticker?'selected':''}" data-heat-sector="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.name||x.group||''}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${st.label} · Fast ${x.fast?.quadrant||'—'} · Trend ${x.trend?.quadrant||'—'}</div><div class="heatTags">${heatTagsFor(x,false)}</div></div>`}).join(""):'<div class="note">Refresh market data to build the sector heat map.</div>';
- document.querySelectorAll("[data-heat-sector]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatSector,hs=document.getElementById("heatStatus");currentSector=t;const sel=document.getElementById("coreSectorSelect");if(sel&&[...sel.options].some(o=>o.value===t))sel.value=t;const st=document.getElementById("sectorTitle");if(st)st.textContent=t+" selected";if(hs)hs.textContent=`Loading ${t} holdings…`;document.querySelectorAll("[data-heat-sector]").forEach(n=>n.classList.toggle("selected",n.dataset.heatSector===t));try{await loadSector();if(hs)hs.textContent=`${t} loaded · click a stock tile to open its chart/positioning`;renderHeatMap();document.getElementById("stockHeatTitle")?.scrollIntoView({behavior:"smooth",block:"start"});}catch(e){if(hs)hs.innerHTML=`<span class="error">${e.message}</span>`}}));
+ document.querySelectorAll("[data-heat-sector]").forEach(el=>el.addEventListener("click",async()=>{
+   const t=el.dataset.heatSector,hs=document.getElementById("heatStatus");
+   try{await selectSector(t,{source:"heat",scrollToStocks:true});}
+   catch(e){if(hs)hs.innerHTML=`<span class="error">${(e&&e.message)?e.message:String(e)}</span>`;}
+ }));
  const stocks=filteredLiveStocks?filteredLiveStocks():(liveStockData||[]); if(title)title.textContent=currentSector?`${currentSector} · Stock Map`:'Stock Map';
  tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
  document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatStock,hs=document.getElementById("heatStatus");document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));if(hs)hs.textContent=`Opening ${t} chart + positioning…`;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view==="rotation"));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id==="rotation"));await loadChartPreview(t);if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);}));
@@ -4024,19 +4051,14 @@ document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeat
 document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
 document.getElementById("gammaLandscape")?.addEventListener("click",inspectGammaLandscape);
 document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
-document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
-document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
-document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active");if(b.dataset.view==="heatmap")renderHeatMap()}));
+ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
+ document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
+ b.classList.add("active");
+ const target=document.getElementById(b.dataset.view);if(target)target.classList.add("active");
+ if(b.dataset.view==="heatmap")renderHeatMap();
+}));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("macroBasketFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
- if(e.target.value){
-   currentSector=e.target.value;
-   liveSearchData=[];
-   liveSearchSector=null;
-   const search=document.getElementById("liveTickerSearch");
-   if(search)search.value="";
-   document.getElementById("sectorTitle").textContent=currentSector+" selected";
-   loadSector();
- }
+ if(e.target.value)selectSector(e.target.value,{source:"dropdown"});
 });document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
 document.getElementById("preview3M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"3m")});
 document.getElementById("preview6M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"6m")});
