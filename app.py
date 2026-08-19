@@ -1916,50 +1916,6 @@ button {
 .flowSplit{height:9px;border-radius:8px;overflow:hidden;background:#24303b;display:flex;margin-top:6px}.flowSplit span:first-child{background:#34d399}.flowSplit span:last-child{background:#f87171}
 .flowTable{margin-top:8px}.flowDisclosure{margin-top:8px;padding:8px;border-left:3px solid #f59e0b;background:#111820}
 
-/* v22.4 cleanup + chart/GEX routing */
-.priceChartPanelWide{margin-top:14px;padding:16px;background:radial-gradient(circle at 70% -30%,rgba(37,131,255,.08),transparent 36%),linear-gradient(180deg,#0a141d,#071018)}
-.priceChartPanelWide .priceChartCanvasWrap{border-color:#294159;box-shadow:inset 0 1px rgba(255,255,255,.02),0 12px 30px rgba(0,0,0,.16)}
-#pricePreviewChart{display:block;width:100%;height:560px;background:#071018}
-.priceChartPanelWide .priceChartTitle strong{font-size:18px;letter-spacing:.1px}.priceChartPanelWide .priceChartLast{font-size:16px;font-weight:800}.priceChartPanelWide .priceChartMeta{margin-top:4px}
-.compactRefresh .quickBtn{margin-top:9px;width:100%;background:#0b1720;border-color:#294057}
-.gexPageShell{margin-bottom:14px;background:linear-gradient(180deg,#0c1720,#081018);border-color:#22394e}.gexPageHeader{display:flex;align-items:center;justify-content:space-between;gap:16px}.gexTickerControls{display:flex;gap:8px;align-items:center}.gexTickerControls input{width:190px}.gexPageHint{margin-top:12px;padding:14px;border:1px dashed #2a4258;border-radius:10px;color:#8fa0b3;background:#081119}.gexPageShell+.gexDashboard{margin-top:0!important}
-@media(max-width:760px){#pricePreviewChart{height:360px}.gexPageHeader{align-items:flex-start;flex-direction:column}.gexTickerControls{width:100%}.gexTickerControls input{flex:1;width:auto}}
-
-
-/* v22.5 layout cleanup */
-/* v22.10 candlestick proportion fix */
-.rrgShell{min-width:0}
-/* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
-#sectorChart{height:500px}
-/* Preserve the candlestick canvas' native 1500:640 proportions so text/candles never stretch. */
-.priceChartPanelWide .priceChartCanvasWrap{width:100%;max-width:1320px;margin:0 auto}
-#pricePreviewChart{width:100%!important;height:auto!important;aspect-ratio:75/32;display:block;background:#071018}
-@media(max-width:760px){#pricePreviewChart{height:auto!important;aspect-ratio:75/32}.priceChartPanelWide .priceChartCanvasWrap{max-width:100%}}
-.headerMeta{display:flex;align-items:center;gap:8px}.headerRefresh{padding:6px 10px;border-radius:8px;border:1px solid #234058;background:#0b1721;color:#cfe7ff;font-weight:700;font-size:10px}.headerRefresh:hover{border-color:#3b82f6;color:#fff}
-.rrgControlStack{display:flex;flex-direction:column;align-items:flex-end;gap:7px}.rrgInlineFilters{display:flex;align-items:center;gap:7px}.rrgInlineFilters .filterPills{justify-content:flex-end}.rrgInlineFilters .filterPill{padding:4px 7px;font-size:8px}
-.dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
-.gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
-
-/* v22.10 layout + STRAT confluence */
-.dashboardGrid{align-items:stretch}
-.dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
-#sectorChart{height:650px}
-.dashRight .sectorSummaryPanel{display:flex;flex-direction:column;min-height:100%}
-.dashRight .sectorSummaryPanel .scroll{max-height:none!important;flex:1;overflow:auto}
-.dashRight .sectorSummaryPanel table{font-size:10px}
-.rrgFilterBar{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:8px 0 8px;flex-wrap:wrap}
-.rrgSelectFilters{display:flex;gap:7px;align-items:flex-end;flex:1;min-width:0}
-.rrgSelectFilters label{display:grid;gap:3px;min-width:130px;flex:1;max-width:210px}.rrgSelectFilters label span{font-size:8px;color:#7f8fa2;letter-spacing:.55px;font-weight:800}.rrgSelectFilters select{width:100%;font-size:10px;padding:6px 7px}
-.rrgInlineFilters{margin-left:auto}.rrgInlineFilters .tiny{font-size:8px;letter-spacing:.5px}
-.priceActionGrid{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(300px,.72fr);gap:12px;align-items:stretch;margin-top:14px}
-.priceActionGrid .priceChartPanelWide{margin-top:0;min-width:0}.priceChartPanelWide .priceChartCanvasWrap{width:100%;max-width:1040px;margin:0 auto}
-#pricePreviewChart{width:100%!important;height:auto!important;aspect-ratio:54/31;display:block;background:#071018}
-.stratPanel{margin:0;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,#0d1720,#091119)}
-.stratHead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid #1d3040;padding-bottom:10px;margin-bottom:9px}.stratContinuity{font-size:10px;font-weight:900;border:1px solid #334155;border-radius:999px;padding:5px 8px;color:#a9b5c3;white-space:nowrap}.stratContinuity.bullish{color:#68e89a;border-color:#1b6b3e;background:#0c2618}.stratContinuity.bearish{color:#ff8181;border-color:#74313a;background:#281217}.stratContinuity.mixed{color:#f5c451;border-color:#6a5520;background:#231d0d}
-.stratFrames{display:grid;gap:8px;margin-top:9px}.stratFrame{border:1px solid #223547;background:#0a141d;border-radius:9px;padding:10px}.stratFrameTop{display:flex;align-items:center;justify-content:space-between;gap:8px}.stratTf{font-weight:900;font-size:13px}.stratScenario{font-size:11px;font-weight:900;border-radius:6px;padding:3px 7px;background:#14202b}.stratScenario.bullish{color:#57e78d;background:#0e2a1a}.stratScenario.bearish{color:#ff6c72;background:#30151a}.stratScenario.neutral{color:#b6c3d0;background:#17212b}.stratPattern{font-size:11px;color:#e0e7ef;font-weight:700;margin-top:6px}.stratTrigger{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.stratTrigger div{background:#0d1822;border-radius:6px;padding:6px;font-size:9px;color:#8fa0b3}.stratTrigger b{display:block;font-size:11px;margin-top:2px;color:#dce7f2}.stratTrigger .up b{color:#5be28e}.stratTrigger .down b{color:#ff7979}.stratFTC{font-size:9px;margin-top:6px;color:#7f90a2}.stratFoot{margin-top:auto;padding-top:10px;border-top:1px solid #1c2b39;color:#748598;line-height:1.45}
-@media(max-width:1220px){.priceActionGrid{grid-template-columns:1fr}.stratFrames{grid-template-columns:repeat(4,minmax(0,1fr))}.stratFoot{margin-top:10px}.rrgSelectFilters{flex-wrap:wrap}.rrgSelectFilters label{min-width:150px}.dashRight .sectorSummaryPanel{min-height:420px}}
-@media(max-width:760px){#sectorChart{height:470px}.rrgFilterBar{align-items:stretch}.rrgSelectFilters{display:grid;grid-template-columns:1fr}.rrgSelectFilters label{max-width:none}.rrgInlineFilters{margin-left:0}.stratFrames{grid-template-columns:1fr 1fr}#pricePreviewChart{aspect-ratio:54/31}}
-@media(max-width:1100px){.rrgControlStack{align-items:stretch}.rrgInlineFilters{flex-wrap:wrap}.rrgInlineFilters .filterPills{justify-content:flex-start}.dashRight .sectorSummaryPanel .scroll{max-height:300px}}
 </style>
 </head>
 <body>
@@ -2727,6 +2683,52 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 @media(max-width:1280px){.dashboardGrid{grid-template-columns:minmax(260px,.85fr) minmax(520px,1.7fr)}.dashRight{grid-column:1/-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.positioningGrid.gammaSummary{grid-template-columns:repeat(3,minmax(150px,1fr))}.gexWorkspace{grid-template-columns:1fr}.gexRail{grid-template-columns:repeat(2,minmax(0,1fr))}.appNav .tab,.navJump{min-width:64px;padding:7px 8px}}
 @media(max-width:760px){.wrap{padding:0 10px 20px}.appHeader{margin:0 -10px 12px;padding:8px 10px}.brand{min-width:0}.brandText span{display:none}.appNav{order:3;width:100%}.appNav .tab,.navJump{min-width:72px}.dashboardGrid{grid-template-columns:1fr}.dashRight{display:block}.positioningGrid.gammaSummary{grid-template-columns:repeat(2,minmax(0,1fr))}.gexDashboard .metricCard{padding-left:58px;min-height:105px}.gexDashboard .metricCard:before{left:11px;width:36px;height:36px;font-size:20px}.gexRail{grid-template-columns:1fr}.gexViewTools .tiny{display:none}#gammaLandscape{height:500px}}
 
+
+/* v22.4 cleanup + chart/GEX routing */
+.priceChartPanelWide{margin-top:14px;padding:16px;background:radial-gradient(circle at 70% -30%,rgba(37,131,255,.08),transparent 36%),linear-gradient(180deg,#0a141d,#071018)}
+.priceChartPanelWide .priceChartCanvasWrap{border-color:#294159;box-shadow:inset 0 1px rgba(255,255,255,.02),0 12px 30px rgba(0,0,0,.16)}
+#pricePreviewChart{display:block;width:100%;height:560px;background:#071018}
+.priceChartPanelWide .priceChartTitle strong{font-size:18px;letter-spacing:.1px}.priceChartPanelWide .priceChartLast{font-size:16px;font-weight:800}.priceChartPanelWide .priceChartMeta{margin-top:4px}
+.compactRefresh .quickBtn{margin-top:9px;width:100%;background:#0b1720;border-color:#294057}
+.gexPageShell{margin-bottom:14px;background:linear-gradient(180deg,#0c1720,#081018);border-color:#22394e}.gexPageHeader{display:flex;align-items:center;justify-content:space-between;gap:16px}.gexTickerControls{display:flex;gap:8px;align-items:center}.gexTickerControls input{width:190px}.gexPageHint{margin-top:12px;padding:14px;border:1px dashed #2a4258;border-radius:10px;color:#8fa0b3;background:#081119}.gexPageShell+.gexDashboard{margin-top:0!important}
+@media(max-width:760px){#pricePreviewChart{height:360px}.gexPageHeader{align-items:flex-start;flex-direction:column}.gexTickerControls{width:100%}.gexTickerControls input{flex:1;width:auto}}
+
+
+/* v22.5 layout cleanup */
+/* v22.11 candlestick proportion fix */
+.rrgShell{min-width:0}
+/* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
+#sectorChart{height:500px}
+/* Preserve the candlestick canvas' native 1500:640 proportions so text/candles never stretch. */
+.priceChartPanelWide .priceChartCanvasWrap{width:100%;max-width:1320px;margin:0 auto}
+#pricePreviewChart{width:100%!important;height:auto!important;aspect-ratio:75/32;display:block;background:#071018}
+@media(max-width:760px){#pricePreviewChart{height:auto!important;aspect-ratio:75/32}.priceChartPanelWide .priceChartCanvasWrap{max-width:100%}}
+.headerMeta{display:flex;align-items:center;gap:8px}.headerRefresh{padding:6px 10px;border-radius:8px;border:1px solid #234058;background:#0b1721;color:#cfe7ff;font-weight:700;font-size:10px}.headerRefresh:hover{border-color:#3b82f6;color:#fff}
+.rrgControlStack{display:flex;flex-direction:column;align-items:flex-end;gap:7px}.rrgInlineFilters{display:flex;align-items:center;gap:7px}.rrgInlineFilters .filterPills{justify-content:flex-end}.rrgInlineFilters .filterPill{padding:4px 7px;font-size:8px}
+.dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
+.gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
+
+/* v22.11 layout + STRAT confluence */
+.dashboardGrid{align-items:stretch}
+.dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
+#sectorChart{height:650px}
+.dashRight .sectorSummaryPanel{display:flex;flex-direction:column;min-height:100%}
+.dashRight .sectorSummaryPanel .scroll{max-height:none!important;flex:1;overflow:auto}
+.dashRight .sectorSummaryPanel table{font-size:10px}
+.rrgFilterBar{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:8px 0 8px;flex-wrap:wrap}
+.rrgSelectFilters{display:flex;gap:7px;align-items:flex-end;flex:1;min-width:0}
+.rrgSelectFilters label{display:grid;gap:3px;min-width:130px;flex:1;max-width:210px}.rrgSelectFilters label span{font-size:8px;color:#7f8fa2;letter-spacing:.55px;font-weight:800}.rrgSelectFilters select{width:100%;font-size:10px;padding:6px 7px}
+.rrgInlineFilters{margin-left:auto}.rrgInlineFilters .tiny{font-size:8px;letter-spacing:.5px}
+.priceActionGrid{display:grid;grid-template-columns:minmax(0,1.62fr) minmax(330px,.68fr);gap:14px;align-items:stretch;margin-top:14px}
+.priceActionGrid .priceChartPanelWide{margin-top:0;min-width:0}.priceChartPanelWide .priceChartCanvasWrap{width:100%;max-width:1040px;margin:0 auto}
+#pricePreviewChart{width:100%!important;height:auto!important;aspect-ratio:1080/620;display:block;background:#071018}
+.stratPanel{margin:0;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,#0d1720,#091119)}
+.stratHead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid #1d3040;padding-bottom:10px;margin-bottom:9px}.stratContinuity{font-size:10px;font-weight:900;border:1px solid #334155;border-radius:999px;padding:5px 8px;color:#a9b5c3;white-space:nowrap}.stratContinuity.bullish{color:#68e89a;border-color:#1b6b3e;background:#0c2618}.stratContinuity.bearish{color:#ff8181;border-color:#74313a;background:#281217}.stratContinuity.mixed{color:#f5c451;border-color:#6a5520;background:#231d0d}
+.stratFrames{display:grid;gap:8px;margin-top:9px}.stratFrame{border:1px solid #223547;background:#0a141d;border-radius:9px;padding:10px}.stratFrameTop{display:flex;align-items:center;justify-content:space-between;gap:8px}.stratTf{font-weight:900;font-size:13px}.stratScenario{font-size:11px;font-weight:900;border-radius:6px;padding:3px 7px;background:#14202b}.stratScenario.bullish{color:#57e78d;background:#0e2a1a}.stratScenario.bearish{color:#ff6c72;background:#30151a}.stratScenario.neutral{color:#b6c3d0;background:#17212b}.stratPattern{font-size:11px;color:#e0e7ef;font-weight:700;margin-top:6px}.stratTrigger{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.stratTrigger div{background:#0d1822;border-radius:6px;padding:6px;font-size:9px;color:#8fa0b3}.stratTrigger b{display:block;font-size:11px;margin-top:2px;color:#dce7f2}.stratTrigger .up b{color:#5be28e}.stratTrigger .down b{color:#ff7979}.stratFTC{font-size:9px;margin-top:6px;color:#7f90a2}.stratFoot{margin-top:auto;padding-top:10px;border-top:1px solid #1c2b39;color:#748598;line-height:1.45}
+@media(max-width:1050px){.priceActionGrid{grid-template-columns:1fr}.stratFrames{grid-template-columns:repeat(4,minmax(0,1fr))}.stratFoot{margin-top:10px}.rrgSelectFilters{flex-wrap:wrap}.rrgSelectFilters label{min-width:150px}.dashRight .sectorSummaryPanel{min-height:420px}}
+@media(max-width:760px){#sectorChart{height:470px}.rrgFilterBar{align-items:stretch}.rrgSelectFilters{display:grid;grid-template-columns:1fr}.rrgSelectFilters label{max-width:none}.rrgInlineFilters{margin-left:0}.stratFrames{grid-template-columns:1fr 1fr}#pricePreviewChart{aspect-ratio:1080/620}}
+@media(max-width:1100px){.rrgControlStack{align-items:stretch}.rrgInlineFilters{flex-wrap:wrap}.rrgInlineFilters .filterPills{justify-content:flex-start}.dashRight .sectorSummaryPanel .scroll{max-height:300px}}
+
 </style>
 <div class="wrap">
 <header class="appHeader">
@@ -2740,7 +2742,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.10</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.11</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
