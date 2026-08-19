@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "21.8"
+APP_VERSION = "22.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1665,6 +1665,7 @@ def options_quality_payload(ticker):
     rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
     return {
         "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+        "chain_updated_at":datetime.utcnow().isoformat(timespec="seconds")+"Z",
         "rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
         "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
@@ -1679,11 +1680,12 @@ def market_payload():
     if "SPY" not in prices: raise RuntimeError("SPY data unavailable.")
     internals={}
     spy=prices["SPY"].dropna()
-    internals["SPY"]={"d5":pct_change(spy,5),"d20":pct_change(spy,20)}
+    internals["SPY"]={"value":float(spy.iloc[-1]),"d1":pct_change(spy,1),"d5":pct_change(spy,5),"d20":pct_change(spy,20)}
     for t,label in [("RSP","Breadth"),("IWM","Small caps"),("QQQ","Growth")]:
         pair=prices[["SPY",t]].dropna()
         ratio=pair[t]/pair["SPY"]
-        internals[t]={"d5":pct_change(ratio,5),"d20":pct_change(ratio,20),"label":label}
+        raw=prices[t].dropna() if t in prices else pd.Series(dtype=float)
+        internals[t]={"value":float(raw.iloc[-1]) if len(raw) else None,"raw_d1":pct_change(raw,1) if len(raw) else None,"d5":pct_change(ratio,5),"d20":pct_change(ratio,20),"label":label}
     # Credit risk appetite: high yield relative to investment grade.
     if "HYG" in prices and "LQD" in prices:
         credit_pair=prices[["HYG","LQD"]].dropna()
@@ -2382,25 +2384,58 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .heatGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px;margin-top:12px}
 .heatTile{border:1px solid #273244;border-radius:12px;padding:12px;cursor:pointer;min-height:118px;background:#111821;transition:transform .12s ease,border-color .12s ease,background .12s ease}
 .heatTile:hover{transform:translateY(-1px);border-color:#64748b}.heatTile.selected{outline:2px solid #60a5fa;border-color:#60a5fa}
-.heatTile.h0,.heatTile.h1,.heatTile.h2,.heatTile.h3{background:#171b22}.heatTile.h4,.heatTile.h5{background:#1b2430}.heatTile.h6,.heatTile.h7{background:#172b2d}.heatTile.h8,.heatTile.h9,.heatTile.h10{background:#13352d}
+.heatTile.h0,.heatTile.h1{background:#35191d;border-color:#5b252c}.heatTile.h2,.heatTile.h3{background:#2b1d22;border-color:#493039}.heatTile.h4,.heatTile.h5{background:#1b2430}.heatTile.h6,.heatTile.h7{background:#172b2d}.heatTile.h8,.heatTile.h9,.heatTile.h10{background:#13352d}
 .heatHead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.heatTicker{font-size:18px;font-weight:800}.heatScore{font-size:17px;font-weight:800}
 .heatMeta{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.45}.heatTags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.heatTag{font-size:10px;border:1px solid #334155;border-radius:999px;padding:2px 6px;color:#cbd5e1}.heatLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:8px}
 @media(max-width:700px){.heatGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.heatTile{min-height:108px;padding:9px}.heatTicker{font-size:16px}}
 #pricePreviewChart{height:300px}
 #gammaLandscape{width:100%;height:430px;display:block;background:#0d1217;border:1px solid #273244;border-radius:12px;margin-top:10px;cursor:crosshair}
+.chainFreshness{margin-left:auto;font-size:12px;color:#94a3b8;white-space:nowrap}.chainFreshness.fresh{color:#86efac}.chainFreshness.aging{color:#fbbf24}.chainFreshness.stale{color:#f87171}@media(max-width:780px){.chainFreshness{width:100%;margin-left:0;margin-top:3px}}
 .gammaLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:7px}.gammaLegend b{color:var(--text)}
 .gammaLevelDetail{min-height:22px;margin-top:7px;color:#cbd5e1}
 @media(max-width:700px){#pricePreviewChart{height:250px}}
+
+/* v22 dashboard redesign */
+:root{--nav:#081016;--panel2:#0d151d;--panel3:#101a24;--line2:#223244;--accent:#22c55e;--accent2:#3b82f6;--cyan:#38bdf8}
+body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f 100%);min-height:100vh}
+.wrap{max-width:1600px;padding:0 16px 24px}
+.appHeader{position:sticky;top:0;z-index:50;margin:0 -16px 16px;padding:10px 16px;background:rgba(6,11,16,.96);backdrop-filter:blur(12px);border-bottom:1px solid #1e2c3a;display:flex;align-items:center;gap:18px}
+.brand{display:flex;align-items:center;gap:10px;min-width:270px}.brandMark{width:38px;height:38px;border:2px solid #22c55e;border-radius:50%;display:grid;place-items:center;color:#38bdf8;font-weight:900;font-size:20px;box-shadow:0 0 18px rgba(34,197,94,.12)}
+.brandText b{display:block;font-size:15px;letter-spacing:.4px}.brandText span{font-size:10px;color:#22c55e;letter-spacing:1.2px}
+.tabs{margin:0;gap:2px;flex:1}.tab{background:transparent;border:0;border-radius:8px;padding:10px 12px;color:#a8b3c2;font-size:12px}.tab:hover{background:#101820;color:#e8edf4}.tab.active{background:#102319;color:#59e783;box-shadow:inset 0 -2px #22c55e}
+.headerMeta{display:flex;gap:10px;align-items:center}.versionPill{font-size:11px;color:#4ade80;border:1px solid #1d6b3a;background:#0d2317;padding:6px 9px;border-radius:7px}
+.pageIntro{display:none}
+.panel{background:linear-gradient(180deg,rgba(16,24,33,.98),rgba(12,18,25,.98));border-color:#213043;box-shadow:0 8px 24px rgba(0,0,0,.12)}
+.dashboardGrid{display:grid;grid-template-columns:minmax(260px,.78fr) minmax(560px,1.75fr) minmax(250px,.72fr);gap:12px;align-items:start}
+.dashCol{min-width:0}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
+.marketOverviewGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid #1b2a38;border-radius:9px;overflow:hidden}.marketQuote{padding:10px 8px;border-right:1px solid #1b2a38;background:#0b1219}.marketQuote:last-child{border-right:0}.marketQuote .sym{font-size:11px;color:#c9d3df}.marketQuote .px{font-size:17px;font-weight:750;margin-top:3px}.marketQuote .chg{font-size:11px;margin-top:2px}
+.dashHeatGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}.dashHeatTile{min-height:90px;border-radius:7px;padding:8px;border:1px solid #263548;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;transition:.15s}.dashHeatTile:hover{transform:translateY(-1px);filter:brightness(1.08)}.dashHeatTile.selected{outline:2px solid #60a5fa}.dashHeatTile.h0,.dashHeatTile.h1{background:linear-gradient(145deg,#5b171a,#b3262c)}.dashHeatTile.h2,.dashHeatTile.h3{background:linear-gradient(145deg,#3f1b1f,#71252a)}.dashHeatTile.h4,.dashHeatTile.h5{background:linear-gradient(145deg,#1a242f,#253444)}.dashHeatTile.h6,.dashHeatTile.h7{background:linear-gradient(145deg,#153029,#1d4d3c)}.dashHeatTile.h8,.dashHeatTile.h9,.dashHeatTile.h10{background:linear-gradient(145deg,#114029,#18733d)}
+.dashHeatTile .sym{font-weight:850;font-size:13px}.dashHeatTile .score{font-size:19px;font-weight:850}.dashHeatTile .state{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#d8e1ea}.miniSpark{height:17px;width:100%;opacity:.75}
+.heatScale{height:7px;border-radius:999px;background:linear-gradient(90deg,#8e2025 0,#3a2a2c 34%,#253443 50%,#1d5c3f 70%,#1aa04f 100%);margin-top:9px}.heatScaleLabels{display:flex;justify-content:space-between;font-size:9px;color:#8090a2;margin-top:4px}
+.breadthList{display:grid;gap:0}.breadthRow{display:grid;grid-template-columns:1fr auto auto;gap:8px;padding:9px 0;border-bottom:1px solid #1b2835;align-items:center}.breadthRow:last-child{border-bottom:0}.breadthRow .name{font-size:11px}.breadthRow .val{font-weight:700}.breadthRow .move{font-size:10px}
+.rrgShell .panel{margin:0}.rrgHeader{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px}.rrgHeader h2{margin:0;font-size:14px}.rrgToggle{display:inline-flex;border:1px solid #2d4053;border-radius:7px;overflow:hidden;background:#0a1118}.rrgToggle button{border:0;border-radius:0;background:transparent;padding:7px 13px;font-size:10px}.rrgToggle button.active{background:#1d5bd8;color:white}
+#sectorChart{height:500px;border-radius:8px}.selectedSectorCard{display:grid;grid-template-columns:1.15fr 1fr 1fr 1.2fr;gap:0;border:1px solid #1e3040;background:#0b131a;border-radius:9px;margin-top:8px;overflow:hidden}.selectedSectorCard>div{padding:9px 12px;border-right:1px solid #1e3040}.selectedSectorCard>div:last-child{border-right:0}.sscLabel{font-size:9px;color:#7f8ea1;text-transform:uppercase;letter-spacing:.5px}.sscValue{font-size:12px;font-weight:800;margin-top:3px}.sscInterp{font-size:10px;color:#a9b5c4;line-height:1.35;margin-top:3px}
+.sectorSummaryPanel{margin-top:10px!important}.sectorSummaryPanel .scroll{max-height:300px}.sectorSummaryPanel table{font-size:11px}.sectorSummaryPanel th,.sectorSummaryPanel td{padding:7px 6px}
+.sideSection{padding:12px;border:1px solid #213043;border-radius:9px;background:#0c131a;margin-bottom:10px}.sideSection h3{font-size:11px;margin:0 0 9px;letter-spacing:.4px}.sideSection select{width:100%;font-size:11px}.sideSeg{display:grid;grid-template-columns:1fr 1fr;gap:4px}.heatModeTabs{display:grid;grid-template-columns:repeat(3,1fr);gap:4px}.heatModeTabs button{font-size:9px;padding:7px 4px;background:#101923}.heatModeTabs button.active{background:#173b25;border-color:#22c55e;color:#7cf29b}.sideSeg button{font-size:10px;padding:8px 6px;background:#101923}.sideSeg button.active{background:#174fbd;border-color:#3b82f6}.filterPills{display:flex;gap:5px;flex-wrap:wrap}.filterPill{font-size:9px;padding:6px 8px}.filterPill.active{border-color:#3b82f6;background:#102a4d;color:#8fc5ff}.filterPill.leading.active{border-color:#22c55e;background:#0f301d;color:#6ee799}.filterPill.lagging.active{border-color:#ef4444;background:#381316;color:#ff7b7b}.filterPill.weakening.active{border-color:#f59e0b;background:#33260b;color:#ffc857}
+.quickBtn{width:100%;margin-top:6px;background:#0e1720;border-color:#2a3948;text-align:left;font-size:10px}.quickBtn:hover{border-color:#4c647a}
+.legacyMarketBlock{display:none}.legacySectorGrid{display:none}.rotationLower{margin-top:12px}.rotationLower>.panel:first-child{margin-top:0}
+#dashboardSectorTable tbody tr.selected{background:#102439}.fastText{color:#50b8ff}.trendText{color:#7fe29a}.trendLag{color:#ff6b6b}.quadLeading{color:#4ade80}.quadImproving{color:#60a5fa}.quadWeakening{color:#fbbf24}.quadLagging{color:#f87171}
+@media(max-width:1100px){.dashboardGrid{grid-template-columns:1fr 1.7fr}.dashRight{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.dashRight .sideSection{margin:0}.marketOverviewGrid{grid-template-columns:repeat(2,1fr)}.dashHeatGrid{grid-template-columns:repeat(4,1fr)}}
+@media(max-width:760px){.appHeader{position:sticky;align-items:flex-start;flex-wrap:wrap}.brand{min-width:0}.brandText b{font-size:13px}.tabs{order:3;width:100%;overflow:auto;flex-wrap:nowrap}.tab{white-space:nowrap;min-width:auto}.headerMeta{margin-left:auto}.dashboardGrid{grid-template-columns:1fr}.dashRight{grid-column:auto;display:block}.dashHeatGrid{grid-template-columns:repeat(4,1fr)}#sectorChart{height:390px}.selectedSectorCard{grid-template-columns:1fr 1fr}.selectedSectorCard>div:nth-child(2){border-right:0}.selectedSectorCard>div:nth-child(-n+2){border-bottom:1px solid #1e3040}.rotationLower{margin-top:8px}}
+
 </style>
 <div class="wrap">
-<h1>Market Rotation Screener</h1>
-<div class="sub">Cloud/mobile · Fast RRG (10/5) finds what is changing now; Trend RRG (25/12) asks whether it is persisting. Data refreshes only when you press Refresh/Scan.</div>
-<div class="tabs">
-<button class="tab active" data-view="rotation">Rotation Screen</button>
-<button class="tab" data-view="earnings">Post-Earnings Screen</button>
-<button class="tab" data-view="history">Historical RRG</button>
-<button class="tab" data-view="heatmap">Heat Map</button>
-</div>
+<header class="appHeader">
+  <div class="brand"><div class="brandMark">↗</div><div class="brandText"><b>MARKET ROTATION SCREENER</b><span>ROTATION · POSITIONING · OPTIONS</span></div></div>
+  <nav class="tabs">
+    <button class="tab active" data-view="rotation">▦ Dashboard</button>
+    <button class="tab" data-view="history">◉ RRG Historical</button>
+    <button class="tab" data-view="earnings">◫ Earnings Movers</button>
+    <button class="tab" data-view="heatmap">▦ Heat Map</button>
+  </nav>
+  <div class="headerMeta"><span class="versionPill">v22.0</span></div>
+</header>
+<div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
 <div id="heatmap" class="view">
   <div class="panel">
@@ -2421,31 +2456,47 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 </div>
 
 <div id="rotation" class="view active">
-  <div class="panel">
-    <div class="row"><strong>Market & sector screen</strong><button class="primary" id="refreshMarket">Refresh market</button><button id="auditHoldings">Audit holdings sources</button><span id="mstatus" class="status"></span></div>
-    <div id="auditPanel" class="note" style="display:none;margin-top:10px"></div>
-    <div class="panel">
-      <div class="row">
-        <strong>Market Regime</strong>
-        <span id="regimeSummary" class="note">Loading…</span>
+  <div class="dashboardGrid">
+    <aside class="dashCol dashLeft">
+      <div class="panel">
+        <div class="dashTopline"><span class="dashTitle">MARKET OVERVIEW</span><span id="dashboardUpdated" class="note">Awaiting refresh</span></div>
+        <div id="dashboardMarketOverview" class="marketOverviewGrid"></div>
       </div>
-      <div id="internals" class="cards"></div>
-    </div>
+      <div class="panel">
+        <div class="dashTopline"><span class="dashTitle">SECTOR ROTATION HEAT MAP</span><span class="note">Composite</span></div>
+        <div class="heatModeTabs" style="margin-bottom:8px"><button id="dashHeatComposite" class="active">Composite</button><button id="dashHeatFast">Fast 10/5</button><button id="dashHeatTrend">Trend 25/12</button></div>
+        <div id="dashboardHeatGrid" class="dashHeatGrid"></div>
+        <div class="heatScale"></div><div class="heatScaleLabels"><span>Weak</span><span>Neutral</span><span>Strong</span></div>
+      </div>
+      <div class="panel">
+        <div class="dashTopline"><span class="dashTitle">BREADTH & RISK</span><span id="regimeSummary" class="note">Loading…</span></div>
+        <div id="dashboardBreadth" class="breadthList"></div>
+      </div>
+    </aside>
+
+    <main class="dashCol dashCenter rrgShell">
+      <div class="panel">
+        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · click a ticker to focus and load holdings</div></div><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div></div>
+        <canvas id="sectorChart" width="900" height="540"></canvas>
+        <div id="selectedSectorCard" class="selectedSectorCard"><div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div></div>
+      </div>
+      <div class="panel sectorSummaryPanel">
+        <div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend side by side</span></div>
+        <div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div>
+      </div>
+    </main>
+
+    <aside class="dashCol dashRight">
+      <div class="sideSection"><h3>SELECT SECTOR / GROUP</h3><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></div>
+      <div class="sideSection"><h3>GROUP UNIVERSE</h3><select id="groupFilter"><option value="all">All groups</option><option value="core" selected>Core sectors</option><option value="industry">Industries / themes</option></select><div style="height:7px"></div><h3>MACRO BASKET</h3><select id="macroBasketFilter"><option value="all">All</option><option value="rate">Rate sensitive</option><option value="cyclical">Cyclicals</option><option value="defensive">Defensives</option><option value="inflation">Inflation sensitive</option></select></div>
+      <div class="sideSection"><h3>RRG VIEW</h3><div class="sideSeg"><button id="sideFastBtn" class="active">FAST ROTATION</button><button id="sideTrendBtn">TREND</button></div></div>
+      <div class="sideSection"><h3>QUADRANT FILTER</h3><div class="filterPills" id="sectorQuadPills"><button class="filterPill active" data-q="all">All</button><button class="filterPill leading" data-q="Leading">Leading</button><button class="filterPill" data-q="Improving">Improving</button><button class="filterPill weakening" data-q="Weakening">Weakening</button><button class="filterPill lagging" data-q="Lagging">Lagging</button></div></div>
+      <div class="sideSection"><h3>QUICK ACTIONS</h3><button class="quickBtn" id="dashRefreshMarket">↻ Refresh market</button><button class="quickBtn" id="dashHistorical">◉ Historical RRG</button><button class="quickBtn" id="dashEarnings">◫ Earnings Movers</button><button class="quickBtn" id="dashHeatMap">▦ Full Heat Map</button></div>
+      <div class="sideSection"><h3>DATA STATUS</h3><div id="mstatus" class="note">Not loaded</div><button id="auditHoldings" class="quickBtn">Audit holdings sources</button><div id="auditPanel" class="note" style="display:none;margin-top:8px"></div></div>
+    </aside>
   </div>
-  <div class="grid2">
-    <div class="panel"><div class="row"><strong>Layer 1 · Groups vs SPY</strong><span class="note">Click a sector row or chart ticker to focus it; click again to clear.</span>
-<select id="groupFilter"><option value="all">All</option><option value="core">Core sectors</option><option value="industry">Industries / themes</option></select>
-<label class="note">Macro basket</label>
-<select id="macroBasketFilter">
-  <option value="all">All</option>
-  <option value="rate">Rate sensitive</option>
-  <option value="cyclical">Cyclicals</option>
-  <option value="defensive">Defensives</option>
-  <option value="inflation">Inflation sensitive</option>
-</select>
-<span class="note">Basket selection dims non-members; it does not remove them. Fast RRG = 10/5 daily · Trend RRG = 25/12 daily</span></div><canvas id="sectorChart" width="900" height="540"></canvas></div>
-    <div class="panel"><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
-  </div>
+  <div class="legacyMarketBlock"><button class="primary" id="refreshMarket">Refresh market</button><div id="internals" class="cards"></div></div>
+  <div class="rotationLower">
   <div class="panel">
     <div class="row"><strong>Stock screen</strong><span class="note">Tip: click a ticker row or chart label to focus it. All displayed tails stay visible; the others dim. Click the selected ticker again to clear. Search/filters use loaded data and cached universes repopulate instantly.</span>
       <label class="note">ETF / group</label>
@@ -2550,7 +2601,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
       <div class="row"><strong>Dealer Positioning · modeled</strong><span class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</span></div>
       <div id="positioningSummary" class="positioningGrid gammaSummary"></div>
       <div id="positioningLevels" class="tiny"></div>
-      <div class="row" style="margin-top:12px"><strong>Gamma Landscape</strong><span class="note">Our modeled GEX/OI positioning map — not FlowMS live dealer inventory. Click a strike to inspect it.</span></div>
+      <div class="row" style="margin-top:12px"><strong>Gamma Landscape</strong><span class="note">Our modeled GEX/OI positioning map — not FlowMS live dealer inventory. Click a strike to inspect it.</span><span id="chainFreshness" class="chainFreshness"></span></div>
       <div class="gammaHeaderMeta"><span class="callSide">← CALL SIDE</span><span>strike centered</span><span class="putSide">PUT SIDE →</span></div>
       <canvas id="gammaLandscape" width="1200" height="430"></canvas>
       <div class="gammaLegend"><span><b>Green</b> call GEX</span><span><b>Red</b> put GEX</span><span><b>White</b> spot</span><span><b>Green rail</b> call wall</span><span><b>Orange rail</b> put wall</span><span><b>Purple</b> modeled flip</span></div>
@@ -2602,6 +2653,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
         <tbody id="liveWatchRows"></tbody>
       </table>
     </div>
+  </div>
   </div>
 </div>
 
@@ -2688,6 +2740,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 </div>
 <script>
 let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
+let sectorRRGMode="fast", sectorQuadrantFilter="all", dashboardPayload=null, dashboardHeatMode="composite";
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
 function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
@@ -2837,7 +2890,49 @@ function badge(q){return q?`<span class="badge ${q}">${q.toUpperCase()}</span>`:
 function dir(r){if(!r||!r.ticker)return"—";let s=`<span class="${r.rs_up?'up':'down'}">RS-Ratio ${r.rs_up?'↑':'↓'}</span> · <span class="${r.mom_up?'up':'down'}">RS-Momentum ${r.mom_up?'↑':'↓'}</span>`;if(r.l_to_i)s+=' <span class="flag">L→I</span>';if(r.early_turn)s+=' <span class="flag">EARLY TURN</span>';return s}
 const rrgFocusState={};
 
+function rrgModeRow(r,mode="fast"){
+ const src=(mode==="trend"?(r?.trend||r?.fast||r):(r?.fast||r))||{};
+ return {...r,...src,fast:r?.fast||src,trend:r?.trend||null,alignment:r?.alignment};
+}
+function rrgRowsForChart(id,rows){
+ if(id!=="sectorChart")return rows||[];
+ return (rows||[]).map(r=>rrgModeRow(r,sectorRRGMode));
+}
+function quadrantClass(q){return q?`quad${q}`:""}
+function selectedInterpretation(x){
+ const f=x?.fast||{},t=x?.trend||{};
+ if(f.quadrant==="Improving" && f.rs_up && f.mom_up && (!t.quadrant || t.quadrant==="Lagging" || t.quadrant==="Weakening"))return "Early rotation — fast improving ahead of the broader trend.";
+ if((f.quadrant==="Leading"||f.quadrant==="Improving") && (t.quadrant==="Leading"||t.quadrant==="Improving"))return "Aligned — fast and trend both support relative leadership.";
+ if((f.quadrant==="Weakening"||f.quadrant==="Lagging") && t.quadrant==="Leading")return "Pullback inside a stronger long-term relative trend.";
+ if(f.quadrant==="Lagging" && t.quadrant==="Lagging")return "Weak on both horizons — low-priority until momentum turns.";
+ return `${x?.alignment||"Mixed"} — compare fast change with trend persistence.`;
+}
+function updateSelectedSectorCard(ticker){
+ const el=document.getElementById("selectedSectorCard"); if(!el)return;
+ const x=(sectorData||[]).find(r=>r.ticker===ticker);
+ if(!x){el.innerHTML='<div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div>';return;}
+ const f=x.fast||{},t=x.trend||{};
+ el.innerHTML=`<div><div class="sscLabel">Selected</div><div class="sscValue">${x.ticker}</div><div class="tiny">${x.name||x.group||""}</div></div>
+ <div><div class="sscLabel">Fast 10/5</div><div class="sscValue ${quadrantClass(f.quadrant)}">${f.quadrant||"—"} ${f.rs_up&&f.mom_up?"↗":""}</div><div class="tiny">RS ${f.x==null?"—":fmt(f.x,1)} · Mom ${f.y==null?"—":fmt(f.y,1)}</div></div>
+ <div><div class="sscLabel">Trend 25/12</div><div class="sscValue ${quadrantClass(t.quadrant)}">${t.quadrant||"—"} ${t.rs_up&&t.mom_up?"↗":""}</div><div class="tiny">RS ${t.x==null?"—":fmt(t.x,1)} · Mom ${t.y==null?"—":fmt(t.y,1)}</div></div>
+ <div><div class="sscLabel">Interpretation</div><div class="sscInterp">${selectedInterpretation(x)}</div></div>`;
+}
+function setSectorRRGMode(mode){
+ sectorRRGMode=mode==="trend"?"trend":"fast";
+ ["rrgFastBtn","sideFastBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="fast"));
+ ["rrgTrendBtn","sideTrendBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="trend"));
+ const ttl=document.getElementById("dashboardRRGTitle");if(ttl)ttl.textContent=sectorRRGMode==="fast"?"RRG LIVE · FAST ROTATION (10/5)":"RRG LIVE · TREND (25/12)";
+ renderGroups();
+}
+function sparklineSVG(x,mode="fast"){
+ const src=mode==="trend"?(x?.trend||{}):(x?.fast||x||{}), pts=src.tail||[];
+ if(pts.length<2)return "";
+ const xs=pts.map(p=>p.x),ys=pts.map(p=>p.y),xmin=Math.min(...xs),xmax=Math.max(...xs),ymin=Math.min(...ys),ymax=Math.max(...ys); const w=72,h=16;
+ const path=pts.map((p,i)=>{const px=(p.x-xmin)/Math.max(.001,xmax-xmin)*(w-2)+1,py=h-1-(p.y-ymin)/Math.max(.001,ymax-ymin)*(h-2);return `${i?"L":"M"}${px.toFixed(1)},${py.toFixed(1)}`}).join(" ");
+ return `<svg class="miniSpark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
+}
 function drawRRG(id,rows,focusTicker=undefined){
+ rows=rrgRowsForChart(id,rows);
  const c=document.getElementById(id),ctx=c.getContext("2d"),W=c.width,H=c.height,p=42;
  rrgFocusState[id]=rrgFocusState[id]||{selected:null,rows:[],hits:[]};
  const state=rrgFocusState[id];
@@ -2979,7 +3074,7 @@ function toggleRRGFocus(id,ticker){
  if(!state)return;
  const next=state.selected===ticker?null:ticker;
  drawRRG(id,state.rows,next);
- if(id==="sectorChart")syncSectorRowSelection();
+ if(id==="sectorChart"){syncSectorRowSelection();updateSelectedSectorCard(next||currentSector);}
  if(id==="stockChart")syncLiveRowSelection();
  if(id==="historyChart")syncHistoricalRowSelection();
 }
@@ -3069,7 +3164,12 @@ function activeMacroBasket(){
 }
 function filteredGroups(){
  let f=document.getElementById("groupFilter")?.value||"all";
- return sectorData.filter(x=>f==="all"||(f==="core"&&x.group==="Core Sector")||(f==="industry"&&x.group==="Industry / Theme"));
+ return sectorData.filter(x=>{
+   const gok=f==="all"||(f==="core"&&x.group==="Core Sector")||(f==="industry"&&x.group==="Industry / Theme");
+   const q=sectorRRGMode==="trend"?(x.trend?.quadrant):(x.fast?.quadrant||x.quadrant);
+   const qok=sectorQuadrantFilter==="all"||q===sectorQuadrantFilter;
+   return gok&&qok;
+ });
 }
 function renderGroups(){
  let data=filteredGroups();
@@ -3090,6 +3190,8 @@ function renderGroups(){
  }));
 
  syncSectorRowSelection();
+ updateSelectedSectorCard(rrgFocusState["sectorChart"]?.selected||currentSector);
+ const dsel=document.getElementById("dashboardSectorSelect");if(dsel&&currentSector&&[...dsel.options].some(o=>o.value===currentSector))dsel.value=currentSector;
 }
 
 async function auditHoldings(){
@@ -3124,7 +3226,33 @@ function applyMarketPayload(j,fromCache=false){
    <div class="card"><div class="tiny">10Y TREASURY YIELD</div><b>${i.TNX?.value==null?"—":fmt(i.TNX.value,2)+"%"}</b><div class="tiny">${arrow(i.TNX?.d5)} ${valPct(i.TNX?.d5)} / 5d · ${valPct(i.TNX?.d20)} / 20d</div></div>`;
  renderGroups();
  renderHeatMap();
+ renderDashboardMarket(j);
 }
+
+function fmtDashValue(v,d=2){return v==null?"—":Number(v).toFixed(d)}
+function renderDashboardMarket(j){
+ dashboardPayload=j;const i=j?.internals||{},ov=document.getElementById("dashboardMarketOverview"),up=document.getElementById("dashboardUpdated"),br=document.getElementById("dashboardBreadth");
+ if(up)up.textContent=`Through ${j?.asof||"—"}`;
+ const quote=(sym,obj,changeKey="raw_d1")=>{const c=obj?.[changeKey]??obj?.d1,cls=c==null?"":c>=0?"up":"down";return `<div class="marketQuote"><div class="sym">${sym}</div><div class="px">${fmtDashValue(obj?.value,2)}</div><div class="chg ${cls}">${c==null?"—":`${c>=0?"+":""}${fmt(c,2)}%`}</div></div>`};
+ if(ov)ov.innerHTML=quote("SPY",i.SPY,"d1")+quote("QQQ",i.QQQ)+quote("IWM",i.IWM)+quote("VIX",i.VIX,"d5");
+ const cls=v=>v==null?"":v>=0?"up":"down",pctv=v=>v==null?"—":`${v>=0?"+":""}${fmt(v,2)}%`;
+ if(br)br.innerHTML=`<div class="breadthRow"><div class="name">RSP / SPY · breadth</div><div class="val">${pctv(i.RSP?.d5)}</div><div class="move ${cls(i.RSP?.d5)}">5d</div></div><div class="breadthRow"><div class="name">IWM / SPY · small caps</div><div class="val">${pctv(i.IWM?.d5)}</div><div class="move ${cls(i.IWM?.d5)}">5d</div></div><div class="breadthRow"><div class="name">HYG / LQD · credit</div><div class="val">${pctv(i.CREDIT?.d5)}</div><div class="move ${cls(i.CREDIT?.d5)}">5d</div></div><div class="breadthRow"><div class="name">10Y Treasury yield</div><div class="val">${i.TNX?.value==null?"—":fmt(i.TNX.value,2)+"%"}</div><div class="move ${cls(i.TNX?.d5)}">${pctv(i.TNX?.d5)}</div></div>`;
+ renderDashboardHeat();populateDashboardSectorSelect();
+}
+function dashboardHeatScore(x){
+ if(dashboardHeatMode==="fast")return Math.max(0,Math.min(10,rotationStage({...x,trend:{}}).level*2+(x.fast?.tail_trajectory==="Rotating In"?1:0)));
+ if(dashboardHeatMode==="trend"){
+   const t=x.trend||{},base={Leading:9,Improving:7,Weakening:3,Lagging:1}[t.quadrant]??5;
+   return Math.max(0,Math.min(10,base+(t.rs_up&&t.mom_up?1:0)-(t.rs_up===false&&t.mom_up===false?1:0)));
+ }
+ return sectorHeatScore(x);
+}
+function renderDashboardHeat(){
+ const g=document.getElementById("dashboardHeatGrid");if(!g)return;const rows=(sectorData||[]).filter(x=>x.group==="Core Sector").sort((a,b)=>dashboardHeatScore(b)-dashboardHeatScore(a));
+ g.innerHTML=rows.map(x=>{const sc=dashboardHeatScore(x),q=dashboardHeatMode==="trend"?(x.trend?.quadrant||"—"):(x.fast?.quadrant||x.quadrant);return `<div class="dashHeatTile ${heatTone(sc)} ${currentSector===x.ticker?"selected":""}" data-dash-sector="${x.ticker}"><div><div class="sym">${x.ticker}</div><div class="score">${sc.toFixed(1)}</div><div class="state">${q||"—"}</div></div>${sparklineSVG(x,dashboardHeatMode==="trend"?"trend":"fast")}</div>`}).join("");
+ document.querySelectorAll("[data-dash-sector]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.dashSector;toggleRRGFocus("sectorChart",t);await selectSector(t,{source:"dashboard"});document.querySelectorAll("[data-dash-sector]").forEach(n=>n.classList.toggle("selected",n.dataset.dashSector===t));}));
+}
+function populateDashboardSectorSelect(){const sel=document.getElementById("dashboardSectorSelect");if(!sel)return;const prev=sel.value||currentSector||"";const rows=(sectorData||[]).filter(x=>x.group==="Core Sector");sel.innerHTML='<option value="">Choose sector…</option>'+rows.map(x=>`<option value="${x.ticker}">${x.ticker} · ${x.name}</option>`).join("");if(prev&&[...sel.options].some(o=>o.value===prev))sel.value=prev;}
 
 async function loadMarket(force=false){
  const st=document.getElementById("mstatus");
@@ -3218,6 +3346,7 @@ async function selectSector(ticker,{source="ui",scrollToStocks=false,force=false
  const t=String(ticker||"").trim().toUpperCase();
  if(!t)return false;
  currentSector=t;
+ updateSelectedSectorCard(t);renderDashboardHeat();
  liveSearchData=[];liveSearchSector=null;
  const search=document.getElementById("liveTickerSearch");if(search)search.value="";
  const sel=document.getElementById("coreSectorSelect");if(sel&&[...sel.options].some(o=>o.value===t))sel.value=t;
@@ -3538,6 +3667,21 @@ function drawGammaLandscape(p,spot){
 function inspectGammaLandscape(evt){
  const c=document.getElementById("gammaLandscape"),d=document.getElementById("gammaLevelDetail");if(!c||!d)return;const rect=c.getBoundingClientRect(),sx=c.width/rect.width,sy=c.height/rect.height,x=(evt.clientX-rect.left)*sx,y=(evt.clientY-rect.top)*sy;const h=gammaLandscapeHitboxes.find(b=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h);if(!h)return;const r=h.row;d.innerHTML=`<b>$${fmt(r.strike,2)} strike</b> · Call GEX ${moneyShort(r.call_gex)} · Put GEX ${moneyShort(r.put_gex)} · Net ${r.net_gex>=0?"+":""}${moneyShort(r.net_gex)} · Call OI ${(r.call_oi||0).toLocaleString()} · Put OI ${(r.put_oi||0).toLocaleString()}`;
 }
+function formatChainSnapshot(ts){
+ if(!ts)return {text:"Chain snapshot: —",cls:""};
+ const d=new Date(ts); if(Number.isNaN(d.getTime()))return {text:"Chain snapshot: —",cls:""};
+ const mins=Math.max(0,Math.floor((Date.now()-d.getTime())/60000));
+ const clock=d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"});
+ const age=mins<1?"just now":mins===1?"1 min ago":`${mins} min ago`;
+ return {text:`Chain snapshot: ${clock} · ${age}`,cls:mins<=5?"fresh":mins<=15?"aging":"stale"};
+}
+function renderChainFreshness(ts,isStale=false,refreshError=null){
+ const el=document.getElementById("chainFreshness"); if(!el)return;
+ const f=formatChainSnapshot(ts); el.className=`chainFreshness ${isStale?"stale":f.cls}`;
+ el.textContent=f.text+(isStale?" · showing last good snapshot":"");
+ el.title=refreshError?`Latest refresh failed: ${refreshError}`:"Alpaca chain snapshot fetch time. Options data may be cached for up to 10 minutes.";
+}
+
 function renderPositioning(p,spot){
  const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary"),lev=document.getElementById("positioningLevels");
  if(!sec||!sum)return;if(!p||!p.available){sec.style.display="none";return}sec.style.display="block";
@@ -3578,7 +3722,7 @@ function renderOptionsPanel(){
    if(under)under.textContent="";
    return
  }
- const x=activeOptionsData;st.textContent=`${x.ticker} · ${x.feed||""}`; renderPositioning(x.positioning,x.spot);
+ const x=activeOptionsData;st.textContent=`${x.ticker} · ${x.feed||""}`; renderPositioning(x.positioning,x.spot); renderChainFreshness(x.chain_updated_at,x.stale,x.refresh_error);
  if(under)under.innerHTML=`<span class="tiny">Current price</span> <b>${x.ticker} $${fmt(x.spot,2)}</b>`;
  sum.innerHTML=`<div class="card"><div class="tiny">CURRENT PRICE</div><b>${x.ticker} · $${fmt(x.spot,2)}</b></div>
  <div class="card"><div class="tiny">LIQUIDITY</div><b>${x.liquidity}</b><div class="tiny">${x.liquid_contracts} liquid · ${x.tradable_contracts} tradable</div></div>
@@ -4078,7 +4222,21 @@ document.getElementById("refreshLiveWatchlist").addEventListener("click",refresh
 document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  liveWatchlist=[];
  saveLiveWatchlist();
-});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
+});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);document.getElementById("rrgFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
+document.getElementById("rrgTrendBtn")?.addEventListener("click",()=>setSectorRRGMode("trend"));
+document.getElementById("sideFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
+document.getElementById("sideTrendBtn")?.addEventListener("click",()=>setSectorRRGMode("trend"));
+document.getElementById("dashboardSectorSelect")?.addEventListener("change",async e=>{if(e.target.value){toggleRRGFocus("sectorChart",e.target.value);await selectSector(e.target.value,{source:"dashboard"})}});
+document.querySelectorAll("#sectorQuadPills .filterPill").forEach(btn=>btn.addEventListener("click",()=>{sectorQuadrantFilter=btn.dataset.q||"all";document.querySelectorAll("#sectorQuadPills .filterPill").forEach(x=>x.classList.toggle("active",x===btn));renderGroups();}));
+document.getElementById("dashHeatComposite")?.addEventListener("click",()=>{dashboardHeatMode="composite";document.getElementById("dashHeatComposite")?.classList.add("active");document.getElementById("dashHeatFast")?.classList.remove("active");document.getElementById("dashHeatTrend")?.classList.remove("active");renderDashboardHeat();});
+document.getElementById("dashHeatFast")?.addEventListener("click",()=>{dashboardHeatMode="fast";document.getElementById("dashHeatFast")?.classList.add("active");document.getElementById("dashHeatComposite")?.classList.remove("active");document.getElementById("dashHeatTrend")?.classList.remove("active");renderDashboardHeat();});
+document.getElementById("dashHeatTrend")?.addEventListener("click",()=>{dashboardHeatMode="trend";document.getElementById("dashHeatTrend")?.classList.add("active");document.getElementById("dashHeatFast")?.classList.remove("active");document.getElementById("dashHeatComposite")?.classList.remove("active");renderDashboardHeat();});
+document.getElementById("dashRefreshMarket")?.addEventListener("click",()=>loadMarket(true));
+function activateViewById(id){document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view===id));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id===id));if(id==="heatmap")renderHeatMap();}
+document.getElementById("dashHistorical")?.addEventListener("click",()=>activateViewById("history"));
+document.getElementById("dashEarnings")?.addEventListener("click",()=>activateViewById("earnings"));
+document.getElementById("dashHeatMap")?.addEventListener("click",()=>activateViewById("heatmap"));
+loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
 </script>
 """
 @app.errorhandler(500)

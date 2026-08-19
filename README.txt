@@ -1,3 +1,48 @@
+Market Rotation Screener v22.0 — Dashboard UI redesign
+
+NEW IN v22.0
+- Rebuilt the Rotation screen into a three-column trading dashboard: Market Overview + Heat Map + Breadth on the left, live RRG + sector summary in the center, and controls/quick actions on the right.
+- Added a real Fast 10/5 vs Trend 25/12 toggle for the sector RRG. The chart itself now switches coordinate/tail sets instead of merely mentioning that both calculations exist.
+- Added a selected-sector interpretation card showing Fast and Trend quadrant/RS/Momentum side by side.
+- Added an embedded sector heat map with red-to-green strength scale and Composite / Fast / Trend modes.
+- Added compact SPY, QQQ, IWM, VIX overview cards plus Breadth & Risk context.
+- Added sector quadrant filtering, larger controls, stronger visual hierarchy, and quick links to Historical RRG, Earnings Movers, and the full Heat Map.
+- All existing stock RRG, chart preview, gamma landscape, institutional flow engine, options scanner, watchlist, post-earnings, and historical-RRG functionality remains below/within the redesigned shell.
+
+IMPORTANT
+- RRG methodology is unchanged: Fast = 10/5 daily; Trend = 25/12 daily. The redesign exposes both views more clearly rather than changing the signal.
+- Flow direction remains conservative on Alpaca indicative data; FlowMS remains the directional cross-check.
+
+Market Rotation Screener v22.0 — Dashboard UI redesign
+
+NEW IN v22.0
+- Rebuilt the Rotation screen into a three-column trading dashboard: Market Overview + Heat Map + Breadth on the left, live RRG + sector summary in the center, and controls/quick actions on the right.
+- Added a real Fast 10/5 vs Trend 25/12 toggle for the sector RRG. The chart itself now switches coordinate/tail sets instead of merely mentioning that both calculations exist.
+- Added a selected-sector interpretation card showing Fast and Trend quadrant/RS/Momentum side by side.
+- Added an embedded sector heat map with red-to-green strength scale and Composite / Fast / Trend modes.
+- Added compact SPY, QQQ, IWM, VIX overview cards plus Breadth & Risk context.
+- Added sector quadrant filtering, larger controls, stronger visual hierarchy, and quick links to Historical RRG, Earnings Movers, and the full Heat Map.
+- All existing stock RRG, chart preview, gamma landscape, institutional flow engine, options scanner, watchlist, post-earnings, and historical-RRG functionality remains below/within the redesigned shell.
+
+IMPORTANT
+- RRG methodology is unchanged: Fast = 10/5 daily; Trend = 25/12 daily. The redesign exposes both views more clearly rather than changing the signal.
+- Flow direction remains conservative on Alpaca indicative data; FlowMS remains the directional cross-check.
+
+Market Rotation Screener v22.0 — Dashboard UI redesign
+
+NEW IN v22.0
+- Rebuilt the Rotation screen into a three-column trading dashboard: Market Overview + Heat Map + Breadth on the left, live RRG + sector summary in the center, and controls/quick actions on the right.
+- Added a real Fast 10/5 vs Trend 25/12 toggle for the sector RRG. The chart itself now switches coordinate/tail sets instead of merely mentioning that both calculations exist.
+- Added a selected-sector interpretation card showing Fast and Trend quadrant/RS/Momentum side by side.
+- Added an embedded sector heat map with red-to-green strength scale and Composite / Fast / Trend modes.
+- Added compact SPY, QQQ, IWM, VIX overview cards plus Breadth & Risk context.
+- Added sector quadrant filtering, larger controls, stronger visual hierarchy, and quick links to Historical RRG, Earnings Movers, and the full Heat Map.
+- All existing stock RRG, chart preview, gamma landscape, institutional flow engine, options scanner, watchlist, post-earnings, and historical-RRG functionality remains below/within the redesigned shell.
+
+IMPORTANT
+- RRG methodology is unchanged: Fast = 10/5 daily; Trend = 25/12 daily. The redesign exposes both views more clearly rather than changing the signal.
+- Flow direction remains conservative on Alpaca indicative data; FlowMS remains the directional cross-check.
+
 Market Rotation Screener v21.3 — accuracy-first flow + direction safety
 
 Key changes:
