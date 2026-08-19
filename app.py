@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "22.0"
+APP_VERSION = "22.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1341,6 +1341,8 @@ def modeled_dealer_positioning(rows, spot):
     for k in sorted(by_strike):
         b=by_strike[k]
         levels.append({"strike":k,"call_gex":b["call_gex"],"put_gex":b["put_gex"],"net_gex":b["net_gex"],"call_oi":b["call_oi"],"put_oi":b["put_oi"]})
+    total_call=sum(x["call_gex"] for x in levels)
+    total_put=sum(x["put_gex"] for x in levels)
     total=sum(x["net_gex"] for x in levels)
     call_wall=max(levels,key=lambda x:x["call_gex"])["strike"]
     put_wall=min(levels,key=lambda x:x["put_gex"])["strike"]
@@ -1388,6 +1390,7 @@ def modeled_dealer_positioning(rows, spot):
     landscape_levels=sorted(near_all,key=lambda x:x["strike"])
     return {
         "available":True,"method":"call + / put - gamma × OI heuristic","contracts_used":usable,
+        "total_call_gex":round(total_call,2),"total_put_gex":round(total_put,2),
         "net_gex":round(total,2),"net_gex_millions":round(total/1e6,2),
         "gamma_regime":"Positive / dampening" if total>=0 else "Negative / amplifying",
         "call_wall":call_wall,"put_wall":put_wall,"modeled_flip":round(flip,2) if flip is not None else None,
@@ -2395,6 +2398,23 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .gammaLevelDetail{min-height:22px;margin-top:7px;color:#cbd5e1}
 @media(max-width:700px){#pricePreviewChart{height:250px}}
 
+
+/* v22.1 GEX Landscape redesign */
+.gexDashboard{border-top:1px solid #1d5e37;padding-top:12px}
+.gexTopline{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;margin-bottom:10px}.modeledTag{font-size:9px;letter-spacing:.9px;color:#94a3b8;border:1px solid #334155;border-radius:5px;padding:2px 5px;margin-left:4px;vertical-align:2px}
+.positioningGrid.gammaSummary{display:grid;grid-template-columns:repeat(6,minmax(135px,1fr));gap:10px;margin:8px 0 12px}
+.gexDashboard .metricCard{min-height:88px;padding:12px 13px;border-radius:11px;background:linear-gradient(180deg,#101923,#0c131a);box-shadow:inset 0 1px rgba(255,255,255,.02)}
+.gexDashboard .metricCard .tiny:first-child{font-size:10px;font-weight:800;letter-spacing:.5px;color:#cbd5e1}.gexDashboard .metricCard .subLabel{font-size:10px;color:#7f8c9d;margin-top:2px}.gexDashboard .metricCard .big{font-size:21px;margin-top:7px}
+.metricCard.netGex{border-color:#1f5b39}.metricCard.netGex .big{color:#4ade80}.metricCard.netGex.negative{border-color:#71313a}.metricCard.netGex.negative .big{color:#f87171}
+.metricCard.exposureCard{grid-column:span 1}.exposureMini{font-size:10px;line-height:1.55;margin-top:5px}.exposureMini .pos{color:#4ade80}.exposureMini .neg{color:#f87171}
+.gexWorkspace{display:grid;grid-template-columns:minmax(0,1fr) 285px;gap:12px;align-items:start}.gexMain{min-width:0}.gexSectionHead{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:2px 0 7px}.gexSectionHead strong{text-transform:uppercase;letter-spacing:.35px}
+#gammaLandscape{height:560px;background:linear-gradient(180deg,#0b1218,#091016);border-color:#223245;border-radius:11px;margin-top:6px}
+.gammaLegendTop{margin:4px 0 8px;font-size:10px}.gammaLegendTop .callDot{color:#4ade80}.gammaLegendTop .putDot{color:#f87171}.gammaLegendTop .flipDot{color:#c084fc}.gammaLegendTop .callRailDot{color:#4ade80}.gammaLegendTop .putRailDot{color:#f59e0b}
+.gammaSelectedDetail{border:1px solid #25364a;background:#0d151e;border-radius:8px;padding:9px 11px;margin-top:8px;color:#cbd5e1;font-size:11px;min-height:18px}.gammaSelectedDetail .positive{color:#4ade80}.gammaSelectedDetail .negative{color:#f87171}.gammaSelectedDetail span{margin-left:14px}.gexDisclosure{margin-top:8px;padding:8px 10px;border-left:2px solid #334155;background:#0b1218;border-radius:6px;color:#8492a5}
+.gexRail{display:grid;gap:10px}.gexRailCard{background:linear-gradient(180deg,#101923,#0c131a);border:1px solid #25364a;border-radius:10px;padding:12px}.gexRailTitle{font-size:10px;font-weight:900;letter-spacing:.55px;color:#e2e8f0;margin-bottom:9px}.gexStatRow,.gexLevelRow,.gexLargestRow,.gexLegendRow{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:center;font-size:11px;padding:4px 0}.gexStatRow .positive,.gexLargestRow .positive{color:#4ade80}.gexStatRow .negative,.gexLargestRow .negative{color:#f87171}.gexLevelRow{grid-template-columns:12px 1fr auto}.gexSwatch{width:8px;height:8px;border-radius:50%;display:inline-block}.gexSwatch.call{border:2px solid #22c55e;background:transparent}.gexSwatch.flip{height:0;width:10px;border-radius:0;border-top:2px dashed #a78bfa}.gexSwatch.put{height:0;width:10px;border-radius:0;border-top:2px dashed #f59e0b}.gexSwatch.spot{border:1px solid #f8fafc;background:transparent}.gexLargestRow{grid-template-columns:36px 1fr auto}.gexMiniBar{height:8px;background:#17202a;border-radius:4px;overflow:hidden}.gexMiniBar span{display:block;height:100%;border-radius:4px}.gexMiniBar .positive{background:linear-gradient(90deg,#166534,#4ade80)}.gexMiniBar .negative{background:linear-gradient(90deg,#7f1d1d,#ef4444)}.gexLegendRow{grid-template-columns:18px 1fr}.gexLegendLine{height:0;width:16px;border-top:2px solid #f8fafc}.gexLegendLine.flip{border-top-style:dashed;border-color:#a78bfa}.gexLegendLine.call{border-top-style:dashed;border-color:#22c55e}.gexLegendLine.put{border-top-style:dashed;border-color:#f59e0b}.gexLegendBox{height:9px;width:16px;border-radius:2px;background:linear-gradient(90deg,#166534,#22c55e)}.gexLegendBox.put{background:linear-gradient(90deg,#7f1d1d,#ef4444)}
+@media(max-width:1150px){.positioningGrid.gammaSummary{grid-template-columns:repeat(3,minmax(135px,1fr))}.gexWorkspace{grid-template-columns:1fr}.gexRail{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.positioningGrid.gammaSummary{grid-template-columns:repeat(2,minmax(120px,1fr))}.gexRail{grid-template-columns:1fr}.gexTopline{flex-direction:column}.chainFreshness{margin-left:0}.gexDashboard .metricCard{min-height:78px}#gammaLandscape{height:470px}}
+
 /* v22 dashboard redesign */
 :root{--nav:#081016;--panel2:#0d151d;--panel3:#101a24;--line2:#223244;--accent:#22c55e;--accent2:#3b82f6;--cyan:#38bdf8}
 body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f 100%);min-height:100vh}
@@ -2433,7 +2453,7 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
     <button class="tab" data-view="earnings">◫ Earnings Movers</button>
     <button class="tab" data-view="heatmap">▦ Heat Map</button>
   </nav>
-  <div class="headerMeta"><span class="versionPill">v22.0</span></div>
+  <div class="headerMeta"><span class="versionPill">v22.1</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -2597,15 +2617,28 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
       <span class="note">Create a free Alpaca account, then add <code>APCA_API_KEY_ID</code> and <code>APCA_API_SECRET_KEY</code> in Render → Environment. Redeploy after saving.</span>
     </div>
 
-    <div id="positioningSection" style="display:none;margin-top:10px">
-      <div class="row"><strong>Dealer Positioning · modeled</strong><span class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</span></div>
+    <div id="positioningSection" class="gexDashboard" style="display:none;margin-top:10px">
+      <div class="gexTopline">
+        <div><strong>Dealer Positioning <span class="modeledTag">MODELED</span></strong><div class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</div></div>
+        <span id="chainFreshness" class="chainFreshness"></span>
+      </div>
       <div id="positioningSummary" class="positioningGrid gammaSummary"></div>
-      <div id="positioningLevels" class="tiny"></div>
-      <div class="row" style="margin-top:12px"><strong>Gamma Landscape</strong><span class="note">Our modeled GEX/OI positioning map — not FlowMS live dealer inventory. Click a strike to inspect it.</span><span id="chainFreshness" class="chainFreshness"></span></div>
-      <div class="gammaHeaderMeta"><span class="callSide">← CALL SIDE</span><span>strike centered</span><span class="putSide">PUT SIDE →</span></div>
-      <canvas id="gammaLandscape" width="1200" height="430"></canvas>
-      <div class="gammaLegend"><span><b>Green</b> call GEX</span><span><b>Red</b> put GEX</span><span><b>White</b> spot</span><span><b>Green rail</b> call wall</span><span><b>Orange rail</b> put wall</span><span><b>Purple</b> modeled flip</span></div>
-      <div id="gammaLevelDetail" class="gammaLevelDetail tiny">Click a strike bar for details.</div>
+      <div class="gexWorkspace">
+        <div class="gexMain">
+          <div class="gexSectionHead"><div><strong>GEX Landscape</strong><span class="note"> Modeled GEX / OI positioning</span></div><span class="tiny">Click a strike to inspect it.</span></div>
+          <div class="gammaLegend gammaLegendTop"><span class="callDot">● CALL GEX</span><span class="putDot">● PUT GEX</span><span>○ SPOT</span><span class="flipDot">-- GAMMA FLIP</span><span class="callRailDot">-- CALL WALL</span><span class="putRailDot">-- PUT WALL</span></div>
+          <canvas id="gammaLandscape" width="1200" height="560"></canvas>
+          <div id="gammaLevelDetail" class="gammaSelectedDetail">Click a strike row for call GEX, put GEX, net GEX and open interest.</div>
+          <div class="gexDisclosure tiny">Modeled from chain gamma / OI using a call-positive / put-negative convention. The flip re-prices Black-Scholes gamma across hypothetical spot levels.</div>
+        </div>
+        <aside class="gexRail">
+          <div class="gexRailCard"><div class="gexRailTitle">GEX SUMMARY</div><div id="gexSummary"></div></div>
+          <div class="gexRailCard"><div class="gexRailTitle">KEY LEVELS</div><div id="gexKeyLevels"></div></div>
+          <div class="gexRailCard"><div class="gexRailTitle">LARGEST NET GEX BY STRIKE</div><div id="gexLargest"></div></div>
+          <div class="gexRailCard"><div class="gexRailTitle">LEGEND</div><div id="gexLegend"></div></div>
+        </aside>
+      </div>
+      <div id="positioningLevels" style="display:none"></div>
     </div>
     <div id="flowSection" style="display:none;margin-top:12px">
       <div class="row"><strong>Institutional Flow · event engine</strong><button id="refreshFlow" class="ghost">Refresh flow</button><span id="flowStatus" class="status"></span></div>
@@ -3637,35 +3670,87 @@ function moneyShort(v){
  if(a>=1e9)return "$"+fmt(v/1e9,2)+"B";if(a>=1e6)return "$"+fmt(v/1e6,2)+"M";if(a>=1e3)return "$"+fmt(v/1e3,1)+"K";return "$"+fmt(v,0);
 }
 let gammaLandscapeHitboxes=[];
+let selectedGammaStrike=null;
+function gexSigned(v){
+ if(v==null||!isFinite(Number(v)))return "—";const n=Number(v);return `${n>=0?"+":"-"}${moneyShort(Math.abs(n))}`;
+}
 function drawGammaLandscape(p,spot){
  const c=document.getElementById("gammaLandscape"),ctx=c?.getContext("2d");if(!c||!ctx)return;
  const rows=(p?.landscape_levels||p?.levels||[]).filter(x=>Number.isFinite(Number(x.strike))).sort((a,b)=>a.strike-b.strike);
- const W=c.width,H=c.height;ctx.clearRect(0,0,W,H);ctx.fillStyle="#0d1217";ctx.fillRect(0,0,W,H);gammaLandscapeHitboxes=[];
+ const W=c.width,H=c.height;ctx.clearRect(0,0,W,H);ctx.fillStyle="#0b1218";ctx.fillRect(0,0,W,H);gammaLandscapeHitboxes=[];
  if(!rows.length||!spot){ctx.fillStyle="#94a3b8";ctx.font="13px sans-serif";ctx.fillText("No modeled strike landscape available",24,32);return}
- const pad={l:72,r:72,t:28,b:34},mid=W/2,gap=70,plotL=pad.l,plotR=W-pad.r,rowH=(H-pad.t-pad.b)/rows.length;
+ const pad={l:86,r:86,t:38,b:40};
+ const strikeW=66,netW=82,centerW=strikeW+netW,mid=W/2,strikeL=mid-centerW/2,strikeR=strikeL+strikeW,netR=mid+centerW/2;
+ const plotL=pad.l,plotR=W-pad.r,rowH=(H-pad.t-pad.b)/rows.length;
  const maxCall=Math.max(1,...rows.map(x=>Math.abs(Number(x.call_gex)||0))),maxPut=Math.max(1,...rows.map(x=>Math.abs(Number(x.put_gex)||0)));
- const leftMax=mid-gap/2-plotL,rightMax=plotR-(mid+gap/2);
- ctx.font="11px sans-serif";ctx.textBaseline="middle";
+ const leftMax=strikeL-plotL-8,rightMax=plotR-netR-8;
+ ctx.textBaseline="middle";
+ // headers
+ ctx.font="bold 11px sans-serif";ctx.textAlign="left";ctx.fillStyle="#4ade80";ctx.fillText("CALL GEX",plotL,18);
+ ctx.textAlign="center";ctx.fillStyle="#94a3b8";ctx.fillText("STRIKE",strikeL+strikeW/2,18);ctx.fillText("NET GEX",strikeR+netW/2,18);
+ ctx.textAlign="right";ctx.fillStyle="#f87171";ctx.fillText("PUT GEX",plotR,18);
  rows.forEach((r,i)=>{
-   const y=pad.t+(i+.5)*rowH,call=Math.abs(Number(r.call_gex)||0),put=Math.abs(Number(r.put_gex)||0);
+   const y=pad.t+(i+.5)*rowH,call=Math.abs(Number(r.call_gex)||0),put=Math.abs(Number(r.put_gex)||0),net=Number(r.net_gex)||0;
    const cw=call/maxCall*leftMax,pw=put/maxPut*rightMax;
-   ctx.globalAlpha=.18;ctx.strokeStyle="#25303b";ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();
-   ctx.globalAlpha=.72;ctx.fillStyle="#22c55e";ctx.fillRect(mid-gap/2-cw,y-rowH*.34,cw,Math.max(2,rowH*.68));
-   ctx.fillStyle="#ef4444";ctx.fillRect(mid+gap/2,y-rowH*.34,pw,Math.max(2,rowH*.68));
-   ctx.globalAlpha=1;ctx.fillStyle="#cbd5e1";ctx.textAlign="center";ctx.fillText(`$${Number(r.strike).toFixed(r.strike<100?1:0)}`,mid,y);
+   const isSelected=selectedGammaStrike!=null&&Math.abs(Number(r.strike)-Number(selectedGammaStrike))<1e-6;
+   if(isSelected){ctx.fillStyle="rgba(59,130,246,.09)";ctx.fillRect(plotL,y-rowH/2,plotR-plotL,rowH)}
+   ctx.globalAlpha=.26;ctx.strokeStyle="#25303b";ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.globalAlpha=1;
+   // value labels at edges
+   ctx.font="10px sans-serif";ctx.textAlign="left";ctx.fillStyle="#4ade80";ctx.fillText(moneyShort(call),plotL,y);
+   ctx.textAlign="right";ctx.fillStyle="#f87171";ctx.fillText(`(${moneyShort(put)})`,plotR,y);
+   // bars
+   ctx.globalAlpha=.72;ctx.fillStyle="#22c55e";ctx.fillRect(strikeL-cw,y-rowH*.32,cw,Math.max(2,rowH*.64));
+   ctx.fillStyle="#ef4444";ctx.fillRect(netR,y-rowH*.32,pw,Math.max(2,rowH*.64));ctx.globalAlpha=1;
+   // central ladder
+   if(isSelected){ctx.fillStyle="#24344a";ctx.fillRect(strikeL+4,y-rowH*.42,strikeW-8,rowH*.84);ctx.strokeStyle="#60a5fa";ctx.strokeRect(strikeL+4,y-rowH*.42,strikeW-8,rowH*.84)}
+   ctx.font="11px sans-serif";ctx.textAlign="center";ctx.fillStyle="#e2e8f0";ctx.fillText(`$${Number(r.strike).toFixed(r.strike<100?1:0)}`,strikeL+strikeW/2,y);
+   ctx.fillStyle=net>=0?"#4ade80":"#f87171";ctx.fillText(`${net>=0?"+":""}${moneyShort(net)}`,strikeR+netW/2,y);
    gammaLandscapeHitboxes.push({x:plotL,y:y-rowH/2,w:plotR-plotL,h:rowH,row:r});
  });
- ctx.globalAlpha=1;ctx.textAlign="left";ctx.fillStyle="#86efac";ctx.font="bold 11px sans-serif";ctx.fillText("CALL GEX",plotL,14);ctx.textAlign="right";ctx.fillStyle="#fca5a5";ctx.fillText("PUT GEX",plotR,14);
  const minS=rows[0].strike,maxS=rows[rows.length-1].strike;
  const yForStrike=v=>pad.t+(Number(v)-minS)/(Math.max(.0001,maxS-minS))*(H-pad.t-pad.b);
- function rail(v,color,label,dash=[],side="right"){if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 11px sans-serif";ctx.textAlign=side==="left"?"left":"right";const tx=side==="left"?plotL+4:plotR-4;ctx.fillText(`${label} $${Number(v).toFixed(2)}`,tx,y-8);ctx.restore()}
- rail(spot,"#f8fafc","SPOT",[],"right");
+ function rail(v,color,label,dash=[],side="left"){
+   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 10px sans-serif";ctx.textAlign=side==="left"?"left":"right";ctx.fillText(`${label} $${Number(v).toFixed(2)}`,side==="left"?plotL+4:plotR-4,y-8);ctx.restore();
+ }
+ rail(spot,"#f8fafc","SPOT",[],"left");
+ rail(p.modeled_flip,"#a78bfa","GAMMA FLIP",[5,5],"left");
  rail(p.call_wall,"#22c55e","CALL WALL",[5,4],"left");
- rail(p.put_wall,"#f59e0b","PUT WALL",[5,4],"right");
- rail(p.modeled_flip,"#a78bfa","FLIP",[3,5],"left");
+ rail(p.put_wall,"#f59e0b","PUT WALL",[5,4],"left");
 }
 function inspectGammaLandscape(evt){
- const c=document.getElementById("gammaLandscape"),d=document.getElementById("gammaLevelDetail");if(!c||!d)return;const rect=c.getBoundingClientRect(),sx=c.width/rect.width,sy=c.height/rect.height,x=(evt.clientX-rect.left)*sx,y=(evt.clientY-rect.top)*sy;const h=gammaLandscapeHitboxes.find(b=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h);if(!h)return;const r=h.row;d.innerHTML=`<b>$${fmt(r.strike,2)} strike</b> · Call GEX ${moneyShort(r.call_gex)} · Put GEX ${moneyShort(r.put_gex)} · Net ${r.net_gex>=0?"+":""}${moneyShort(r.net_gex)} · Call OI ${(r.call_oi||0).toLocaleString()} · Put OI ${(r.put_oi||0).toLocaleString()}`;
+ const c=document.getElementById("gammaLandscape"),d=document.getElementById("gammaLevelDetail");if(!c||!d)return;
+ const rect=c.getBoundingClientRect(),sx=c.width/rect.width,sy=c.height/rect.height,x=(evt.clientX-rect.left)*sx,y=(evt.clientY-rect.top)*sy;
+ const h=gammaLandscapeHitboxes.find(b=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h);if(!h)return;
+ const r=h.row;selectedGammaStrike=r.strike;drawGammaLandscape(activeOptionsData?.positioning,activeOptionsData?.spot);
+ d.innerHTML=`<b>Selected $${fmt(r.strike,2)}</b><span>Call GEX <b class="positive">${moneyShort(r.call_gex)}</b></span><span>Put GEX <b class="negative">${moneyShort(r.put_gex)}</b></span><span>Net <b class="${r.net_gex>=0?'positive':'negative'}">${gexSigned(r.net_gex)}</b></span><span>Call OI <b>${(r.call_oi||0).toLocaleString()}</b></span><span>Put OI <b>${(r.put_oi||0).toLocaleString()}</b></span>`;
+}
+function renderGexRail(p,spot){
+ const rows=(p?.landscape_levels||p?.levels||[]).slice();
+ const totalCall=Number(p.total_call_gex??rows.reduce((a,x)=>a+(Number(x.call_gex)||0),0));
+ const totalPut=Number(p.total_put_gex??rows.reduce((a,x)=>a+(Number(x.put_gex)||0),0));
+ const net=Number(p.net_gex)||0,ratio=Math.abs(totalPut)>0?totalCall/Math.abs(totalPut):null;
+ const flip=p.modeled_flip,spotVsFlip=spot&&flip?((spot/flip-1)*100):null;
+ const s=document.getElementById('gexSummary');if(s)s.innerHTML=`
+   <div class="gexStatRow"><span>Total Call GEX</span><b class="positive">${moneyShort(totalCall)}</b></div>
+   <div class="gexStatRow"><span>Total Put GEX</span><b class="negative">${moneyShort(totalPut)}</b></div>
+   <div class="gexStatRow"><span>Net GEX (Call − Put)</span><b class="${net>=0?'positive':'negative'}">${gexSigned(net)}</b></div>
+   <div class="gexStatRow"><span>Call / Put Ratio</span><b>${ratio==null?'—':fmt(ratio,2)}</b></div>
+   <div class="gexStatRow"><span>Regime</span><b class="${net>=0?'positive':'negative'}">${p.gamma_regime||'—'}</b></div>
+   <div class="gexStatRow"><span>Spot vs Flip</span><b>${spotVsFlip==null?'—':`${spotVsFlip>=0?'+':''}${fmt(spotVsFlip,1)}%`}</b></div>`;
+ const key=document.getElementById('gexKeyLevels');if(key)key.innerHTML=`
+   <div class="gexLevelRow"><i class="gexSwatch call"></i><span>Call Wall (Upside Ceiling)</span><b>${p.call_wall==null?'—':'$'+fmt(p.call_wall,2)}</b></div>
+   <div class="gexLevelRow"><i class="gexSwatch flip"></i><span>Gamma Flip (Transition)</span><b>${p.modeled_flip==null?'—':'$'+fmt(p.modeled_flip,2)}</b></div>
+   <div class="gexLevelRow"><i class="gexSwatch put"></i><span>Put Wall (Downside Floor)</span><b>${p.put_wall==null?'—':'$'+fmt(p.put_wall,2)}</b></div>
+   <div class="gexLevelRow"><i class="gexSwatch spot"></i><span>Spot / Regime</span><b>${spot==null?'—':'$'+fmt(spot,2)}</b></div>`;
+ const top=(p.levels||rows).slice().sort((a,b)=>Math.abs(Number(b.net_gex)||0)-Math.abs(Number(a.net_gex)||0)).slice(0,5),mx=Math.max(1,...top.map(x=>Math.abs(Number(x.net_gex)||0)));
+ const lg=document.getElementById('gexLargest');if(lg)lg.innerHTML=top.map(x=>{const n=Number(x.net_gex)||0,w=Math.max(5,Math.abs(n)/mx*100);return `<div class="gexLargestRow"><b>$${fmt(x.strike,0)}</b><div class="gexMiniBar"><span class="${n>=0?'positive':'negative'}" style="width:${w}%"></span></div><b class="${n>=0?'positive':'negative'}">${gexSigned(n)}</b></div>`}).join('');
+ const le=document.getElementById('gexLegend');if(le)le.innerHTML=`
+   <div class="gexLegendRow"><i class="gexLegendBox"></i><span>Call GEX (modeled support)</span></div>
+   <div class="gexLegendRow"><i class="gexLegendBox put"></i><span>Put GEX (modeled pressure)</span></div>
+   <div class="gexLegendRow"><i class="gexLegendLine"></i><span>Spot Price</span></div>
+   <div class="gexLegendRow"><i class="gexLegendLine flip"></i><span>Gamma Flip</span></div>
+   <div class="gexLegendRow"><i class="gexLegendLine call"></i><span>Call Wall</span></div>
+   <div class="gexLegendRow"><i class="gexLegendLine put"></i><span>Put Wall</span></div>`;
 }
 function formatChainSnapshot(ts){
  if(!ts)return {text:"Chain snapshot: —",cls:""};
@@ -3683,15 +3768,19 @@ function renderChainFreshness(ts,isStale=false,refreshError=null){
 }
 
 function renderPositioning(p,spot){
- const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary"),lev=document.getElementById("positioningLevels");
+ const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary");
  if(!sec||!sum)return;if(!p||!p.available){sec.style.display="none";return}sec.style.display="block";
- const regimeCls=String(p.gamma_regime||"").startsWith("Positive")?"good":"warn";
- sum.innerHTML=`<div class="metricCard callWall"><div class="tiny">CALL WALL · UPSIDE CEILING</div><div class="big">${p.call_wall==null?"—":"$"+fmt(p.call_wall,2)}</div><div class="tiny">${spot&&p.call_wall!=null?fmt((p.call_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
- <div class="metricCard flipCard"><div class="tiny">MODELED GAMMA FLIP*</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">regime transition estimate</div></div>
- <div class="metricCard putWall"><div class="tiny">PUT WALL · DOWNSIDE FLOOR</div><div class="big">${p.put_wall==null?"—":"$"+fmt(p.put_wall,2)}</div><div class="tiny">${spot&&p.put_wall!=null?fmt((p.put_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
- <div class="metricCard spotCard ${regimeCls}"><div class="tiny">SPOT / GAMMA REGIME</div><div class="big">${spot==null?"—":"$"+fmt(spot,2)}</div><div class="tiny">${p.gamma_regime||"—"} · Net ${moneyShort(p.net_gex)}</div></div>`;
- if(lev){const top=(p.levels||[]).slice(0,6).map(x=>`$${fmt(x.strike,0)} ${x.net_gex>=0?"+":""}${moneyShort(x.net_gex)}`).join(" · ");lev.innerHTML=`Largest modeled strike exposures: ${top||"—"}<br><span class="note">* ${p.warning||""}</span>`}
- drawGammaLandscape(p,spot);
+ const net=Number(p.net_gex)||0,regimeCls=net>=0?"good":"bad";
+ const dist=(v)=>spot&&v!=null?`${(v/spot-1)*100>=0?'+':''}${fmt((v/spot-1)*100,1)}% vs spot`:"";
+ const top=(p.levels||[]).slice().sort((a,b)=>Math.abs(Number(b.net_gex)||0)-Math.abs(Number(a.net_gex)||0)).slice(0,4);
+ sum.innerHTML=`
+ <div class="metricCard callWall"><div class="tiny">CALL WALL</div><div class="subLabel">Upside Ceiling</div><div class="big">${p.call_wall==null?"—":"$"+fmt(p.call_wall,2)}</div><div class="tiny">${dist(p.call_wall)}</div></div>
+ <div class="metricCard flipCard"><div class="tiny">GAMMA FLIP</div><div class="subLabel">Transition Zone</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">${dist(p.modeled_flip)}</div></div>
+ <div class="metricCard putWall"><div class="tiny">PUT WALL</div><div class="subLabel">Downside Floor</div><div class="big">${p.put_wall==null?"—":"$"+fmt(p.put_wall,2)}</div><div class="tiny">${dist(p.put_wall)}</div></div>
+ <div class="metricCard spotCard ${regimeCls}"><div class="tiny">SPOT / REGIME</div><div class="subLabel">Current Price</div><div class="big">${spot==null?"—":"$"+fmt(spot,2)}</div><div class="tiny">${p.gamma_regime||"—"}</div></div>
+ <div class="metricCard netGex ${net<0?'negative':''}"><div class="tiny">NET GEX</div><div class="subLabel">Call − Put</div><div class="big">${gexSigned(net)}</div><div class="tiny">Modeled exposure</div></div>
+ <div class="metricCard exposureCard"><div class="tiny">LARGEST EXPOSURES</div><div class="subLabel">By strike · net GEX</div><div class="exposureMini">${top.map(x=>`<div><b>$${fmt(x.strike,0)}</b> <span class="${x.net_gex>=0?'pos':'neg'}">${gexSigned(x.net_gex)}</span></div>`).join('')||'—'}</div></div>`;
+ selectedGammaStrike=null;renderGexRail(p,spot);drawGammaLandscape(p,spot);
 }
 let activeFlowData=null;
 function renderFlow(x){
