@@ -111,9 +111,16 @@ def cached_refresh_safe(key, fn, force=False, ttl=CACHE_TTL):
         raise
 
 def dl_prices(tickers, period="3y"):
+    """Download daily closes with a per-symbol repair pass.
+
+    yfinance can occasionally return a populated multi-ticker frame with one or
+    more requested symbols entirely empty.  Older code treated the presence of
+    the column as success, which later produced .iloc[-1] out-of-bounds errors.
+    """
     tickers = list(dict.fromkeys([t for t in tickers if t]))
     if not tickers:
         return pd.DataFrame()
+
     last_err = None
     df = None
     for attempt in range(2):
@@ -133,22 +140,76 @@ def dl_prices(tickers, period="3y"):
         except Exception as e:
             last_err = e
         time.sleep(1.5 * (attempt + 1))
-    if df is None or len(df) == 0:
-        raise RuntimeError("Price provider returned no data" + (f": {last_err}" if last_err else "."))
-    if isinstance(df.columns, pd.MultiIndex):
-        if "Close" in df.columns.get_level_values(0):
-            close = df["Close"].copy()
-        elif "Adj Close" in df.columns.get_level_values(0):
-            close = df["Adj Close"].copy()
+
+    close = pd.DataFrame()
+    if df is not None and len(df) > 0:
+        if isinstance(df.columns, pd.MultiIndex):
+            if "Close" in df.columns.get_level_values(0):
+                close = df["Close"].copy()
+            elif "Adj Close" in df.columns.get_level_values(0):
+                close = df["Adj Close"].copy()
         else:
-            raise RuntimeError("Price download did not contain a Close column.")
-    else:
-        col = "Close" if "Close" in df.columns else ("Adj Close" if "Adj Close" in df.columns else None)
-        if not col:
-            raise RuntimeError("Price download did not contain a Close column.")
-        close = df[[col]].copy()
-        close.columns = [tickers[0]]
-    close.index = pd.to_datetime(close.index).tz_localize(None)
+            col = "Close" if "Close" in df.columns else ("Adj Close" if "Adj Close" in df.columns else None)
+            if col:
+                close = df[[col]].copy()
+                close.columns = [tickers[0]]
+
+    if len(close):
+        close.index = pd.to_datetime(close.index).tz_localize(None)
+        close = close.sort_index()
+
+    # Repair symbols that were omitted or returned as all-NaN in the bulk call.
+    missing = []
+    for ticker in tickers:
+        if ticker not in close.columns or close[ticker].dropna().empty:
+            missing.append(ticker)
+
+    repaired = []
+    for ticker in missing:
+        try:
+            one = yf.download(
+                ticker,
+                period=period,
+                interval="1d",
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+                timeout=20,
+            )
+            if one is None or len(one) == 0:
+                continue
+            if isinstance(one.columns, pd.MultiIndex):
+                if "Close" in one.columns.get_level_values(0):
+                    s = one["Close"]
+                elif "Adj Close" in one.columns.get_level_values(0):
+                    s = one["Adj Close"]
+                else:
+                    continue
+                if isinstance(s, pd.DataFrame):
+                    s = s.iloc[:, 0]
+            else:
+                col = "Close" if "Close" in one.columns else ("Adj Close" if "Adj Close" in one.columns else None)
+                if not col:
+                    continue
+                s = one[col]
+            s = pd.Series(s, name=ticker).dropna()
+            s.index = pd.to_datetime(s.index).tz_localize(None)
+            if len(s):
+                repaired.append(s)
+        except Exception:
+            continue
+
+    if repaired:
+        repair_df = pd.concat(repaired, axis=1)
+        close = repair_df if close.empty else close.combine_first(repair_df)
+        # combine_first keeps existing bulk values but adds repaired symbols/dates.
+        for c in repair_df.columns:
+            if c not in close.columns:
+                close[c] = repair_df[c]
+
+    if close.empty or close.dropna(how="all").empty:
+        raise RuntimeError("Price provider returned no usable data" + (f": {last_err}" if last_err else "."))
+
     return close.sort_index().dropna(how="all")
 
 def dl_ohlc(ticker, period="3y"):
@@ -1680,15 +1741,30 @@ def options_quality_payload(ticker):
 def market_payload():
     tickers=["SPY","RSP","IWM","QQQ","HYG","LQD","^VIX","^TNX"]+list(RRG_UNIVERSE)
     prices=dl_prices(tickers,"18mo")
-    if "SPY" not in prices: raise RuntimeError("SPY data unavailable.")
-    internals={}
+
+    if "SPY" not in prices.columns:
+        raise RuntimeError("SPY data unavailable after provider retry.")
     spy=prices["SPY"].dropna()
+    if spy.empty:
+        raise RuntimeError("SPY price history was returned empty after provider retry.")
+
+    internals={}
     internals["SPY"]={"value":float(spy.iloc[-1]),"d1":pct_change(spy,1),"d5":pct_change(spy,5),"d20":pct_change(spy,20)}
+
     for t,label in [("RSP","Breadth"),("IWM","Small caps"),("QQQ","Growth")]:
-        pair=prices[["SPY",t]].dropna()
-        ratio=pair[t]/pair["SPY"]
-        raw=prices[t].dropna() if t in prices else pd.Series(dtype=float)
-        internals[t]={"value":float(raw.iloc[-1]) if len(raw) else None,"raw_d1":pct_change(raw,1) if len(raw) else None,"d5":pct_change(ratio,5),"d20":pct_change(ratio,20),"label":label}
+        raw = prices[t].dropna() if t in prices.columns else pd.Series(dtype=float)
+        if t in prices.columns:
+            pair=prices[["SPY",t]].dropna()
+            ratio=(pair[t]/pair["SPY"]) if len(pair) else pd.Series(dtype=float)
+        else:
+            ratio=pd.Series(dtype=float)
+        internals[t]={
+            "value":float(raw.iloc[-1]) if len(raw) else None,
+            "raw_d1":pct_change(raw,1) if len(raw) else None,
+            "d5":pct_change(ratio,5) if len(ratio) else None,
+            "d20":pct_change(ratio,20) if len(ratio) else None,
+            "label":label
+        }
     # Credit risk appetite: high yield relative to investment grade.
     if "HYG" in prices and "LQD" in prices:
         credit_pair=prices[["HYG","LQD"]].dropna()
@@ -1743,7 +1819,10 @@ def market_payload():
         r["name"]=RRG_UNIVERSE.get(r["ticker"],r["ticker"])
         r["group"]="Core Sector" if r["ticker"] in SECTORS else "Industry / Theme"
         r["alignment"]=alignment_label(r.get("fast"), r.get("trend"))
-    return {"asof":prices.index.max().strftime("%Y-%m-%d"),"internals":internals,"participation":participation,"risk_appetite":risk_appetite,"risk_score":risk_score,"sectors":rows}
+    valid_index = prices.dropna(how="all").index
+    if len(valid_index) == 0:
+        raise RuntimeError("Market price frame contains no valid dated observations.")
+    return {"asof":valid_index.max().strftime("%Y-%m-%d"),"internals":internals,"participation":participation,"risk_appetite":risk_appetite,"risk_score":risk_score,"sectors":rows}
 
 
 def auth_required():
@@ -1848,7 +1927,7 @@ button {
 
 
 /* v22.5 layout cleanup */
-/* v22.8 candlestick proportion fix */
+/* v22.9 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -2531,7 +2610,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.8</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.9</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
