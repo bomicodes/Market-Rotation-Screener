@@ -1,7 +1,21 @@
-MARKET ROTATION SCREENER v21.2 — HIGH-COVERAGE FLOW
+Market Rotation Screener v21.3 — accuracy-first flow + direction safety
+
+Key changes:
+- FLOW_MAX_CANDIDATES default raised from 800 to 1200.
+- Chains under the ceiling now receive 100% institutional-candidate coverage.
+- Very large chains are selected until estimated institutional-activity coverage reaches FLOW_ACTIVITY_COVERAGE_TARGET (default 99.5%) or the hard ceiling is reached.
+- Direction labels remain intentionally conservative. Alpaca documents indicative option trades as delayed ~15 minutes and indicative quotes as modified derivatives, so this version refuses to pair delayed trades to later quotes and call that aggressor direction.
+- The UI now explicitly explains when direction is unavailable and why. FlowMS remains the directional cross-check on the current indicative feed.
+- If Alpaca OPRA is added later, a true live trade+quote capture layer can be added without changing the institutional event engine.
+
+Environment options:
+- FLOW_MAX_CANDIDATES=1200
+- FLOW_ACTIVITY_COVERAGE_TARGET=99.5
+
+MARKET ROTATION SCREENER v21.3 — HIGH-COVERAGE FLOW
 =====================================================
 
-NEW IN v21.2
+NEW IN v21.3
 - Removed the redundant Analyze Ticker buttons. Selecting a ticker now loads its options details automatically.
 - Moved Call/Put and Liquidity filters directly above the 0–30 DTE options chain.
 - Institutional Flow now scans every institutional candidate when there are <= 800 candidates (configurable with FLOW_MAX_CANDIDATES).

@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "21.2"
+APP_VERSION = "21.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -22,7 +22,8 @@ ALPACA_TRADING_BASE_URL = os.environ.get("ALPACA_TRADING_BASE_URL", "https://pap
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 ALPACA_OPTIONS_FEED = os.environ.get("ALPACA_OPTIONS_FEED", "indicative").strip().lower() or "indicative"
 FLOW_MIN_PREMIUM = float(os.environ.get("FLOW_MIN_PREMIUM", "25000"))
-FLOW_MAX_CANDIDATES = int(os.environ.get("FLOW_MAX_CANDIDATES", "800"))
+FLOW_MAX_CANDIDATES = int(os.environ.get("FLOW_MAX_CANDIDATES", "1200"))
+FLOW_ACTIVITY_COVERAGE_TARGET = float(os.environ.get("FLOW_ACTIVITY_COVERAGE_TARGET", "99.5"))
 FLOW_TRADE_WORKERS = max(1, min(6, int(os.environ.get("FLOW_TRADE_WORKERS", "4"))))
 
 
@@ -1551,19 +1552,29 @@ def flow_payload(ticker, options_payload=None):
             r=dict(r); r["institutional_candidate_score"]=_institutional_candidate_score(r); eligible.append(r)
     eligible=sorted(eligible,key=lambda r:r.get("institutional_candidate_score",0),reverse=True)
     eligible_total=len(eligible)
-    # Accuracy-first coverage: scan every institutional candidate whenever practical.
-    # For enormous chains, cap at FLOW_MAX_CANDIDATES (default 800), which still
-    # captures ~97% of an 821-candidate chain such as the supplied GOOGL example.
-    candidates=eligible if eligible_total<=FLOW_MAX_CANDIDATES else eligible[:FLOW_MAX_CANDIDATES]
-    candidate_coverage_pct=(100.0*len(candidates)/eligible_total) if eligible_total else 0.0
+    # V21.3 accuracy-first coverage: scan the full candidate set when it fits under
+    # the safety ceiling. For very large chains, keep adding candidates until the
+    # selected set represents the configured share of estimated institutional
+    # activity (default 99.5%) or the hard ceiling is reached. This prioritizes
+    # economically meaningful coverage rather than an arbitrary contract count.
     def activity_weight(r):
         vol=float(r.get("volume") or 0); px=float(r.get("last") or r.get("mid") or 0); last_size=float(r.get("last_size") or 0)
         return max(0.0,vol*px*100.0)+max(0.0,last_size*px*100.0)
     eligible_activity=sum(activity_weight(r) for r in eligible)
+    if eligible_total<=FLOW_MAX_CANDIDATES:
+        candidates=eligible
+    else:
+        candidates=[]; running=0.0
+        target=max(0.0,min(100.0,FLOW_ACTIVITY_COVERAGE_TARGET))/100.0
+        for r in eligible:
+            if len(candidates)>=FLOW_MAX_CANDIDATES: break
+            candidates.append(r); running+=activity_weight(r)
+            if eligible_activity>0 and running/eligible_activity>=target: break
+    candidate_coverage_pct=(100.0*len(candidates)/eligible_total) if eligible_total else 0.0
     selected_activity=sum(activity_weight(r) for r in candidates)
     activity_coverage_pct=(100.0*selected_activity/eligible_activity) if eligible_activity>0 else candidate_coverage_pct
-    if candidate_coverage_pct>=90 and activity_coverage_pct>=95: coverage_confidence="High"
-    elif candidate_coverage_pct>=70 and activity_coverage_pct>=85: coverage_confidence="Medium"
+    if activity_coverage_pct>=99.0: coverage_confidence="High"
+    elif activity_coverage_pct>=95.0: coverage_confidence="Medium"
     else: coverage_confidence="Low"
     meta={r["symbol"]:r for r in candidates if r.get("symbol")}; symbols=list(meta)
     if not symbols:
@@ -1619,7 +1630,7 @@ def flow_payload(ticker, options_payload=None):
         "institutional_put_pct":round(event_puts/event_total*100,1) if event_total else None,
         "high_relevance_events":high,"medium_relevance_events":med,
         "largest":events[:15],"events":events[:40],"unusual":unusual,"direction_available":False,
-        "note":"V21.2 Institutional Flow Engine: broad ~900-day/wide-strike chain with accuracy-first candidate coverage (all institutional candidates up to the configurable safety ceiling), deeper paginated trade retrieval, fragmented-print clustering, and recalibrated unusualness scoring. Institutional premium is qualifying clustered-event premium, not all sampled premium. Contract mix is calls vs puts only; bullish/bearish direction remains unconfirmed without contemporaneous NBBO alignment."
+        "note":"V21.3 Institutional Flow Engine: broad ~900-day/wide-strike chain, full candidate coverage when practical, and activity-targeted coverage (default 99.5%) for very large chains. Historical aggressor direction is intentionally not fabricated: Alpaca indicative option trades are delayed while quotes are modified/current, and Alpaca does not expose a historical option-NBBO endpoint in the documented REST API. Contract mix is calls vs puts only; use FlowMS as the directional cross-check unless OPRA live quote/trade capture is available."
     }
 
 def options_quality_payload(ticker):
@@ -1996,14 +2007,14 @@ def api_chart_preview(ticker):
     ticker=ticker.upper().strip()
     try:
         period=(request.args.get("period") or "1m").lower()
-        if period not in ("1d","1w","1m"):
+        if period not in ("1m","3m","6m"):
             period="1m"
-        # Daily bars are sufficient for a compact swing-trade preview.
-        df=dl_ohlc(ticker,"3mo")
+        # True chart ranges using daily candles.
+        df=dl_ohlc(ticker,"1y")
         if df is None or len(df)==0:
             return jsonify({"ok":False,"error":"No price history available."}),404
         df=df.dropna(subset=["Close"]).copy()
-        bars=2 if period=="1d" else (5 if period=="1w" else 22)
+        bars={"1m":22,"3m":66,"6m":126}.get(period,22)
         df=df.tail(bars)
         rows=[]
         for idx,row in df.iterrows():
@@ -2355,6 +2366,14 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .rotationStage{font-size:11px;font-weight:700;white-space:nowrap}
 .stage1{color:#fca5a5}.stage2{color:#fde68a}.stage3{color:#7dd3fc}.stage4{color:#86efac}
 .previewPeriodBtn.active{border-color:#60a5fa;color:#bfdbfe;background:#172033}
+
+.heatGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px;margin-top:12px}
+.heatTile{border:1px solid #273244;border-radius:12px;padding:12px;cursor:pointer;min-height:118px;background:#111821;transition:transform .12s ease,border-color .12s ease,background .12s ease}
+.heatTile:hover{transform:translateY(-1px);border-color:#64748b}.heatTile.selected{outline:2px solid #60a5fa;border-color:#60a5fa}
+.heatTile.h0,.heatTile.h1,.heatTile.h2,.heatTile.h3{background:#171b22}.heatTile.h4,.heatTile.h5{background:#1b2430}.heatTile.h6,.heatTile.h7{background:#172b2d}.heatTile.h8,.heatTile.h9,.heatTile.h10{background:#13352d}
+.heatHead{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}.heatTicker{font-size:18px;font-weight:800}.heatScore{font-size:17px;font-weight:800}
+.heatMeta{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.45}.heatTags{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}.heatTag{font-size:10px;border:1px solid #334155;border-radius:999px;padding:2px 6px;color:#cbd5e1}.heatLegend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:8px}
+@media(max-width:700px){.heatGrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}.heatTile{min-height:108px;padding:9px}.heatTicker{font-size:16px}}
 #pricePreviewChart{height:300px}
 @media(max-width:700px){#pricePreviewChart{height:250px}}
 </style>
@@ -2365,6 +2384,25 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 <button class="tab active" data-view="rotation">Rotation Screen</button>
 <button class="tab" data-view="earnings">Post-Earnings Screen</button>
 <button class="tab" data-view="history">Historical RRG</button>
+<button class="tab" data-view="heatmap">Heat Map</button>
+</div>
+
+<div id="heatmap" class="view">
+  <div class="panel">
+    <div class="row"><strong>Confluence Heat Map</strong><span class="note">Visual opportunity map · rotation first, then options/flow context. Darker tiles = stronger current confluence, not a buy signal.</span>
+      <label class="note">Groups</label><select id="heatGroupFilter"><option value="core">Core sectors</option><option value="all">All groups</option><option value="industry">Industries / themes</option></select>
+      <button id="refreshHeat" class="primary">Refresh map</button><span id="heatStatus" class="status"></span>
+    </div>
+    <div class="heatLegend"><span>0–3 weak</span><span>4–5 developing</span><span>6–7 actionable watch</span><span>8–10 strong confluence</span></div>
+  </div>
+  <div class="panel">
+    <div class="row"><strong>Sector / Group Map</strong><span class="note">Score = RRG stage + fast tail direction + trend confirmation. Click a tile to load its holdings below.</span></div>
+    <div id="sectorHeatGrid" class="heatGrid"></div>
+  </div>
+  <div class="panel">
+    <div class="row"><strong id="stockHeatTitle">Stock Map</strong><span class="note">Stock score uses rotation + your existing options quality signal. Flow/GEX appear on a tile after that ticker is selected and loaded.</span></div>
+    <div id="stockHeatGrid" class="heatGrid"></div>
+  </div>
 </div>
 
 <div id="rotation" class="view active">
@@ -2470,9 +2508,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
     <div class="panel" id="previewPanel">
       <div class="row">
         <strong id="previewTitle">Chart Preview</strong>
-        <button id="preview1D" class="previewPeriodBtn">1D</button>
-        <button id="preview1W" class="previewPeriodBtn">1W</button>
         <button id="preview1M" class="previewPeriodBtn active">1M</button>
+        <button id="preview3M" class="previewPeriodBtn">3M</button>
+        <button id="preview6M" class="previewPeriodBtn">6M</button>
         <span id="previewStatus" class="status">Select a ticker to preview price.</span>
       </div>
       <canvas id="pricePreviewChart" width="900" height="360"></canvas>
@@ -3077,6 +3115,7 @@ function applyMarketPayload(j,fromCache=false){
    <div class="card"><div class="tiny">HYG/LQD · CREDIT</div><b>${arrow(i.CREDIT?.d5)} ${valPct(i.CREDIT?.d5)}</b><div class="tiny">${valPct(i.CREDIT?.d20)} / 20d</div></div>
    <div class="card"><div class="tiny">10Y TREASURY YIELD</div><b>${i.TNX?.value==null?"—":fmt(i.TNX.value,2)+"%"}</b><div class="tiny">${arrow(i.TNX?.d5)} ${valPct(i.TNX?.d5)} / 5d · ${valPct(i.TNX?.d20)} / 20d</div></div>`;
  renderGroups();
+ renderHeatMap();
 }
 
 async function loadMarket(force=false){
@@ -3445,7 +3484,7 @@ function renderFlow(x){
  <div class="metricCard"><div class="tiny">CANDIDATE COVERAGE</div><div class="big">${x.candidate_coverage_pct==null?"—":fmt(x.candidate_coverage_pct,1)+"%"}</div><div class="tiny">${x.contracts_sampled||0}/${x.eligible_contracts||0} candidates · ${x.activity_coverage_pct==null?"—":fmt(x.activity_coverage_pct,1)+"%"} est. activity</div></div>
  <div class="metricCard ${confCls}"><div class="tiny">FLOW CONFIDENCE</div><div class="big">${conf}</div><div class="tiny">coverage confidence, not directional confidence</div></div>
  <div class="metricCard"><div class="tiny">CONTRACT MIX · CALL / PUT</div><div class="big">${fmt(cp,0)}% / ${fmt(pp,0)}%</div><div class="flowSplit"><span style="width:${cp}%"></span><span style="width:${pp}%"></span></div><div class="tiny">${moneyShort(x.institutional_call_premium)} calls · ${moneyShort(x.institutional_put_premium)} puts</div></div>
- <div class="metricCard"><div class="tiny">DIRECTION</div><div class="big">Unconfirmed</div><div class="tiny">requires contemporaneous NBBO / aggressor classification</div></div>
+ <div class="metricCard ${String(x.direction_status||"").includes("Unavailable")?"warn":""}"><div class="tiny">DIRECTION</div><div class="big">${x.direction_status||"Unconfirmed"}</div><div class="tiny">${x.direction_reason||"requires contemporaneous NBBO / aggressor classification"}</div></div>
  <div class="metricCard"><div class="tiny">LARGEST EVENT</div><div class="big">${x.largest?.length?moneyShort(x.largest[0].premium):"—"}</div><div class="tiny">${x.largest?.length?`${formatOptionDate(x.largest[0].expiration)} $${fmt(x.largest[0].strike,0)} ${optionTypeWord(x.largest[0].type)} · ${x.largest[0].prints||1} prints`:"No qualifying event"}</div></div>
  <div class="metricCard"><div class="tiny">RAW SAMPLE</div><div class="big">${moneyShort(x.gross_premium)}</div><div class="tiny">${x.all_prints||0} prints · context only</div></div>`;
  if(disc)disc.innerHTML=`<b>Important:</b> ${x.note||""}`;
@@ -3454,7 +3493,7 @@ function renderFlow(x){
 }
 async function loadFlowTicker(ticker,force=false){
  const st=document.getElementById("flowStatus"),sec=document.getElementById("flowSection");if(sec)sec.style.display="block";if(st)st.textContent=`Loading ${ticker} flow…`;
- try{const r=await fetch(`/api/flow/${encodeURIComponent(ticker)}${force?"?refresh=1":""}`),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");activeFlowData=j;renderFlow(j)}catch(e){if(st)st.innerHTML=`<span class="error">${e.message}</span>`}
+ try{const r=await fetch(`/api/flow/${encodeURIComponent(ticker)}${force?"?refresh=1":""}`),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");activeFlowData=j;renderFlow(j);renderHeatMap()}catch(e){if(st)st.innerHTML=`<span class="error">${e.message}</span>`}
 }
 
 function renderOptionsPanel(){
@@ -3578,21 +3617,47 @@ async function loadChartPreview(ticker,period=previewPeriod){
  const seq=++previewRequestSeq,st=document.getElementById("previewStatus"),title=document.getElementById("previewTitle");
  if(title)title.textContent=`${ticker} · Chart Preview`;
  if(st)st.textContent=`Loading ${period.toUpperCase()}…`;
- document.getElementById("preview1D")?.classList.toggle("active",period==="1d");
- document.getElementById("preview1W")?.classList.toggle("active",period==="1w");
  document.getElementById("preview1M")?.classList.toggle("active",period==="1m");
+ document.getElementById("preview3M")?.classList.toggle("active",period==="3m");
+ document.getElementById("preview6M")?.classList.toggle("active",period==="6m");
  try{
    const r=await fetch(`/api/chart-preview/${encodeURIComponent(ticker)}?period=${period}`);
    const j=await r.json();
    if(seq!==previewRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
    drawPricePreview(j);
-   if(st)st.textContent=`${period.toUpperCase()} · ${j.bars?.length||0} daily bars`;
+   if(st)st.textContent=`${period.toUpperCase()} · ${j.bars?.length||0} daily candles`;
  }catch(e){
    if(seq!==previewRequestSeq)return;
    if(st)st.innerHTML=`<span class="error">${e.message}</span>`;
    drawPricePreview({bars:[]});
  }
+}
+
+function heatTone(score){return `h${Math.max(0,Math.min(10,Math.round(score||0)))}`;}
+function sectorHeatScore(x){
+ const st=rotationStage(x).level; let s=st*2; const f=x.fast||x||{},t=x.trend||{};
+ if(f.tail_trajectory==="Rotating In")s+=1; if(f.tail_trajectory==="Rotating Out")s-=1;
+ if((t.quadrant==="Leading"||t.quadrant==="Improving")&&t.rs_up&&t.mom_up)s+=1;
+ return Math.max(0,Math.min(10,s));
+}
+function heatTagsFor(x,isStock=false){
+ const f=x.fast||x||{},t=x.trend||{}; const tags=[];
+ if(f.quadrant)tags.push(f.quadrant); if(f.tail_trajectory)tags.push(f.tail_trajectory);
+ if(t.quadrant&&t.quadrant!==f.quadrant)tags.push(`Trend ${t.quadrant}`);
+ if(isStock){const o=optionScanMap[x.ticker];if(o?.liquidity)tags.push(o.liquidity);if(o?.iv_state)tags.push(o.iv_state);}
+ return tags.slice(0,4).map(v=>`<span class="heatTag">${v}</span>`).join("");
+}
+function renderHeatMap(){
+ const sg=document.getElementById("sectorHeatGrid"),tg=document.getElementById("stockHeatGrid"),title=document.getElementById("stockHeatTitle"); if(!sg||!tg)return;
+ const gf=document.getElementById("heatGroupFilter")?.value||"core";
+ let sectors=(sectorData||[]).filter(x=>gf==="all"||(gf==="core"&&x.group==="Core Sector")||(gf==="industry"&&x.group==="Industry / Theme"));
+ sectors=[...sectors].sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a));
+ sg.innerHTML=sectors.length?sectors.map(x=>{const sc=sectorHeatScore(x),st=rotationStage(x);return `<div class="heatTile ${heatTone(sc)} ${currentSector===x.ticker?'selected':''}" data-heat-sector="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.name||x.group||''}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${st.label} · Fast ${x.fast?.quadrant||'—'} · Trend ${x.trend?.quadrant||'—'}</div><div class="heatTags">${heatTagsFor(x,false)}</div></div>`}).join(""):'<div class="note">Refresh market data to build the sector heat map.</div>';
+ document.querySelectorAll("[data-heat-sector]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatSector;currentSector=t;const sel=document.getElementById("coreSectorSelect");if(sel&&[...sel.options].some(o=>o.value===t))sel.value=t;document.getElementById("sectorTitle").textContent=t+" selected";renderHeatMap();await loadSector();renderHeatMap();}));
+ const stocks=filteredLiveStocks?filteredLiveStocks():(liveStockData||[]); if(title)title.textContent=currentSector?`${currentSector} · Stock Map`:'Stock Map';
+ tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
+ document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",()=>{const t=el.dataset.heatStock;loadChartPreview(t);if(alpacaConfigured!==false)loadOptionsTicker(t,{scroll:false});document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));}));
 }
 function opportunityScore(x){
  let score=0;
@@ -3632,6 +3697,7 @@ function renderLiveStocks(){
  }));
  refreshLiveBookmarkButtons();syncLiveRowSelection();
  renderInternalRotation();
+ renderHeatMap();
 }
 
 function rotationStage(x){
@@ -3896,7 +3962,13 @@ document.getElementById("histLimit").disabled=true;
 document.getElementById("histLimitLabel").style.opacity=.45;
 document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 
-document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active")}));
+
+document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
+document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
+document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
+document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
+document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
+document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));b.classList.add("active");document.getElementById(b.dataset.view).classList.add("active");if(b.dataset.view==="heatmap")renderHeatMap()}));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("macroBasketFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
  if(e.target.value){
    currentSector=e.target.value;
@@ -3907,9 +3979,9 @@ document.getElementById("groupFilter").addEventListener("change",renderGroups);d
    document.getElementById("sectorTitle").textContent=currentSector+" selected";
    loadSector();
  }
-});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1D").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1d")});
-document.getElementById("preview1W").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1w")});
-document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
+});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
+document.getElementById("preview3M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"3m")});
+document.getElementById("preview6M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"6m")});
 document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
 document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=>{
  if(e.key==="Enter"){
