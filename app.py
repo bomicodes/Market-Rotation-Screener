@@ -1477,7 +1477,17 @@ def _option_trade_chunks(symbols, start_iso, end_iso, feed):
             elif "page_token" in params: params.pop("page_token",None)
             r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=35)
             if r.status_code in (401,403):
-                raise RuntimeError("Alpaca option-trade access was rejected. Check market-data permissions.")
+                try:
+                    detail=(r.json() or {}).get("message") or r.text
+                except Exception:
+                    detail=r.text
+                if r.status_code==401:
+                    raise RuntimeError(f"Alpaca historical option-trade authentication failed: {detail or 'invalid API credentials'}")
+                raise RuntimeError(
+                    "Alpaca historical option-trade endpoint returned 403 Forbidden. "
+                    "Your option-chain/GEX access may still work, but this account/key is not currently entitled to the historical options trades endpoint. "
+                    f"Alpaca response: {detail or 'forbidden'}"
+                )
             if r.status_code==429:
                 time.sleep(1.0)
                 r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=35)
@@ -2695,7 +2705,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.11 candlestick proportion fix */
+/* v22.12 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -2708,7 +2718,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.11 layout + STRAT confluence */
+/* v22.12 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -2729,6 +2739,30 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 @media(max-width:760px){#sectorChart{height:470px}.rrgFilterBar{align-items:stretch}.rrgSelectFilters{display:grid;grid-template-columns:1fr}.rrgSelectFilters label{max-width:none}.rrgInlineFilters{margin-left:0}.stratFrames{grid-template-columns:1fr 1fr}#pricePreviewChart{aspect-ratio:1080/620}}
 @media(max-width:1100px){.rrgControlStack{align-items:stretch}.rrgInlineFilters{flex-wrap:wrap}.rrgInlineFilters .filterPills{justify-content:flex-start}.dashRight .sectorSummaryPanel .scroll{max-height:300px}}
 
+
+
+/* v22.12 sector-summary containment */
+.dashRight{min-height:0!important;overflow:hidden}
+.dashRight .sectorSummaryPanel{
+  height:100%!important;
+  min-height:0!important;
+  max-height:100%!important;
+  overflow:hidden!important;
+}
+.dashRight .sectorSummaryPanel .scroll{
+  flex:1 1 auto!important;
+  min-height:0!important;
+  max-height:none!important;
+  overflow-y:auto!important;
+  overflow-x:hidden!important;
+  scrollbar-gutter:stable;
+  padding-right:4px;
+}
+.dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar{width:8px}
+.dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-track{background:#071018;border-radius:10px}
+.dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb{background:#2a4053;border-radius:10px}
+.dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
+
 </style>
 <div class="wrap">
 <header class="appHeader">
@@ -2742,7 +2776,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.11</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.12</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -4109,7 +4143,14 @@ function renderFlow(x){
 }
 async function loadFlowTicker(ticker,force=false){
  const st=document.getElementById("flowStatus"),sec=document.getElementById("flowSection");if(sec)sec.style.display="block";if(st)st.textContent=`Loading ${ticker} flow…`;
- try{const r=await fetch(`/api/flow/${encodeURIComponent(ticker)}${force?"?refresh=1":""}`),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");activeFlowData=j;renderFlow(j);renderHeatMap()}catch(e){if(st)st.innerHTML=`<span class="error">${e.message}</span>`}
+ try{
+   const r=await fetch(`/api/flow/${encodeURIComponent(ticker)}${force?"?refresh=1":""}`),j=await r.json();
+   if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");
+   activeFlowData=j;renderFlow(j);renderHeatMap()
+ }catch(e){
+   activeFlowData=null;
+   if(st)st.innerHTML=`<span class="warn">${e.message}</span><div class="tiny" style="margin-top:5px">GEX, chain snapshots, STRAT, and options screening remain available. Use FlowMS for directional flow while this Alpaca entitlement is unavailable.</div>`;
+ }
 }
 
 function renderOptionsPanel(){
