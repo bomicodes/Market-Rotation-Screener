@@ -1846,6 +1846,13 @@ button {
 .gexPageShell{margin-bottom:14px;background:linear-gradient(180deg,#0c1720,#081018);border-color:#22394e}.gexPageHeader{display:flex;align-items:center;justify-content:space-between;gap:16px}.gexTickerControls{display:flex;gap:8px;align-items:center}.gexTickerControls input{width:190px}.gexPageHint{margin-top:12px;padding:14px;border:1px dashed #2a4258;border-radius:10px;color:#8fa0b3;background:#081119}.gexPageShell+.gexDashboard{margin-top:0!important}
 @media(max-width:760px){#pricePreviewChart{height:360px}.gexPageHeader{align-items:flex-start;flex-direction:column}.gexTickerControls{width:100%}.gexTickerControls input{flex:1;width:auto}}
 
+
+/* v22.5 layout cleanup */
+.headerMeta{display:flex;align-items:center;gap:8px}.headerRefresh{padding:6px 10px;border-radius:8px;border:1px solid #234058;background:#0b1721;color:#cfe7ff;font-weight:700;font-size:10px}.headerRefresh:hover{border-color:#3b82f6;color:#fff}
+.rrgControlStack{display:flex;flex-direction:column;align-items:flex-end;gap:7px}.rrgInlineFilters{display:flex;align-items:center;gap:7px}.rrgInlineFilters .filterPills{justify-content:flex-end}.rrgInlineFilters .filterPill{padding:4px 7px;font-size:8px}
+.dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
+.gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
+@media(max-width:1100px){.rrgControlStack{align-items:stretch}.rrgInlineFilters{flex-wrap:wrap}.rrgInlineFilters .filterPills{justify-content:flex-start}.dashRight .sectorSummaryPanel .scroll{max-height:300px}}
 </style>
 </head>
 <body>
@@ -2517,7 +2524,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><span class="versionPill">v22.4</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.5</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -2571,21 +2578,16 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
     <main class="dashCol dashCenter rrgShell">
       <div class="panel">
-        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · click a ticker to focus and load holdings</div></div><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div></div>
+        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · click a ticker to focus and load holdings</div></div><div class="rrgControlStack"><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div><div class="rrgInlineFilters"><span class="tiny">QUADRANT</span><div class="filterPills" id="sectorQuadPills"><button class="filterPill active" data-q="all">All</button><button class="filterPill leading" data-q="Leading">Leading</button><button class="filterPill" data-q="Improving">Improving</button><button class="filterPill weakening" data-q="Weakening">Weakening</button><button class="filterPill lagging" data-q="Lagging">Lagging</button></div></div></div></div>
         <canvas id="sectorChart" width="900" height="540"></canvas>
         <div id="selectedSectorCard" class="selectedSectorCard"><div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div></div>
-      </div>
-      <div class="panel sectorSummaryPanel">
-        <div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend side by side</span></div>
-        <div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Alignment</th></tr></thead><tbody id="sectorRows"></tbody></table></div>
       </div>
     </main>
 
     <aside class="dashCol dashRight">
       <div class="sideSection"><h3>SELECT SECTOR / GROUP</h3><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></div>
       <div class="sideSection"><h3>GROUP UNIVERSE</h3><select id="groupFilter"><option value="all">All groups</option><option value="core" selected>Core sectors</option><option value="industry">Industries / themes</option></select><div style="height:7px"></div><h3>MACRO BASKET</h3><select id="macroBasketFilter"><option value="all">All</option><option value="rate">Rate sensitive</option><option value="cyclical">Cyclicals</option><option value="defensive">Defensives</option><option value="inflation">Inflation sensitive</option></select></div>
-      <div class="sideSection"><h3>QUADRANT FILTER</h3><div class="filterPills" id="sectorQuadPills"><button class="filterPill active" data-q="all">All</button><button class="filterPill leading" data-q="Leading">Leading</button><button class="filterPill" data-q="Improving">Improving</button><button class="filterPill weakening" data-q="Weakening">Weakening</button><button class="filterPill lagging" data-q="Lagging">Lagging</button></div></div>
-      <div class="sideSection compactRefresh"><h3>MARKET DATA</h3><div id="mstatus" class="note">Not loaded</div><button class="quickBtn" id="dashRefreshMarket">↻ Refresh market</button></div>
+      <div class="sideSection sectorSummaryPanel"><div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend</span></div><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
     </aside>
   </div>
   <div class="legacyMarketBlock"><button class="primary" id="refreshMarket">Refresh market</button><div id="internals" class="cards"></div></div>
@@ -2695,7 +2697,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
       <div id="positioningSummary" class="positioningGrid gammaSummary"></div>
       <div class="gexWorkspace">
         <div class="gexMain">
-          <div class="gexSectionHead"><div><strong>GEX LANDSCAPE</strong><span class="note"> Modeled GEX / OI positioning</span><div class="tiny gexHelpText">Click a strike to view details, open interest, and net exposure.</div></div><div class="gexViewTools"><button class="gexViewBtn active" type="button">STRIKES</button><button class="gexViewBtn" type="button" title="Normalized view stays in the detailed chain for now">% OF SPOT</button><span class="tiny">Click a strike to inspect it.</span></div></div>
+          <div class="gexSectionHead"><div><strong>GEX LANDSCAPE</strong><span class="note"> Modeled GEX / OI positioning</span><div class="tiny gexHelpText">Click a strike to view details, open interest, and net exposure.</div></div><div class="gexViewTools"><span class="tiny">Click a strike to inspect it.</span></div></div>
           <div class="gammaLegend gammaLegendTop"><span class="callDot">● CALL GEX</span><span class="putDot">● PUT GEX</span><span>○ SPOT</span><span class="flipDot">-- GAMMA FLIP</span><span class="callRailDot">-- CALL WALL</span><span class="putRailDot">-- PUT WALL</span></div>
           <canvas id="gammaLandscape" width="1200" height="560"></canvas>
           <div id="gammaLevelDetail" class="gammaSelectedDetail">Click a strike row for call GEX, put GEX, net GEX and open interest.</div>
@@ -3780,12 +3782,13 @@ function drawGammaLandscape(p,spot){
  const minS=rows[0].strike,maxS=rows[rows.length-1].strike;
  const yForStrike=v=>pad.t+(Number(v)-minS)/(Math.max(.0001,maxS-minS))*(H-pad.t-pad.b);
  function rail(v,color,label,dash=[],side="left"){
-   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.65;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 10px sans-serif";ctx.textAlign=side==="left"?"left":"right";ctx.fillText(`${label} $${Number(v).toFixed(2)}`,side==="left"?plotL+4:plotR-4,y-8);ctx.restore();
+   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.55;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);
+   const txt=`${label} $${Number(v).toFixed(2)}`;ctx.font="bold 9px sans-serif";const tw=ctx.measureText(txt).width;const bx=side==="left"?6:W-tw-18,by=Math.max(25,Math.min(H-20,y-15));ctx.fillStyle="rgba(7,16,24,.92)";ctx.fillRect(bx-4,by-8,tw+8,16);ctx.fillStyle=color;ctx.textAlign="left";ctx.fillText(txt,bx,by);ctx.restore();
  }
  rail(spot,"#f8fafc","SPOT",[],"left");
  rail(p.modeled_flip,"#a78bfa","GAMMA FLIP",[5,5],"left");
  rail(p.call_wall,"#22c55e","CALL WALL",[5,4],"left");
- rail(p.put_wall,"#f59e0b","PUT WALL",[5,4],"left");
+ rail(p.put_wall,"#f59e0b","PUT WALL",[5,4],"right");
 }
 function inspectGammaLandscape(evt){
  const c=document.getElementById("gammaLandscape"),d=document.getElementById("gammaLevelDetail");if(!c||!d)return;
