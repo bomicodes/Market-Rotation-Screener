@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "22.1"
+APP_VERSION = "22.10"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1927,7 +1927,7 @@ button {
 
 
 /* v22.5 layout cleanup */
-/* v22.9 candlestick proportion fix */
+/* v22.10 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -1939,6 +1939,26 @@ button {
 .rrgControlStack{display:flex;flex-direction:column;align-items:flex-end;gap:7px}.rrgInlineFilters{display:flex;align-items:center;gap:7px}.rrgInlineFilters .filterPills{justify-content:flex-end}.rrgInlineFilters .filterPill{padding:4px 7px;font-size:8px}
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
+
+/* v22.10 layout + STRAT confluence */
+.dashboardGrid{align-items:stretch}
+.dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
+#sectorChart{height:650px}
+.dashRight .sectorSummaryPanel{display:flex;flex-direction:column;min-height:100%}
+.dashRight .sectorSummaryPanel .scroll{max-height:none!important;flex:1;overflow:auto}
+.dashRight .sectorSummaryPanel table{font-size:10px}
+.rrgFilterBar{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:8px 0 8px;flex-wrap:wrap}
+.rrgSelectFilters{display:flex;gap:7px;align-items:flex-end;flex:1;min-width:0}
+.rrgSelectFilters label{display:grid;gap:3px;min-width:130px;flex:1;max-width:210px}.rrgSelectFilters label span{font-size:8px;color:#7f8fa2;letter-spacing:.55px;font-weight:800}.rrgSelectFilters select{width:100%;font-size:10px;padding:6px 7px}
+.rrgInlineFilters{margin-left:auto}.rrgInlineFilters .tiny{font-size:8px;letter-spacing:.5px}
+.priceActionGrid{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(300px,.72fr);gap:12px;align-items:stretch;margin-top:14px}
+.priceActionGrid .priceChartPanelWide{margin-top:0;min-width:0}.priceChartPanelWide .priceChartCanvasWrap{width:100%;max-width:1040px;margin:0 auto}
+#pricePreviewChart{width:100%!important;height:auto!important;aspect-ratio:54/31;display:block;background:#071018}
+.stratPanel{margin:0;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,#0d1720,#091119)}
+.stratHead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid #1d3040;padding-bottom:10px;margin-bottom:9px}.stratContinuity{font-size:10px;font-weight:900;border:1px solid #334155;border-radius:999px;padding:5px 8px;color:#a9b5c3;white-space:nowrap}.stratContinuity.bullish{color:#68e89a;border-color:#1b6b3e;background:#0c2618}.stratContinuity.bearish{color:#ff8181;border-color:#74313a;background:#281217}.stratContinuity.mixed{color:#f5c451;border-color:#6a5520;background:#231d0d}
+.stratFrames{display:grid;gap:8px;margin-top:9px}.stratFrame{border:1px solid #223547;background:#0a141d;border-radius:9px;padding:10px}.stratFrameTop{display:flex;align-items:center;justify-content:space-between;gap:8px}.stratTf{font-weight:900;font-size:13px}.stratScenario{font-size:11px;font-weight:900;border-radius:6px;padding:3px 7px;background:#14202b}.stratScenario.bullish{color:#57e78d;background:#0e2a1a}.stratScenario.bearish{color:#ff6c72;background:#30151a}.stratScenario.neutral{color:#b6c3d0;background:#17212b}.stratPattern{font-size:11px;color:#e0e7ef;font-weight:700;margin-top:6px}.stratTrigger{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.stratTrigger div{background:#0d1822;border-radius:6px;padding:6px;font-size:9px;color:#8fa0b3}.stratTrigger b{display:block;font-size:11px;margin-top:2px;color:#dce7f2}.stratTrigger .up b{color:#5be28e}.stratTrigger .down b{color:#ff7979}.stratFTC{font-size:9px;margin-top:6px;color:#7f90a2}.stratFoot{margin-top:auto;padding-top:10px;border-top:1px solid #1c2b39;color:#748598;line-height:1.45}
+@media(max-width:1220px){.priceActionGrid{grid-template-columns:1fr}.stratFrames{grid-template-columns:repeat(4,minmax(0,1fr))}.stratFoot{margin-top:10px}.rrgSelectFilters{flex-wrap:wrap}.rrgSelectFilters label{min-width:150px}.dashRight .sectorSummaryPanel{min-height:420px}}
+@media(max-width:760px){#sectorChart{height:470px}.rrgFilterBar{align-items:stretch}.rrgSelectFilters{display:grid;grid-template-columns:1fr}.rrgSelectFilters label{max-width:none}.rrgInlineFilters{margin-left:0}.stratFrames{grid-template-columns:1fr 1fr}#pricePreviewChart{aspect-ratio:54/31}}
 @media(max-width:1100px){.rrgControlStack{align-items:stretch}.rrgInlineFilters{flex-wrap:wrap}.rrgInlineFilters .filterPills{justify-content:flex-start}.dashRight .sectorSummaryPanel .scroll{max-height:300px}}
 </style>
 </head>
@@ -2148,6 +2168,116 @@ def api_chart_preview(ticker):
                 "volume":None if pd.isna(row.get("Volume")) else int(row.get("Volume")),
             })
         return jsonify({"ok":True,"ticker":ticker,"period":period,"bars":rows})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
+
+def _strat_scenario(prev, cur):
+    ph, pl = float(prev["High"]), float(prev["Low"])
+    ch, cl = float(cur["High"]), float(cur["Low"])
+    inside = ch <= ph and cl >= pl
+    outside = ch > ph and cl < pl
+    if outside: return "3"
+    if inside: return "1"
+    if ch > ph and cl >= pl: return "2U"
+    if cl < pl and ch <= ph: return "2D"
+    # Rare equal/overlap case: use close direction only as an ambiguous 2.
+    return "2U" if float(cur["Close"]) >= float(cur["Open"]) else "2D"
+
+
+def _strat_frame(df, label):
+    if df is None or len(df) < 4:
+        return {"timeframe":label,"scenario":"—","pattern":"Insufficient data","direction":"neutral","ftc":"neutral"}
+    d=df.dropna(subset=["Open","High","Low","Close"]).copy()
+    if len(d)<4:
+        return {"timeframe":label,"scenario":"—","pattern":"Insufficient data","direction":"neutral","ftc":"neutral"}
+    scenarios=[]
+    for i in range(1,len(d)):
+        scenarios.append(_strat_scenario(d.iloc[i-1],d.iloc[i]))
+    cur=scenarios[-1]
+    last=d.iloc[-1]
+    prev=d.iloc[-2]
+    direction="bullish" if cur=="2U" else ("bearish" if cur=="2D" else "neutral")
+    pattern=""
+    if len(scenarios)>=3:
+        a,b,c=scenarios[-3:]
+        if a in ("2U","2D") and b=="1" and c in ("2U","2D"):
+            pattern=f"2-1-2 {'Bullish' if c=='2U' else 'Bearish'}"
+        elif a=="3" and b=="1" and c in ("2U","2D"):
+            pattern=f"3-1-2 {'Bullish' if c=='2U' else 'Bearish'}"
+        elif a=="1" and b in ("2U","2D") and c in ("2U","2D"):
+            pattern=f"1-2-2 {'Bullish' if c=='2U' else 'Bearish'}"
+        elif a in ("2U","2D") and b in ("2U","2D") and c in ("2U","2D") and b!=c:
+            pattern=f"2-2 Reversal {'Up' if c=='2U' else 'Down'}"
+    if not pattern:
+        pattern={"1":"Inside bar / compression","2U":"Directional 2 Up","2D":"Directional 2 Down","3":"Outside bar"}.get(cur,cur)
+    ftc="bullish" if float(last["Close"])>float(last["Open"]) else ("bearish" if float(last["Close"])<float(last["Open"]) else "neutral")
+    return {
+        "timeframe":label,
+        "scenario":cur,
+        "pattern":pattern,
+        "direction":direction,
+        "ftc":ftc,
+        "open":round(float(last["Open"]),4),
+        "close":round(float(last["Close"]),4),
+        "up_trigger":round(float(last["High"]),4),
+        "down_trigger":round(float(last["Low"]),4),
+        "active_trigger":round(float(prev["High"] if cur=="2U" else prev["Low"] if cur=="2D" else last["High"]),4),
+    }
+
+
+def _four_hour_from_hourly(hourly):
+    if hourly is None or hourly.empty:return pd.DataFrame()
+    d=hourly.copy()
+    idx=pd.DatetimeIndex(d.index)
+    if idx.tz is not None:
+        try: idx=idx.tz_convert("America/New_York")
+        except Exception: idx=idx.tz_convert(None)
+    d.index=idx
+    # Keep regular-session bars and aggregate every four sequential hourly bars per session.
+    try:d=d.between_time("09:30","16:00")
+    except Exception:pass
+    chunks=[]
+    for _,g in d.groupby(pd.Index(d.index.date)):
+        g=g.sort_index().copy()
+        if g.empty:continue
+        g["_bucket"]=np.arange(len(g))//4
+        agg=g.groupby("_bucket").agg(Open=("Open","first"),High=("High","max"),Low=("Low","min"),Close=("Close","last"),Volume=("Volume","sum"))
+        # give each synthetic candle the timestamp of the final constituent bar
+        times=[g[g["_bucket"]==b].index[-1] for b in agg.index]
+        agg.index=pd.DatetimeIndex(times)
+        chunks.append(agg)
+    return pd.concat(chunks).sort_index() if chunks else pd.DataFrame()
+
+
+@app.get("/api/strat/<ticker>")
+def api_strat(ticker):
+    ticker=ticker.upper().strip()
+    try:
+        intraday=yf.download(ticker,period="60d",interval="60m",auto_adjust=True,progress=False,threads=False,prepost=False,timeout=20)
+        daily=yf.download(ticker,period="2y",interval="1d",auto_adjust=True,progress=False,threads=False,timeout=20)
+        for name,df in (("intraday",intraday),("daily",daily)):
+            if df is not None and len(df) and isinstance(df.columns,pd.MultiIndex):
+                df.columns=[c[0] for c in df.columns]
+        if intraday is None:intraday=pd.DataFrame()
+        if daily is None:daily=pd.DataFrame()
+        if len(intraday):intraday=intraday.sort_index()
+        if len(daily):daily=daily.sort_index()
+        fourh=_four_hour_from_hourly(intraday)
+        weekly=pd.DataFrame()
+        if len(daily):
+            weekly=daily.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna(subset=["Open","High","Low","Close"])
+        frames=[
+            _strat_frame(intraday,"1H"),
+            _strat_frame(fourh,"4H"),
+            _strat_frame(daily,"1D"),
+            _strat_frame(weekly,"1W"),
+        ]
+        bulls=sum(1 for x in frames if x.get("ftc")=="bullish")
+        bears=sum(1 for x in frames if x.get("ftc")=="bearish")
+        continuity="bullish" if bulls>bears else ("bearish" if bears>bulls else "mixed")
+        return jsonify({"ok":True,"ticker":ticker,"frames":frames,"bullish_count":bulls,"bearish_count":bears,"continuity":continuity})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
@@ -2610,7 +2740,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.9</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.10</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -2664,15 +2794,21 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
     <main class="dashCol dashCenter rrgShell">
       <div class="panel">
-        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · click a ticker to focus and load holdings</div></div><div class="rrgControlStack"><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div><div class="rrgInlineFilters"><span class="tiny">QUADRANT</span><div class="filterPills" id="sectorQuadPills"><button class="filterPill active" data-q="all">All</button><button class="filterPill leading" data-q="Leading">Leading</button><button class="filterPill" data-q="Improving">Improving</button><button class="filterPill weakening" data-q="Weakening">Weakening</button><button class="filterPill lagging" data-q="Lagging">Lagging</button></div></div></div></div>
-        <canvas id="sectorChart" width="900" height="540"></canvas>
+        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · click a ticker to focus and load holdings</div></div><div class="rrgControlStack"><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div></div></div>
+        <div class="rrgFilterBar">
+          <div class="rrgSelectFilters">
+            <label><span>SECTOR / GROUP</span><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></label>
+            <label><span>UNIVERSE</span><select id="groupFilter"><option value="all">All groups</option><option value="core" selected>Core sectors</option><option value="industry">Industries / themes</option></select></label>
+            <label><span>MACRO</span><select id="macroBasketFilter"><option value="all">All</option><option value="rate">Rate sensitive</option><option value="cyclical">Cyclicals</option><option value="defensive">Defensives</option><option value="inflation">Inflation sensitive</option></select></label>
+          </div>
+          <div class="rrgInlineFilters"><span class="tiny">QUADRANT</span><div class="filterPills" id="sectorQuadPills"><button class="filterPill active" data-q="all">All</button><button class="filterPill leading" data-q="Leading">Leading</button><button class="filterPill" data-q="Improving">Improving</button><button class="filterPill weakening" data-q="Weakening">Weakening</button><button class="filterPill lagging" data-q="Lagging">Lagging</button></div></div>
+        </div>
+        <canvas id="sectorChart" width="900" height="650"></canvas>
         <div id="selectedSectorCard" class="selectedSectorCard"><div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div></div>
       </div>
     </main>
 
     <aside class="dashCol dashRight">
-      <div class="sideSection"><h3>SELECT SECTOR / GROUP</h3><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></div>
-      <div class="sideSection"><h3>GROUP UNIVERSE</h3><select id="groupFilter"><option value="all">All groups</option><option value="core" selected>Core sectors</option><option value="industry">Industries / themes</option></select><div style="height:7px"></div><h3>MACRO BASKET</h3><select id="macroBasketFilter"><option value="all">All</option><option value="rate">Rate sensitive</option><option value="cyclical">Cyclicals</option><option value="defensive">Defensives</option><option value="inflation">Inflation sensitive</option></select></div>
       <div class="sideSection sectorSummaryPanel"><div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend</span></div><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
     </aside>
   </div>
@@ -2746,20 +2882,28 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
   </div>
 
-  <div class="panel priceChartPanel priceChartPanelWide" id="previewPanel">
-    <div class="priceChartHeader">
-      <div>
-        <div class="priceChartTitle"><strong id="previewTitle">Chart Preview</strong><span id="previewLastPrice" class="priceChartLast"></span></div>
-        <div id="previewMeta" class="priceChartMeta">Daily candles · select a ticker to preview</div>
+  <div class="priceActionGrid">
+    <div class="panel priceChartPanel priceChartPanelWide" id="previewPanel">
+      <div class="priceChartHeader">
+        <div>
+          <div class="priceChartTitle"><strong id="previewTitle">Chart Preview</strong><span id="previewLastPrice" class="priceChartLast"></span></div>
+          <div id="previewMeta" class="priceChartMeta">Daily candles · select a ticker to preview</div>
+        </div>
+        <div class="priceChartControls">
+          <button id="preview1M" class="previewPeriodBtn active">1M</button>
+          <button id="preview3M" class="previewPeriodBtn">3M</button>
+          <button id="preview6M" class="previewPeriodBtn">6M</button>
+        </div>
       </div>
-      <div class="priceChartControls">
-        <button id="preview1M" class="previewPeriodBtn active">1M</button>
-        <button id="preview3M" class="previewPeriodBtn">3M</button>
-        <button id="preview6M" class="previewPeriodBtn">6M</button>
-      </div>
+      <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1080" height="620"></canvas></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny">Daily candles + volume · 1M / 3M / 6M structure view.</span></div>
     </div>
-    <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1500" height="640"></canvas></div>
-    <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny">Daily candles + volume · 1M / 3M / 6M structure view.</span></div>
+    <aside class="panel stratPanel" id="stratPanel">
+      <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
+      <div id="stratStatus" class="tiny">Select a ticker to load STRAT scenarios.</div>
+      <div id="stratFrames" class="stratFrames"></div>
+      <div class="stratFoot tiny">FTC compares each current timeframe candle with its open. Trigger levels are the current bar high/low for the next directional break.</div>
+    </aside>
   </div>
 
   <div class="panel" id="optionsPanel">
@@ -4048,6 +4192,40 @@ async function scanVisibleOptions(){
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}finally{btn.disabled=false}
 }
 
+
+let stratRequestSeq=0;
+function stratScenarioClass(frame){
+ if(frame?.direction==="bullish")return "bullish";
+ if(frame?.direction==="bearish")return "bearish";
+ return "neutral";
+}
+function renderStrat(data){
+ const box=document.getElementById("stratFrames"),status=document.getElementById("stratStatus"),cont=document.getElementById("stratContinuity");
+ if(!box||!status||!cont)return;
+ const frames=data?.frames||[];
+ cont.className=`stratContinuity ${data?.continuity||"mixed"}`;
+ cont.textContent=data?.continuity==="bullish"?`${data.bullish_count}/4 BULLISH FTC`:data?.continuity==="bearish"?`${data.bearish_count}/4 BEARISH FTC`:`${data?.bullish_count||0}↑ / ${data?.bearish_count||0}↓ MIXED`;
+ status.textContent=`${data.ticker} · multi-timeframe price-action confirmation`;
+ box.innerHTML=frames.map(f=>{
+   const cls=stratScenarioClass(f),arrow=cls==="bullish"?"↑":cls==="bearish"?"↓":"↔";
+   const up=Number(f.up_trigger),dn=Number(f.down_trigger);
+   return `<div class="stratFrame"><div class="stratFrameTop"><span class="stratTf">${f.timeframe}</span><span class="stratScenario ${cls}">${f.scenario||"—"} ${arrow}</span></div><div class="stratPattern">${f.pattern||"—"}</div><div class="stratTrigger"><div class="up">UP TRIGGER<b>${Number.isFinite(up)?`$${up.toFixed(2)}`:"—"}</b></div><div class="down">DOWN TRIGGER<b>${Number.isFinite(dn)?`$${dn.toFixed(2)}`:"—"}</b></div></div><div class="stratFTC">FTC: ${(f.ftc||"neutral").toUpperCase()}</div></div>`;
+ }).join("");
+}
+async function loadStrat(ticker){
+ const seq=++stratRequestSeq,status=document.getElementById("stratStatus"),box=document.getElementById("stratFrames"),cont=document.getElementById("stratContinuity");
+ if(!ticker)return;
+ if(status)status.textContent=`Loading ${ticker} STRAT…`;
+ if(box)box.innerHTML="";
+ if(cont){cont.className="stratContinuity";cont.textContent="…";}
+ try{
+   const r=await fetch(`/api/strat/${encodeURIComponent(ticker)}`),j=await r.json();
+   if(seq!==stratRequestSeq)return;
+   if(!r.ok||!j.ok)throw Error(j.error||"STRAT load failed");
+   renderStrat(j);
+ }catch(e){if(status)status.innerHTML=`<span class="error">STRAT unavailable: ${e.message}</span>`;}
+}
+
 function drawPricePreview(payload){
  const c=document.getElementById("pricePreviewChart"),ctx=c?.getContext("2d");
  if(!c||!ctx)return;
@@ -4077,6 +4255,7 @@ function drawPricePreview(payload){
 async function loadChartPreview(ticker,period=previewPeriod){
  if(!ticker)return;
  previewTicker=ticker;previewPeriod=period;
+ loadStrat(ticker);
  const seq=++previewRequestSeq,st=document.getElementById("previewStatus"),title=document.getElementById("previewTitle");
  if(title)title.textContent=`${ticker} · Chart Preview`;
  if(st)st.textContent=`Loading ${period.toUpperCase()}…`;
