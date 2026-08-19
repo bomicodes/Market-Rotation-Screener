@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "21.3"
+APP_VERSION = "21.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1818,6 +1818,17 @@ button {
 .metricCard{background:#101820;border:1px solid #26313b;border-radius:10px;padding:10px}
 .metricCard .big{font-size:18px;font-weight:800;margin-top:3px}
 .metricCard.good .big{color:#34d399}.metricCard.warn .big{color:#f59e0b}.metricCard.bad .big{color:#f87171}
+.positioningGrid.gammaSummary{grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px}
+.metricCard.callWall{border-color:#166534;background:linear-gradient(180deg,rgba(34,197,94,.08),#101820)}
+.metricCard.callWall .big{color:#4ade80}
+.metricCard.flipCard{border-color:#6d28d9;background:linear-gradient(180deg,rgba(139,92,246,.08),#101820)}
+.metricCard.flipCard .big{color:#a78bfa}
+.metricCard.putWall{border-color:#9a3412;background:linear-gradient(180deg,rgba(249,115,22,.08),#101820)}
+.metricCard.putWall .big{color:#fb923c}
+.metricCard.spotCard{border-color:#334155;background:linear-gradient(180deg,rgba(148,163,184,.06),#101820)}
+.gammaHeaderMeta{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:8px 0 4px;color:var(--muted);font-size:11px}
+.gammaHeaderMeta .callSide{color:#86efac;font-weight:800}.gammaHeaderMeta .putSide{color:#fca5a5;font-weight:800}
+@media(max-width:780px){.positioningGrid.gammaSummary{grid-template-columns:repeat(2,minmax(130px,1fr))}}
 .flowSplit{height:9px;border-radius:8px;overflow:hidden;background:#24303b;display:flex;margin-top:6px}.flowSplit span:first-child{background:#34d399}.flowSplit span:last-child{background:#f87171}
 .flowTable{margin-top:8px}.flowDisclosure{margin-top:8px;padding:8px;border-left:3px solid #f59e0b;background:#111820}
 </style>
@@ -2537,11 +2548,12 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 
     <div id="positioningSection" style="display:none;margin-top:10px">
       <div class="row"><strong>Dealer Positioning · modeled</strong><span class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</span></div>
-      <div id="positioningSummary" class="positioningGrid"></div>
+      <div id="positioningSummary" class="positioningGrid gammaSummary"></div>
       <div id="positioningLevels" class="tiny"></div>
-      <div class="row" style="margin-top:10px"><strong>Gamma Landscape</strong><span class="note">Modeled call/put GEX by strike around spot. Click a strike to inspect it.</span></div>
+      <div class="row" style="margin-top:12px"><strong>Gamma Landscape</strong><span class="note">Our modeled GEX/OI positioning map — not FlowMS live dealer inventory. Click a strike to inspect it.</span></div>
+      <div class="gammaHeaderMeta"><span class="callSide">← CALL SIDE</span><span>strike centered</span><span class="putSide">PUT SIDE →</span></div>
       <canvas id="gammaLandscape" width="1200" height="430"></canvas>
-      <div class="gammaLegend"><span><b>Green</b> call GEX</span><span><b>Red</b> put GEX</span><span><b>White</b> spot</span><span><b>Blue</b> call wall</span><span><b>Orange</b> put wall</span><span><b>Purple</b> modeled flip</span></div>
+      <div class="gammaLegend"><span><b>Green</b> call GEX</span><span><b>Red</b> put GEX</span><span><b>White</b> spot</span><span><b>Green rail</b> call wall</span><span><b>Orange rail</b> put wall</span><span><b>Purple</b> modeled flip</span></div>
       <div id="gammaLevelDetail" class="gammaLevelDetail tiny">Click a strike bar for details.</div>
     </div>
     <div id="flowSection" style="display:none;margin-top:12px">
@@ -3494,8 +3506,11 @@ function drawGammaLandscape(p,spot){
  ctx.globalAlpha=1;ctx.textAlign="left";ctx.fillStyle="#86efac";ctx.font="bold 11px sans-serif";ctx.fillText("CALL GEX",plotL,14);ctx.textAlign="right";ctx.fillStyle="#fca5a5";ctx.fillText("PUT GEX",plotR,14);
  const minS=rows[0].strike,maxS=rows[rows.length-1].strike;
  const yForStrike=v=>pad.t+(Number(v)-minS)/(Math.max(.0001,maxS-minS))*(H-pad.t-pad.b);
- function rail(v,color,label,dash=[]){if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 11px sans-serif";ctx.textAlign="right";ctx.fillText(`${label} $${Number(v).toFixed(2)}`,plotR-4,y-8);ctx.restore()}
- rail(spot,"#f8fafc","SPOT",[]);rail(p.call_wall,"#60a5fa","CALL WALL",[5,4]);rail(p.put_wall,"#f59e0b","PUT WALL",[5,4]);rail(p.modeled_flip,"#a78bfa","FLIP",[3,5]);
+ function rail(v,color,label,dash=[],side="right"){if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=color;ctx.font="bold 11px sans-serif";ctx.textAlign=side==="left"?"left":"right";const tx=side==="left"?plotL+4:plotR-4;ctx.fillText(`${label} $${Number(v).toFixed(2)}`,tx,y-8);ctx.restore()}
+ rail(spot,"#f8fafc","SPOT",[],"right");
+ rail(p.call_wall,"#22c55e","CALL WALL",[5,4],"left");
+ rail(p.put_wall,"#f59e0b","PUT WALL",[5,4],"right");
+ rail(p.modeled_flip,"#a78bfa","FLIP",[3,5],"left");
 }
 function inspectGammaLandscape(evt){
  const c=document.getElementById("gammaLandscape"),d=document.getElementById("gammaLevelDetail");if(!c||!d)return;const rect=c.getBoundingClientRect(),sx=c.width/rect.width,sy=c.height/rect.height,x=(evt.clientX-rect.left)*sx,y=(evt.clientY-rect.top)*sy;const h=gammaLandscapeHitboxes.find(b=>x>=b.x&&x<=b.x+b.w&&y>=b.y&&y<=b.y+b.h);if(!h)return;const r=h.row;d.innerHTML=`<b>$${fmt(r.strike,2)} strike</b> · Call GEX ${moneyShort(r.call_gex)} · Put GEX ${moneyShort(r.put_gex)} · Net ${r.net_gex>=0?"+":""}${moneyShort(r.net_gex)} · Call OI ${(r.call_oi||0).toLocaleString()} · Put OI ${(r.put_oi||0).toLocaleString()}`;
@@ -3504,10 +3519,10 @@ function renderPositioning(p,spot){
  const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary"),lev=document.getElementById("positioningLevels");
  if(!sec||!sum)return;if(!p||!p.available){sec.style.display="none";return}sec.style.display="block";
  const regimeCls=String(p.gamma_regime||"").startsWith("Positive")?"good":"warn";
- sum.innerHTML=`<div class="metricCard ${regimeCls}"><div class="tiny">GAMMA REGIME</div><div class="big">${p.gamma_regime||"—"}</div><div class="tiny">Net ${moneyShort(p.net_gex)}</div></div>
- <div class="metricCard"><div class="tiny">CALL WALL</div><div class="big">$${fmt(p.call_wall,2)}</div><div class="tiny">${spot?fmt((p.call_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
- <div class="metricCard"><div class="tiny">PUT WALL</div><div class="big">$${fmt(p.put_wall,2)}</div><div class="tiny">${spot?fmt((p.put_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
- <div class="metricCard warn"><div class="tiny">MODELED FLIP*</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">approximation</div></div>`;
+ sum.innerHTML=`<div class="metricCard callWall"><div class="tiny">CALL WALL · UPSIDE CEILING</div><div class="big">${p.call_wall==null?"—":"$"+fmt(p.call_wall,2)}</div><div class="tiny">${spot&&p.call_wall!=null?fmt((p.call_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
+ <div class="metricCard flipCard"><div class="tiny">MODELED GAMMA FLIP*</div><div class="big">${p.modeled_flip==null?"—":"$"+fmt(p.modeled_flip,2)}</div><div class="tiny">regime transition estimate</div></div>
+ <div class="metricCard putWall"><div class="tiny">PUT WALL · DOWNSIDE FLOOR</div><div class="big">${p.put_wall==null?"—":"$"+fmt(p.put_wall,2)}</div><div class="tiny">${spot&&p.put_wall!=null?fmt((p.put_wall/spot-1)*100,1)+"% vs spot":""}</div></div>
+ <div class="metricCard spotCard ${regimeCls}"><div class="tiny">SPOT / GAMMA REGIME</div><div class="big">${spot==null?"—":"$"+fmt(spot,2)}</div><div class="tiny">${p.gamma_regime||"—"} · Net ${moneyShort(p.net_gex)}</div></div>`;
  if(lev){const top=(p.levels||[]).slice(0,6).map(x=>`$${fmt(x.strike,0)} ${x.net_gex>=0?"+":""}${moneyShort(x.net_gex)}`).join(" · ");lev.innerHTML=`Largest modeled strike exposures: ${top||"—"}<br><span class="note">* ${p.warning||""}</span>`}
  drawGammaLandscape(p,spot);
 }
@@ -3627,8 +3642,8 @@ function drawPricePreview(payload){
  const priceBottom=H-pad.b-volH-8;
  const X=i=>pad.l+(i+.5)*(W-pad.l-pad.r)/rows.length;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
- ctx.strokeStyle="#27303a";ctx.lineWidth=1;
- for(let k=0;k<4;k++){let y=pad.t+k*(priceBottom-pad.t)/3;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke()}
+ ctx.strokeStyle="#27303a";ctx.lineWidth=1;ctx.font="10px sans-serif";
+ for(let k=0;k<4;k++){let y=pad.t+k*(priceBottom-pad.t)/3;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();const level=hi-k*(hi-lo)/3;ctx.fillStyle="#64748b";ctx.textAlign="right";ctx.fillText(`$${level.toFixed(2)}`,W-pad.r-3,y-4);ctx.textAlign="left";}
  const maxVol=Math.max(1,...rows.map(x=>x.volume||0));
  const bw=Math.max(3,Math.min(18,(W-pad.l-pad.r)/rows.length*.55));
  rows.forEach((r,i)=>{
@@ -3641,14 +3656,12 @@ function drawPricePreview(payload){
    ctx.globalAlpha=.35;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);
  });
  ctx.globalAlpha=1;
- // Current/last price line + right-edge label makes support/resistance context easier to read.
+ // Keep candles unobstructed: show only a compact current-price badge at the right edge.
  const last=rows[rows.length-1],lastPx=Number(last.close);
  if(Number.isFinite(lastPx)){
-   const py=Y(lastPx);ctx.save();ctx.setLineDash([6,5]);ctx.strokeStyle="#e5e7eb";ctx.lineWidth=1.25;ctx.beginPath();ctx.moveTo(pad.l,py);ctx.lineTo(W-pad.r,py);ctx.stroke();ctx.setLineDash([]);
-   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12;ctx.fillStyle="#e5e7eb";ctx.fillRect(W-pad.r-tw,py-10,tw,20);ctx.fillStyle="#111827";ctx.font="bold 11px sans-serif";ctx.textAlign="center";ctx.fillText(label,W-pad.r-tw/2,py+4);ctx.textAlign="left";ctx.restore();
+   const py=Y(lastPx);ctx.save();ctx.font="bold 10px sans-serif";const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+10;const bx=W-pad.r-tw,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));ctx.fillStyle="#e5e7eb";ctx.fillRect(bx,by,tw,18);ctx.fillStyle="#111827";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.textAlign="left";ctx.restore();
  }
  ctx.fillStyle="#94a3b8";ctx.font="10px sans-serif";
- ctx.fillText(`$${hi.toFixed(2)}`,4,pad.t+4);ctx.fillText(`$${lo.toFixed(2)}`,4,priceBottom);
  const first=rows[0],chg=(last.close/first.close-1)*100;
  ctx.font="bold 12px sans-serif";ctx.fillStyle=chg>=0?"#86efac":"#fca5a5";
  ctx.fillText(`${last.close.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-18);
