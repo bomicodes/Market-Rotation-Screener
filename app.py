@@ -1836,6 +1836,16 @@ button {
 @media(max-width:780px){.positioningGrid.gammaSummary{grid-template-columns:repeat(2,minmax(130px,1fr))}}
 .flowSplit{height:9px;border-radius:8px;overflow:hidden;background:#24303b;display:flex;margin-top:6px}.flowSplit span:first-child{background:#34d399}.flowSplit span:last-child{background:#f87171}
 .flowTable{margin-top:8px}.flowDisclosure{margin-top:8px;padding:8px;border-left:3px solid #f59e0b;background:#111820}
+
+/* v22.4 cleanup + chart/GEX routing */
+.priceChartPanelWide{margin-top:14px;padding:16px;background:radial-gradient(circle at 70% -30%,rgba(37,131,255,.08),transparent 36%),linear-gradient(180deg,#0a141d,#071018)}
+.priceChartPanelWide .priceChartCanvasWrap{border-color:#294159;box-shadow:inset 0 1px rgba(255,255,255,.02),0 12px 30px rgba(0,0,0,.16)}
+#pricePreviewChart{display:block;width:100%;height:560px;background:#071018}
+.priceChartPanelWide .priceChartTitle strong{font-size:18px;letter-spacing:.1px}.priceChartPanelWide .priceChartLast{font-size:16px;font-weight:800}.priceChartPanelWide .priceChartMeta{margin-top:4px}
+.compactRefresh .quickBtn{margin-top:9px;width:100%;background:#0b1720;border-color:#294057}
+.gexPageShell{margin-bottom:14px;background:linear-gradient(180deg,#0c1720,#081018);border-color:#22394e}.gexPageHeader{display:flex;align-items:center;justify-content:space-between;gap:16px}.gexTickerControls{display:flex;gap:8px;align-items:center}.gexTickerControls input{width:190px}.gexPageHint{margin-top:12px;padding:14px;border:1px dashed #2a4258;border-radius:10px;color:#8fa0b3;background:#081119}.gexPageShell+.gexDashboard{margin-top:0!important}
+@media(max-width:760px){#pricePreviewChart{height:360px}.gexPageHeader{align-items:flex-start;flex-direction:column}.gexTickerControls{width:100%}.gexTickerControls input{flex:1;width:auto}}
+
 </style>
 </head>
 <body>
@@ -2501,13 +2511,13 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="tab active" data-view="rotation"><span class="navIcon">▦</span><span>Dashboard</span></button>
     <button class="navJump" id="navRrgLive"><span class="navIcon">◉</span><span>RRG Live</span></button>
     <button class="tab" data-view="history"><span class="navIcon">⌁</span><span>RRG Historical</span></button>
-    <button class="navJump" id="navGex"><span class="navIcon">⌗</span><span>GEX Landscape</span></button>
+    <button class="tab" data-view="gexpage" id="navGex"><span class="navIcon">⌗</span><span>GEX Landscape</span></button>
     <button class="tab" data-view="earnings"><span class="navIcon">◫</span><span>Earnings Movers</span></button>
     <button class="navJump" id="navOptions"><span class="navIcon">▤</span><span>Options Scanner</span></button>
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><span class="versionPill">v22.2</span></div>
+  <div class="headerMeta"><span class="versionPill">v22.4</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -2527,6 +2537,17 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <div class="row"><strong id="stockHeatTitle">Stock Map</strong><span class="note">Stock score uses rotation + your existing options quality signal. Flow/GEX appear on a tile after that ticker is selected and loaded.</span></div>
     <div id="stockHeatGrid" class="heatGrid"></div>
   </div>
+</div>
+
+<div id="gexpage" class="view">
+  <div class="panel gexPageShell">
+    <div class="gexPageHeader">
+      <div><div class="dashTitle" style="font-size:18px">GEX LANDSCAPE</div><div class="note">Modeled gamma / open-interest positioning for the selected ticker.</div></div>
+      <div class="gexTickerControls"><input id="gexTickerInput" type="search" placeholder="Ticker, e.g. NFLX" autocomplete="off"><button id="gexTickerLoad" class="primary">Load GEX</button></div>
+    </div>
+    <div id="gexPageHint" class="gexPageHint">Select a stock anywhere in the screener or enter a ticker above. The latest loaded ticker carries into this page automatically.</div>
+  </div>
+  <div id="gexPageHost"></div>
 </div>
 
 <div id="rotation" class="view active">
@@ -2563,10 +2584,8 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <aside class="dashCol dashRight">
       <div class="sideSection"><h3>SELECT SECTOR / GROUP</h3><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></div>
       <div class="sideSection"><h3>GROUP UNIVERSE</h3><select id="groupFilter"><option value="all">All groups</option><option value="core" selected>Core sectors</option><option value="industry">Industries / themes</option></select><div style="height:7px"></div><h3>MACRO BASKET</h3><select id="macroBasketFilter"><option value="all">All</option><option value="rate">Rate sensitive</option><option value="cyclical">Cyclicals</option><option value="defensive">Defensives</option><option value="inflation">Inflation sensitive</option></select></div>
-      <div class="sideSection"><h3>RRG VIEW</h3><div class="sideSeg"><button id="sideFastBtn" class="active">FAST ROTATION</button><button id="sideTrendBtn">TREND</button></div></div>
       <div class="sideSection"><h3>QUADRANT FILTER</h3><div class="filterPills" id="sectorQuadPills"><button class="filterPill active" data-q="all">All</button><button class="filterPill leading" data-q="Leading">Leading</button><button class="filterPill" data-q="Improving">Improving</button><button class="filterPill weakening" data-q="Weakening">Weakening</button><button class="filterPill lagging" data-q="Lagging">Lagging</button></div></div>
-      <div class="sideSection"><h3>QUICK ACTIONS</h3><button class="quickBtn" id="dashRefreshMarket">↻ Refresh market</button><button class="quickBtn" id="dashHistorical">◉ Historical RRG</button><button class="quickBtn" id="dashEarnings">◫ Earnings Movers</button><button class="quickBtn" id="dashHeatMap">▦ Full Heat Map</button></div>
-      <div class="sideSection"><h3>DATA STATUS</h3><div id="mstatus" class="note">Not loaded</div><button id="auditHoldings" class="quickBtn">Audit holdings sources</button><div id="auditPanel" class="note" style="display:none;margin-top:8px"></div></div>
+      <div class="sideSection compactRefresh"><h3>MARKET DATA</h3><div id="mstatus" class="note">Not loaded</div><button class="quickBtn" id="dashRefreshMarket">↻ Refresh market</button></div>
     </aside>
   </div>
   <div class="legacyMarketBlock"><button class="primary" id="refreshMarket">Refresh market</button><div id="internals" class="cards"></div></div>
@@ -2639,27 +2658,20 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
   </div>
 
-  <div class="grid2">
-    <div class="panel">
-      <div class="row"><strong>Internal Rotation</strong><span class="note">Breadth inside the currently selected sector / industry / theme.</span></div>
-      <div id="internalRotationCards" class="cards"></div>
-      <div id="internalRotationNote" class="note"></div>
-    </div>
-    <div class="panel priceChartPanel" id="previewPanel">
-      <div class="priceChartHeader">
-        <div>
-          <div class="priceChartTitle"><strong id="previewTitle">Chart Preview</strong><span id="previewLastPrice" class="priceChartLast"></span></div>
-          <div id="previewMeta" class="priceChartMeta">Daily candles · select a ticker to preview</div>
-        </div>
-        <div class="priceChartControls">
-          <button id="preview1M" class="previewPeriodBtn active">1M</button>
-          <button id="preview3M" class="previewPeriodBtn">3M</button>
-          <button id="preview6M" class="previewPeriodBtn">6M</button>
-        </div>
+  <div class="panel priceChartPanel priceChartPanelWide" id="previewPanel">
+    <div class="priceChartHeader">
+      <div>
+        <div class="priceChartTitle"><strong id="previewTitle">Chart Preview</strong><span id="previewLastPrice" class="priceChartLast"></span></div>
+        <div id="previewMeta" class="priceChartMeta">Daily candles · select a ticker to preview</div>
       </div>
-      <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1100" height="520"></canvas></div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny">Daily price + volume · quick structure confirmation.</span></div>
+      <div class="priceChartControls">
+        <button id="preview1M" class="previewPeriodBtn active">1M</button>
+        <button id="preview3M" class="previewPeriodBtn">3M</button>
+        <button id="preview6M" class="previewPeriodBtn">6M</button>
+      </div>
     </div>
+    <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1500" height="640"></canvas></div>
+    <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny">Daily candles + volume · 1M / 3M / 6M structure view.</span></div>
   </div>
 
   <div class="panel" id="optionsPanel">
@@ -3010,8 +3022,8 @@ function updateSelectedSectorCard(ticker){
 }
 function setSectorRRGMode(mode){
  sectorRRGMode=mode==="trend"?"trend":"fast";
- ["rrgFastBtn","sideFastBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="fast"));
- ["rrgTrendBtn","sideTrendBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="trend"));
+ ["rrgFastBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="fast"));
+ ["rrgTrendBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="trend"));
  const ttl=document.getElementById("dashboardRRGTitle");if(ttl)ttl.textContent=sectorRRGMode==="fast"?"RRG LIVE · FAST ROTATION (10/5)":"RRG LIVE · TREND (25/12)";
  renderGroups();
 }
@@ -4333,13 +4345,38 @@ document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
 document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
 document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
 document.getElementById("gammaLandscape")?.addEventListener("click",inspectGammaLandscape);
+document.getElementById("gexTickerLoad")?.addEventListener("click",loadGexPageTicker);
+document.getElementById("gexTickerInput")?.addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();loadGexPageTicker();}});
+
+
+let gexHomeParent=null,gexHomeNext=null;
+function restoreGexSection(){
+  const sec=document.getElementById("positioningSection");
+  if(!sec||!gexHomeParent||sec.parentElement===gexHomeParent)return;
+  if(gexHomeNext&&gexHomeNext.parentNode===gexHomeParent)gexHomeParent.insertBefore(sec,gexHomeNext);else gexHomeParent.appendChild(sec);
+}
+function mountGexPage(){
+  const sec=document.getElementById("positioningSection"),host=document.getElementById("gexPageHost"),hint=document.getElementById("gexPageHint"),inp=document.getElementById("gexTickerInput");
+  if(!sec||!host)return;
+  if(!gexHomeParent){gexHomeParent=sec.parentElement;gexHomeNext=sec.nextSibling;}
+  host.appendChild(sec);
+  if(activeOptionsData?.ticker){sec.style.display="block";if(inp)inp.value=activeOptionsData.ticker;if(hint)hint.style.display="none";}else{sec.style.display="none";if(hint)hint.style.display="block";}
+}
+async function loadGexPageTicker(){
+  const inp=document.getElementById("gexTickerInput"),t=(inp?.value||"").trim().toUpperCase(),hint=document.getElementById("gexPageHint");
+  if(!t){if(hint){hint.style.display="block";hint.textContent="Enter a ticker to load its modeled GEX landscape.";}return;}
+  if(hint){hint.style.display="block";hint.textContent=`Loading ${t} GEX landscape…`;}
+  await loadChartPreview(t,previewPeriod||"1m");
+  await loadOptionsTicker(t,{scroll:false});
+  mountGexPage();
+  if(hint)hint.style.display="none";
+}
 
 function jumpToRotationTarget(id){
   activateViewById("rotation");
   setTimeout(()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"}),70);
 }
 document.getElementById("navRrgLive")?.addEventListener("click",()=>jumpToRotationTarget("sectorChart"));
-document.getElementById("navGex")?.addEventListener("click",()=>jumpToRotationTarget("positioningSection"));
 document.getElementById("navOptions")?.addEventListener("click",()=>jumpToRotationTarget("optionsPanel"));
 document.getElementById("navWatch")?.addEventListener("click",()=>jumpToRotationTarget("watchlistPanel"));
 
@@ -4349,10 +4386,11 @@ document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
  b.classList.add("active");
  const target=document.getElementById(b.dataset.view);if(target)target.classList.add("active");
  if(b.dataset.view==="heatmap")renderHeatMap();
+ if(b.dataset.view==="gexpage")mountGexPage(); else restoreGexSection();
 }));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("macroBasketFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
  if(e.target.value)selectSector(e.target.value,{source:"dropdown"});
-});document.getElementById("auditHoldings").addEventListener("click",auditHoldings);document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
+});document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
 document.getElementById("preview3M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"3m")});
 document.getElementById("preview6M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"6m")});
 document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
@@ -4373,18 +4411,13 @@ document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
  saveLiveWatchlist();
 });document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);document.getElementById("rrgFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
 document.getElementById("rrgTrendBtn")?.addEventListener("click",()=>setSectorRRGMode("trend"));
-document.getElementById("sideFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
-document.getElementById("sideTrendBtn")?.addEventListener("click",()=>setSectorRRGMode("trend"));
 document.getElementById("dashboardSectorSelect")?.addEventListener("change",async e=>{if(e.target.value){toggleRRGFocus("sectorChart",e.target.value);await selectSector(e.target.value,{source:"dashboard"})}});
 document.querySelectorAll("#sectorQuadPills .filterPill").forEach(btn=>btn.addEventListener("click",()=>{sectorQuadrantFilter=btn.dataset.q||"all";document.querySelectorAll("#sectorQuadPills .filterPill").forEach(x=>x.classList.toggle("active",x===btn));renderGroups();}));
 document.getElementById("dashHeatComposite")?.addEventListener("click",()=>{dashboardHeatMode="composite";document.getElementById("dashHeatComposite")?.classList.add("active");document.getElementById("dashHeatFast")?.classList.remove("active");document.getElementById("dashHeatTrend")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashHeatFast")?.addEventListener("click",()=>{dashboardHeatMode="fast";document.getElementById("dashHeatFast")?.classList.add("active");document.getElementById("dashHeatComposite")?.classList.remove("active");document.getElementById("dashHeatTrend")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashHeatTrend")?.addEventListener("click",()=>{dashboardHeatMode="trend";document.getElementById("dashHeatTrend")?.classList.add("active");document.getElementById("dashHeatFast")?.classList.remove("active");document.getElementById("dashHeatComposite")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashRefreshMarket")?.addEventListener("click",()=>loadMarket(true));
-function activateViewById(id){document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view===id));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id===id));if(id==="heatmap")renderHeatMap();}
-document.getElementById("dashHistorical")?.addEventListener("click",()=>activateViewById("history"));
-document.getElementById("dashEarnings")?.addEventListener("click",()=>activateViewById("earnings"));
-document.getElementById("dashHeatMap")?.addEventListener("click",()=>activateViewById("heatmap"));
+function activateViewById(id){document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view===id));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id===id));if(id==="heatmap")renderHeatMap();if(id==="gexpage")mountGexPage();else restoreGexSection();}
 loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
 </script>
 """
