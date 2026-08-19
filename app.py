@@ -1848,6 +1848,14 @@ button {
 
 
 /* v22.5 layout cleanup */
+/* v22.7 candlestick proportion fix */
+.rrgShell{min-width:0}
+/* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
+#sectorChart{height:500px}
+/* Preserve the candlestick canvas' native 1500:640 proportions so text/candles never stretch. */
+.priceChartPanelWide .priceChartCanvasWrap{width:100%;max-width:1320px;margin:0 auto}
+#pricePreviewChart{width:100%!important;height:auto!important;aspect-ratio:75/32;display:block;background:#071018}
+@media(max-width:760px){#pricePreviewChart{height:auto!important;aspect-ratio:75/32}.priceChartPanelWide .priceChartCanvasWrap{max-width:100%}}
 .headerMeta{display:flex;align-items:center;gap:8px}.headerRefresh{padding:6px 10px;border-radius:8px;border:1px solid #234058;background:#0b1721;color:#cfe7ff;font-weight:700;font-size:10px}.headerRefresh:hover{border-color:#3b82f6;color:#fff}
 .rrgControlStack{display:flex;flex-direction:column;align-items:flex-end;gap:7px}.rrgInlineFilters{display:flex;align-items:center;gap:7px}.rrgInlineFilters .filterPills{justify-content:flex-end}.rrgInlineFilters .filterPill{padding:4px 7px;font-size:8px}
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
@@ -2516,7 +2524,6 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
   <div class="brand"><div class="brandMark">↗</div><div class="brandText"><b>MARKET ROTATION SCREENER</b><span>ROTATION · POSITIONING · OPTIONS</span></div></div>
   <nav class="tabs appNav">
     <button class="tab active" data-view="rotation"><span class="navIcon">▦</span><span>Dashboard</span></button>
-    <button class="navJump" id="navRrgLive"><span class="navIcon">◉</span><span>RRG Live</span></button>
     <button class="tab" data-view="history"><span class="navIcon">⌁</span><span>RRG Historical</span></button>
     <button class="tab" data-view="gexpage" id="navGex"><span class="navIcon">⌗</span><span>GEX Landscape</span></button>
     <button class="tab" data-view="earnings"><span class="navIcon">◫</span><span>Earnings Movers</span></button>
@@ -2524,7 +2531,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.5</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.7</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3362,7 +3369,7 @@ function populateDashboardSectorSelect(){const sel=document.getElementById("dash
 async function loadMarket(force=false){
  const st=document.getElementById("mstatus");
  if(!force&&clientCache.market){applyMarketPayload(clientCache.market,true);return}
- st.textContent="Updating…";
+ if(st)st.textContent="Updating…";
  try{
    const r=await fetch("/api/market"+(force?"?refresh=1":""));
    const j=await r.json();
@@ -3370,7 +3377,7 @@ async function loadMarket(force=false){
    clientCache.market=j;
    applyMarketPayload(j,false);
  }catch(e){
-   st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`;
+   if(st)st.innerHTML=`<span class="error">Refresh failed: ${e.message}. Existing results were kept; wait a minute and retry.</span>`;
  }
 }
 
@@ -4379,7 +4386,6 @@ function jumpToRotationTarget(id){
   activateViewById("rotation");
   setTimeout(()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"}),70);
 }
-document.getElementById("navRrgLive")?.addEventListener("click",()=>jumpToRotationTarget("sectorChart"));
 document.getElementById("navOptions")?.addEventListener("click",()=>jumpToRotationTarget("optionsPanel"));
 document.getElementById("navWatch")?.addEventListener("click",()=>jumpToRotationTarget("watchlistPanel"));
 

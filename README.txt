@@ -1,3 +1,9 @@
+v22.7 — Candlestick proportion fix
+- Corrected the v22.6 misunderstanding: the RRG sizing change has been removed/restored.
+- The candlestick preview now preserves its native 1500×640 aspect ratio so candles, labels, and price numbers do not look stretched.
+- The chart remains responsive, centered, and capped to a comfortable desktop width.
+- Dashboard refresh hotfix and all v22.6 functionality are preserved.
+
 Market Rotation Screener v22.0 — Dashboard UI redesign
 
 NEW IN v22.0
