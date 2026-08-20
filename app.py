@@ -3009,7 +3009,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.18 candlestick proportion fix */
+/* v22.19 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3022,7 +3022,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.18 layout + STRAT confluence */
+/* v22.19 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3045,7 +3045,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.18 sector-summary containment */
+/* v22.19 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3068,7 +3068,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.18 session volume profile */
+/* v22.19 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3084,7 +3084,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.18</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.19</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3267,7 +3267,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         <div><span>PROFILE VOLUME</span><strong id="statSessionVol">—</strong><small>RTH source volume</small></div>
         <div><span>AVG VOLUME (20)</span><strong id="statAvgVol">—</strong><small id="statVsAvgVol">—</small></div>
       </div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile Auto · intraday=current session · daily=prior session · weekly=prior week.</span></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile Auto · profile pane uses an expanded price scale for readability; VAH/POC/VAL rails on candles remain true-price aligned.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
@@ -4633,103 +4633,170 @@ function drawPricePreview(payload){
  const rows=payload?.bars||[],W=c.width,H=c.height;
  ctx.clearRect(0,0,W,H);
  const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
- if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load daily candles",24,34);return}
- const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14;
- const highs=rows.map(x=>Number(x.high??x.close)),lows=rows.map(x=>Number(x.low??x.close));
- let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.07;hi+=range*.07;
+ if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load candles",24,34);return}
+
+ const pad={l:58,r:58,t:32,b:52},volH=86,volGap=14;
  const priceBottom=H-pad.b-volH-volGap;
+
  const profiles=payload?.volume_profiles||{};
- let vp=null,contextVp=null;
+ let vp=null;
  if(previewVPMode==="session")vp=profiles.session;
  else if(previewVPMode==="previous")vp=profiles.previous;
  else if(previewVPMode==="auto"){
-   if(previewTimeframe==="1w"){vp=profiles.previous_week;}
-   else if(previewTimeframe==="1d"){vp=profiles.previous;}
-   else {vp=profiles.session;}
+   if(previewTimeframe==="1w")vp=profiles.previous_week;
+   else if(previewTimeframe==="1d")vp=profiles.previous;
+   else vp=profiles.session;
  }
- const profileZoneW=vp?Math.round(W*.29):0;
- const candleRight=W-pad.r-profileZoneW-(vp?14:0);
- const plotW=candleRight-pad.l;
+
+ // Layout closely matches the reference: candles left, readable profile right.
+ const vpPaneW=vp?Math.round(W*.31):0;
+ const dividerX=vp?W-pad.r-vpPaneW:W-pad.r;
+ const candleRight=vp?dividerX-14:W-pad.r;
+ const plotW=Math.max(120,candleRight-pad.l);
+
+ const highs=rows.map(x=>Number(x.high??x.close)).filter(Number.isFinite);
+ const lows=rows.map(x=>Number(x.low??x.close)).filter(Number.isFinite);
+ let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);
+ lo-=range*.07;hi+=range*.07;
+
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
- ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";
- const gridCount=5;
- for(let k=0;k<gridCount;k++){const y=pad.t+k*(priceBottom-pad.t)/(gridCount-1),level=hi-k*(hi-lo)/(gridCount-1);ctx.strokeStyle="#1b2833";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.fillStyle="#758495";ctx.fillText(`$${level.toFixed(2)}`,W-pad.r+9,y+3)}
- let lastMonth="";
+
+ // Candle price grid / left price context.
+ ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";
+ ctx.textAlign="left";
+ const gridCount=6;
+ for(let k=0;k<gridCount;k++){
+   const y=pad.t+k*(priceBottom-pad.t)/(gridCount-1);
+   const level=hi-k*(hi-lo)/(gridCount-1);
+   ctx.strokeStyle="#192733";ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(candleRight,y);ctx.stroke();
+   ctx.fillStyle="#8190a1";ctx.textAlign="right";ctx.fillText(level.toFixed(2),pad.l-8,y+3);
+ }
+
+ // Time separators.
+ let lastKey="";
  rows.forEach((r,i)=>{
    const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
    if(Number.isNaN(d.getTime()))return;
    const intraday=previewTimeframe==="1h"||previewTimeframe==="4h";
    const key=intraday?`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`:`${d.getFullYear()}-${d.getMonth()}`;
-   if(key!==lastMonth){
+   if(key!==lastKey){
      if(i>1){
        const x=X(i);ctx.strokeStyle="#101c25";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();
-       ctx.fillStyle="#687789";ctx.textAlign="center";
-       ctx.fillText(intraday?d.toLocaleDateString(undefined,{month:"short",day:"numeric"}):d.toLocaleString(undefined,{month:"short"}),x,H-15);
-       ctx.textAlign="left";
+       ctx.fillStyle="#718094";ctx.textAlign="center";
+       ctx.fillText(intraday?d.toLocaleDateString(undefined,{month:"short",day:"numeric"}):d.toLocaleString(undefined,{month:"short"}),x,H-16);
      }
-     lastMonth=key;
+     lastKey=key;
    }
  });
- const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0))),bw=Math.max(3,Math.min(15,plotW/rows.length*.58));
- rows.forEach((r,i)=>{const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#16c784",bear="#ef4444";ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));ctx.fillRect(x-bw/2,top,bw,h);const vh=Number(r.volume||0)/maxVol*volH;ctx.globalAlpha=.42;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1});
- ctx.strokeStyle="#17232d";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
- // Clear, dedicated right-side volume profile panel.
+
+ // Candles + volume.
+ const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0)));
+ const bw=Math.max(2,Math.min(14,plotW/rows.length*.58));
+ rows.forEach((r,i)=>{
+   const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o;
+   const bull="#18c98b",bear="#f04b4b";
+   ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;
+   if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}
+   const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));
+   ctx.fillRect(x-bw/2,top,bw,h);
+   const vh=Number(r.volume||0)/maxVol*volH;
+   ctx.globalAlpha=.48;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1;
+ });
+ ctx.strokeStyle="#1a2935";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
+
+ // True VAH/POC/VAL rails on the candle scale.
+ if(vp){
+   function candleRail(value,color,dash=[]){
+     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
+     const y=Y(n);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.3;
+     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(candleRight,y);ctx.stroke();ctx.restore();
+   }
+   candleRail(vp.vah,"#a78bfa",[6,4]);
+   candleRail(vp.poc,"#f59e0b",[]);
+   candleRail(vp.val,"#60a5fa",[6,4]);
+ }
+
+ // Dedicated VP pane with an independent vertical scale so a narrow session
+ // range remains readable. Values are explicitly labeled; candle rails remain
+ // on the true price scale at left.
  if(vp?.bins?.length){
    const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
+   const pPrices=bins.map(b=>Number(b.price));
+   let pLo=Math.min(...pPrices),pHi=Math.max(...pPrices),pRange=Math.max(.01,pHi-pLo);
+   pLo-=pRange*.10;pHi+=pRange*.10;
+   const PY=v=>pad.t+(pHi-v)/(pHi-pLo)*(priceBottom-pad.t);
    const maxPV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
-   const profileZoneW=Math.round(W*.29);
-   const xRight=W-pad.r-8,xLeft=xRight-profileZoneW;
+   const xLeft=dividerX+12,xRight=W-pad.r;
 
    ctx.save();
-   ctx.fillStyle="rgba(7,16,24,.91)";
-   ctx.fillRect(xLeft-10,pad.t,profileZoneW+18,priceBottom-pad.t);
-   ctx.strokeStyle="#2c4254";ctx.lineWidth=1;
-   ctx.beginPath();ctx.moveTo(xLeft-10,pad.t);ctx.lineTo(xLeft-10,priceBottom);ctx.stroke();
+   ctx.fillStyle="rgba(8,17,25,.93)";ctx.fillRect(dividerX,pad.t,xRight-dividerX,priceBottom-pad.t);
+   ctx.strokeStyle="#33495b";ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(dividerX,pad.t);ctx.lineTo(dividerX,priceBottom);ctx.stroke();
 
-   const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":(previewVPMode==="auto"&&previewTimeframe==="1w"?"PREV WEEK VP":previewVPMode==="auto"&&previewTimeframe==="1d"?"PREV SESSION VP":"SESSION VP");
-   ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
-   ctx.textAlign="left";ctx.fillStyle="#b4c2cf";ctx.fillText(vpTitle,xLeft,pad.t+12);
-   ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
-   ctx.fillStyle="#6e8294";ctx.fillText("Built from 1m RTH bars",xLeft,pad.t+24);
+   const vpTitle=previewVPMode==="previous"?"PREVIOUS SESSION VP":
+     (previewVPMode==="auto"&&previewTimeframe==="1w"?"PREVIOUS WEEK VP":
+      previewVPMode==="auto"&&previewTimeframe==="1d"?"PREVIOUS SESSION VP":"SESSION VP");
+   ctx.textAlign="left";ctx.fillStyle="#c3cfda";ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+   ctx.fillText(vpTitle,xLeft,pad.t+14);
+   ctx.fillStyle="#788b9c";ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
+   ctx.fillText("1m RTH profile · expanded scale",xLeft,pad.t+27);
 
-   if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
-     const yA=Y(Number(vp.vah)),yB=Y(Number(vp.val));
-     const top=Math.min(yA,yB),hh=Math.abs(yB-yA);
-     ctx.fillStyle="rgba(59,130,246,.075)";
-     ctx.fillRect(xLeft-10,top,profileZoneW+18,Math.max(1,hh));
+   // Profile price grid on its own scale.
+   for(let k=0;k<5;k++){
+     const y=pad.t+42+k*(priceBottom-pad.t-48)/4;
+     const level=pHi-k*(pHi-pLo)/4;
+     ctx.strokeStyle="rgba(43,62,78,.45)";ctx.beginPath();ctx.moveTo(xLeft,y);ctx.lineTo(xRight,y);ctx.stroke();
+     ctx.fillStyle="#718397";ctx.textAlign="right";ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
+     ctx.fillText(level.toFixed(2),xRight-2,y-3);
    }
 
+   // Value-area background.
+   if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
+     const y1=PY(Number(vp.vah)),y2=PY(Number(vp.val));
+     ctx.fillStyle="rgba(59,130,246,.09)";
+     ctx.fillRect(xLeft,Math.min(y1,y2),xRight-xLeft,Math.max(2,Math.abs(y2-y1)));
+   }
+
+   // Bars start at the divider and extend right, like the reference.
    bins.forEach(b=>{
-     const py=Y(Number(b.price));
-     if(py<pad.t||py>priceBottom)return;
-     const w=(Number(b.volume)||0)/maxPV*(profileZoneW-20);
-     const bh=Math.max(3,(priceBottom-pad.t)/Math.max(18,bins.length)*.76);
+     const py=PY(Number(b.price));
+     const w=(Number(b.volume)||0)/maxPV*(xRight-xLeft-18);
+     const bh=Math.max(4,(priceBottom-pad.t)/Math.max(18,bins.length)*.72);
      const inVA=Number(b.price)>=Number(vp.val)&&Number(b.price)<=Number(vp.vah);
-     ctx.fillStyle=inVA?"rgba(66,133,244,.60)":"rgba(70,101,136,.38)";
+     const isPoc=Math.abs(Number(b.price)-Number(vp.poc)) <= (Number(vp.bin_size)||0.01)/1.9;
+     ctx.fillStyle=isPoc?"rgba(245,158,11,.88)":inVA?"rgba(70,130,220,.66)":"rgba(59,88,126,.48)";
      ctx.fillRect(xLeft,py-bh/2,w,bh);
    });
 
-   function vpRail(value,color,label,dash=[]){
-     const n=Number(value); if(!Number.isFinite(n)||n<lo||n>hi)return;
-     const y=Y(n);
-     ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.25;
-     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
-     const txt=`${label} ${n.toFixed(2)}`;
-     ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
-     const tw=ctx.measureText(txt).width+10;
-     const by=Math.max(pad.t+2,Math.min(priceBottom-15,y-8));
-     ctx.fillStyle="rgba(8,17,25,.94)";ctx.fillRect(xRight-tw,by,tw,14);
+   function profileRail(value,color,label,dash=[]){
+     const n=Number(value);if(!Number.isFinite(n))return;
+     const y=PY(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.3;
+     ctx.beginPath();ctx.moveTo(xLeft,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
+     const txt=`${label} ${n.toFixed(2)}`;ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+     const tw=ctx.measureText(txt).width+10,by=Math.max(pad.t+34,Math.min(priceBottom-15,y-8));
+     ctx.fillStyle="rgba(7,16,24,.96)";ctx.fillRect(xRight-tw,by,tw,14);
      ctx.fillStyle=color;ctx.textAlign="right";ctx.fillText(txt,xRight-4,by+10);
    }
-   vpRail(vp.vah,"#a78bfa","VAH",[5,4]);
-   vpRail(vp.poc,"#f59e0b","POC",[]);
-   vpRail(vp.val,"#60a5fa","VAL",[5,4]);
+   profileRail(vp.vah,"#a78bfa","VAH",[5,4]);
+   profileRail(vp.poc,"#f59e0b","POC",[]);
+   profileRail(vp.val,"#60a5fa","VAL",[5,4]);
    ctx.restore();
  }
+
+ // Current price badge stays with the candle scale, not the VP scale.
  const last=rows[rows.length-1],first=rows[0],lastPx=Number(last.close),firstPx=Number(first.close),chg=(lastPx/firstPx-1)*100;
- if(Number.isFinite(lastPx)){const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12,bx=W-pad.r+4,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";ctx.lineWidth=1;ctx.beginPath();if(ctx.roundRect){ctx.roundRect(bx,by,tw,18,4)}else{ctx.rect(bx,by,tw,18)}ctx.fill();ctx.stroke();ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.restore()}
- ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-15);
+ if(Number.isFinite(lastPx)){
+   const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12;
+   const bx=Math.min(candleRight-tw-3,Math.max(pad.l+4,candleRight-tw-3)),by=Math.max(pad.t,Math.min(priceBottom-18,py-9));
+   ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";
+   if(ctx.roundRect){ctx.beginPath();ctx.roundRect(bx,by,tw,18,4);ctx.fill();ctx.stroke()}else{ctx.fillRect(bx,by,tw,18);ctx.strokeRect(bx,by,tw,18)}
+   ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.restore();
+ }
+ ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
+ ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";
+ ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-16);
 }
 
 
