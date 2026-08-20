@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "22.16"
+APP_VERSION = "22.17"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2883,7 +2883,21 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .priceChartControls .previewPeriodBtn{min-width:44px;padding:6px 10px;border-radius:7px;background:#0c151e;border-color:#2a3a4b;color:#9eacbb;font-size:10px;font-weight:800}
 .priceChartControls .previewPeriodBtn.active{background:#0f2740;border-color:#2563eb;color:#dbeafe;box-shadow:inset 0 0 0 1px rgba(59,130,246,.15)}
 .priceChartCanvasWrap{border:1px solid #203142;border-radius:10px;background:linear-gradient(180deg,#081017,#070d13);overflow:hidden}
-#pricePreviewChart{width:100%;height:390px;display:block;background:transparent}
+
+#pricePreviewChart{width:100%;height:auto!important;aspect-ratio:1180/680;display:block;background:transparent}
+.vpLevelStrip{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:7px 0 6px}
+.vpLevelItem{display:flex;gap:6px;align-items:center;background:#0a131c;border:1px solid #1f3040;border-radius:7px;padding:5px 9px;font-size:9px;color:#9fb0c2}
+.vpLevelItem strong{font-size:10px;color:#eef5fb}
+.vpSwatch{width:22px;height:2px;display:inline-block;border-radius:2px}
+.vpSwatch.vah{background:#a78bfa}.vpSwatch.poc{background:#f59e0b}.vpSwatch.val{background:#60a5fa}
+.chartStatsStrip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-top:8px;border:1px solid #203241;border-radius:9px;overflow:hidden;background:#09131c}
+.chartStatsStrip>div{padding:9px 11px;border-right:1px solid #203241}
+.chartStatsStrip>div:last-child{border-right:none}
+.chartStatsStrip span{display:block;font-size:7.5px;letter-spacing:.7px;color:#718397;margin-bottom:4px}
+.chartStatsStrip strong{display:block;font-size:11px;color:#edf4f9}
+.chartStatsStrip small{display:block;font-size:8px;color:#718397;margin-top:2px}
+@media(max-width:900px){.chartStatsStrip{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
 .priceChartFooter{display:flex;justify-content:space-between;gap:10px;align-items:center;margin-top:7px;color:#8290a1}
 @media(max-width:700px){.priceChartHeader{align-items:flex-start;flex-direction:column}.priceChartControls{width:100%}.priceChartControls .previewPeriodBtn{flex:1}#pricePreviewChart{height:300px}.priceChartFooter{align-items:flex-start;flex-direction:column}}
 
@@ -2995,7 +3009,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.16 candlestick proportion fix */
+/* v22.17 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3008,7 +3022,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.16 layout + STRAT confluence */
+/* v22.17 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3031,7 +3045,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.16 sector-summary containment */
+/* v22.17 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3054,7 +3068,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.16 session volume profile */
+/* v22.17 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3070,7 +3084,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.16</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.17</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3241,7 +3255,18 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
           </div>
         </div>
       </div>
-      <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1080" height="620"></canvas></div>
+      <div class="vpLevelStrip" id="vpLevelStrip">
+        <div class="vpLevelItem"><span class="vpSwatch vah"></span><span>VAH</span><strong id="vpVahTop">—</strong></div>
+        <div class="vpLevelItem"><span class="vpSwatch poc"></span><span>POC</span><strong id="vpPocTop">—</strong></div>
+        <div class="vpLevelItem"><span class="vpSwatch val"></span><span>VAL</span><strong id="vpValTop">—</strong></div>
+      </div>
+      <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1180" height="680"></canvas></div>
+      <div class="chartStatsStrip">
+        <div><span>PROFILE RANGE</span><strong id="statSessionRange">—</strong><small id="statSessionRangePct">—</small></div>
+        <div><span>VISIBLE RANGE</span><strong id="statVisibleRange">—</strong><small id="statVisibleRangePct">—</small></div>
+        <div><span>PROFILE VOLUME</span><strong id="statSessionVol">—</strong><small>RTH source volume</small></div>
+        <div><span>AVG VOLUME (20)</span><strong id="statAvgVol">—</strong><small id="statVsAvgVol">—</small></div>
+      </div>
       <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile Auto · intraday=current session · daily=prior session · weekly=prior week.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
@@ -4601,7 +4626,7 @@ function drawPricePreview(payload){
  ctx.clearRect(0,0,W,H);
  const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
  if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load daily candles",24,34);return}
- const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14,profileW=Math.round(W*.21),profileGap=0;
+ const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14;
  const highs=rows.map(x=>Number(x.high??x.close)),lows=rows.map(x=>Number(x.low??x.close));
  let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.07;hi+=range*.07;
  const priceBottom=H-pad.b-volH-volGap;
@@ -4614,7 +4639,8 @@ function drawPricePreview(payload){
    else if(previewTimeframe==="1d"){vp=profiles.previous;}
    else {vp=profiles.session;}
  }
- const candleRight=W-pad.r;
+ const profileZoneW=vp?Math.round(W*.29):0;
+ const candleRight=W-pad.r-profileZoneW-(vp?14:0);
  const plotW=candleRight-pad.l;
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
@@ -4640,43 +4666,57 @@ function drawPricePreview(payload){
  const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0))),bw=Math.max(3,Math.min(15,plotW/rows.length*.58));
  rows.forEach((r,i)=>{const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#16c784",bear="#ef4444";ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));ctx.fillRect(x-bw/2,top,bw,h);const vh=Number(r.volume||0)/maxVol*volH;ctx.globalAlpha=.42;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1});
  ctx.strokeStyle="#17232d";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
- // Toggleable regular-session volume profile from Alpaca 1Min bars.
+ // Clear, dedicated right-side volume profile panel.
  if(vp?.bins?.length){
    const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
    const maxPV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
-   const xRight=W-pad.r-4,xLeft=xRight-profileW;
+   const profileZoneW=Math.round(W*.29);
+   const xRight=W-pad.r-8,xLeft=xRight-profileZoneW;
+
    ctx.save();
-   ctx.fillStyle="rgba(8,17,25,.34)";ctx.fillRect(xLeft-8,pad.t,profileW+12,priceBottom-pad.t);
-   ctx.strokeStyle="#223344";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xLeft-8,pad.t);ctx.lineTo(xLeft-8,priceBottom);ctx.stroke();
-   ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";ctx.fillStyle="#8ea2b5";const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":(previewVPMode==="auto"&&previewTimeframe==="1w"?"PREV WEEK VP":previewVPMode==="auto"&&previewTimeframe==="1d"?"PREV SESSION VP":"SESSION VP");ctx.fillText(vpTitle,xLeft,pad.t+11);
+   ctx.fillStyle="rgba(7,16,24,.91)";
+   ctx.fillRect(xLeft-10,pad.t,profileZoneW+18,priceBottom-pad.t);
+   ctx.strokeStyle="#2c4254";ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(xLeft-10,pad.t);ctx.lineTo(xLeft-10,priceBottom);ctx.stroke();
+
+   const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":(previewVPMode==="auto"&&previewTimeframe==="1w"?"PREV WEEK VP":previewVPMode==="auto"&&previewTimeframe==="1d"?"PREV SESSION VP":"SESSION VP");
+   ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
+   ctx.textAlign="left";ctx.fillStyle="#b4c2cf";ctx.fillText(vpTitle,xLeft,pad.t+12);
+   ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
+   ctx.fillStyle="#6e8294";ctx.fillText("Built from 1m RTH bars",xLeft,pad.t+24);
+
    if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
-     const y1=Y(Number(vp.vah)),y2=Y(Number(vp.val));
-     const top=Math.min(y1,y2),hh=Math.abs(y2-y1);
-     ctx.fillStyle="rgba(59,130,246,.055)";
-     ctx.fillRect(W-pad.r-profileW-18,top,profileW+18,Math.max(1,hh));
+     const yA=Y(Number(vp.vah)),yB=Y(Number(vp.val));
+     const top=Math.min(yA,yB),hh=Math.abs(yB-yA);
+     ctx.fillStyle="rgba(59,130,246,.075)";
+     ctx.fillRect(xLeft-10,top,profileZoneW+18,Math.max(1,hh));
    }
+
    bins.forEach(b=>{
-     const py=Y(Number(b.price)); if(py<pad.t||py>priceBottom)return;
-     const w=(Number(b.volume)||0)/maxPV*(profileW-10);
-     const bh=Math.max(2,(priceBottom-pad.t)/Math.max(16,bins.length)*.68);
+     const py=Y(Number(b.price));
+     if(py<pad.t||py>priceBottom)return;
+     const w=(Number(b.volume)||0)/maxPV*(profileZoneW-20);
+     const bh=Math.max(3,(priceBottom-pad.t)/Math.max(18,bins.length)*.76);
      const inVA=Number(b.price)>=Number(vp.val)&&Number(b.price)<=Number(vp.vah);
-     ctx.fillStyle=inVA?"rgba(52,211,153,.44)":"rgba(100,116,139,.28)";
-     ctx.fillRect(xRight-w,py-bh/2,w,bh);
+     ctx.fillStyle=inVA?"rgba(66,133,244,.60)":"rgba(70,101,136,.38)";
+     ctx.fillRect(xLeft,py-bh/2,w,bh);
    });
+
    function vpRail(value,color,label,dash=[]){
-     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
-     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
-     ctx.fillStyle=color;ctx.textAlign="right";ctx.font="bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillText(`${label} ${n.toFixed(2)}`,xRight-2,Math.max(pad.t+10,Math.min(priceBottom-4,y-3)));
+     const n=Number(value); if(!Number.isFinite(n)||n<lo||n>hi)return;
+     const y=Y(n);
+     ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.25;
+     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
+     const txt=`${label} ${n.toFixed(2)}`;
+     ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+     const tw=ctx.measureText(txt).width+10;
+     const by=Math.max(pad.t+2,Math.min(priceBottom-15,y-8));
+     ctx.fillStyle="rgba(8,17,25,.94)";ctx.fillRect(xRight-tw,by,tw,14);
+     ctx.fillStyle=color;ctx.textAlign="right";ctx.fillText(txt,xRight-4,by+10);
    }
-   vpRail(vp.vah,"#60a5fa","VAH",[3,3]);
-   vpRail(vp.val,"#60a5fa","VAL",[3,3]);
+   vpRail(vp.vah,"#a78bfa","VAH",[5,4]);
    vpRail(vp.poc,"#f59e0b","POC",[]);
-   if(contextVp){
-     const prefix=previewTimeframe==="1w"?"PW":"PD";
-     vpRail(contextVp.vah,"#7c8da1",`${prefix} VAH`,[5,4]);
-     vpRail(contextVp.val,"#7c8da1",`${prefix} VAL`,[5,4]);
-     vpRail(contextVp.poc,"#a78bfa",`${prefix} POC`,[2,3]);
-   }
+   vpRail(vp.val,"#60a5fa","VAL",[5,4]);
    ctx.restore();
  }
  const last=rows[rows.length-1],first=rows[0],lastPx=Number(last.close),firstPx=Number(first.close),chg=(lastPx/firstPx-1)*100;
@@ -4743,6 +4783,39 @@ async function loadChartPreview(ticker,period=previewPeriod){
    if(meta)meta.textContent=`${previewTimeframe.toUpperCase()} candles · ${period.toUpperCase()} range · ${bars.length} bars`;
    if(st)st.textContent=`${previewTimeframe.toUpperCase()} · ${period.toUpperCase()} · ${bars.length} bars`;
    updatePreviewVPStatus();
+   const p=j.volume_profiles||{};
+   let activeVp=null;
+   if(previewVPMode==="session")activeVp=p.session;
+   else if(previewVPMode==="previous")activeVp=p.previous;
+   else if(previewVPMode==="auto")activeVp=previewTimeframe==="1w"?p.previous_week:previewTimeframe==="1d"?p.previous:p.session;
+
+   const topVah=document.getElementById("vpVahTop"),topPoc=document.getElementById("vpPocTop"),topVal=document.getElementById("vpValTop");
+   if(topVah)topVah.textContent=activeVp?`$${Number(activeVp.vah).toFixed(2)}`:"—";
+   if(topPoc)topPoc.textContent=activeVp?`$${Number(activeVp.poc).toFixed(2)}`:"—";
+   if(topVal)topVal.textContent=activeVp?`$${Number(activeVp.val).toFixed(2)}`:"—";
+
+   if(activeVp?.bins?.length){
+     const prices=activeVp.bins.map(b=>Number(b.price)).filter(Number.isFinite);
+     const pl=Math.min(...prices),ph=Math.max(...prices),pr=ph-pl,pm=(ph+pl)/2;
+     const a=document.getElementById("statSessionRange"),b=document.getElementById("statSessionRangePct"),c=document.getElementById("statSessionVol");
+     if(a)a.textContent=`$${pl.toFixed(2)} – $${ph.toFixed(2)}`;
+     if(b)b.textContent=`${pr.toFixed(2)} (${pm?((pr/pm)*100).toFixed(2):"0.00"}%)`;
+     if(c)c.textContent=fmtCompact(activeVp.total_volume||0);
+   }
+
+   if(bars.length){
+     const highs=bars.map(x=>Number(x.high)).filter(Number.isFinite),lows=bars.map(x=>Number(x.low)).filter(Number.isFinite),vols=bars.map(x=>Number(x.volume)||0);
+     if(highs.length&&lows.length){
+       const vl=Math.min(...lows),vh=Math.max(...highs),vr=vh-vl,vm=(vh+vl)/2;
+       const a=document.getElementById("statVisibleRange"),b=document.getElementById("statVisibleRangePct");
+       if(a)a.textContent=`$${vl.toFixed(2)} – $${vh.toFixed(2)}`;
+       if(b)b.textContent=`${vr.toFixed(2)} (${vm?((vr/vm)*100).toFixed(2):"0.00"}%)`;
+     }
+     const last20=vols.slice(-20),avg20=last20.length?last20.reduce((s,x)=>s+x,0)/last20.length:0;
+     const av=document.getElementById("statAvgVol"),vv=document.getElementById("statVsAvgVol");
+     if(av)av.textContent=fmtCompact(avg20);
+     if(vv&&avg20){const cur=vols[vols.length-1]||0,pct=(cur/avg20-1)*100;vv.textContent=`${pct>=0?"+":""}${pct.toFixed(1)}% vs avg`;vv.style.color=pct>=0?"#4ade80":"#fb7185";}
+   }
  }catch(e){
    if(seq!==previewRequestSeq)return;
    if(st)st.innerHTML=`<span class="error">${e.message}</span>`;
