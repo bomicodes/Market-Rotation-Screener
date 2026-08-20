@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "22.10"
+APP_VERSION = "22.15"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -21,6 +21,7 @@ ALPACA_API_SECRET = os.environ.get("APCA_API_SECRET_KEY", os.environ.get("ALPACA
 ALPACA_TRADING_BASE_URL = os.environ.get("ALPACA_TRADING_BASE_URL", "https://paper-api.alpaca.markets").rstrip("/")
 ALPACA_DATA_BASE_URL = "https://data.alpaca.markets"
 ALPACA_OPTIONS_FEED = os.environ.get("ALPACA_OPTIONS_FEED", "indicative").strip().lower() or "indicative"
+ALPACA_STOCK_FEED = os.environ.get("ALPACA_STOCK_FEED", "iex").strip().lower() or "iex"
 FLOW_MIN_PREMIUM = float(os.environ.get("FLOW_MIN_PREMIUM", "25000"))
 FLOW_MAX_CANDIDATES = int(os.environ.get("FLOW_MAX_CANDIDATES", "1200"))
 FLOW_ACTIVITY_COVERAGE_TARGET = float(os.environ.get("FLOW_ACTIVITY_COVERAGE_TARGET", "99.5"))
@@ -223,6 +224,237 @@ def dl_ohlc(ticker, period="3y"):
         df.columns = [c[0] for c in df.columns]
     df.index = pd.to_datetime(df.index).tz_localize(None)
     return df.sort_index()
+
+
+
+def _nice_profile_step(raw_step):
+    raw_step=max(0.01,float(raw_step or 0.01))
+    exp=math.floor(math.log10(raw_step))
+    base=10**exp
+    frac=raw_step/base
+    nice=1 if frac<=1 else 2 if frac<=2 else 2.5 if frac<=2.5 else 5 if frac<=5 else 10
+    return max(0.01,nice*base)
+
+def _profile_from_intraday_bars(bars, session_date):
+    if not bars:
+        return None
+    lows=[float(b["l"]) for b in bars if b.get("l") is not None]
+    highs=[float(b["h"]) for b in bars if b.get("h") is not None]
+    if not lows or not highs:
+        return None
+    lo,hi=min(lows),max(highs)
+    if not np.isfinite(lo) or not np.isfinite(hi) or hi<=lo:
+        return None
+
+    step=_nice_profile_step((hi-lo)/28.0)
+    edge_lo=math.floor(lo/step)*step
+    edge_hi=math.ceil(hi/step)*step
+    count=max(8,min(60,int(round((edge_hi-edge_lo)/step))))
+    edges=np.array([edge_lo+i*step for i in range(count+1)],dtype=float)
+    vols=np.zeros(len(edges)-1,dtype=float)
+
+    # Approximate volume-at-price by distributing each 1-minute bar's volume
+    # proportionally across every price bin touched by its high-low range.
+    for b in bars:
+        bh=float(b.get("h") or 0); bl=float(b.get("l") or 0)
+        bc=float(b.get("c") or (bh+bl)/2); vol=float(b.get("v") or 0)
+        if vol<=0 or not np.isfinite(vol):
+            continue
+        if bh<=bl:
+            k=int(np.searchsorted(edges,bc,side="right")-1)
+            k=max(0,min(len(vols)-1,k)); vols[k]+=vol
+            continue
+        touched=[]; total_overlap=0.0
+        for i in range(len(vols)):
+            ov=max(0.0,min(bh,edges[i+1])-max(bl,edges[i]))
+            if ov>0:
+                touched.append((i,ov)); total_overlap+=ov
+        if total_overlap<=0:
+            k=int(np.searchsorted(edges,bc,side="right")-1)
+            k=max(0,min(len(vols)-1,k)); vols[k]+=vol
+        else:
+            for i,ov in touched:
+                vols[i]+=vol*(ov/total_overlap)
+
+    total=float(vols.sum())
+    if total<=0:
+        return None
+
+    centers=(edges[:-1]+edges[1:])/2.0
+    poc_idx=int(np.argmax(vols))
+    chosen={poc_idx}; accum=float(vols[poc_idx])
+    left,right=poc_idx-1,poc_idx+1
+    target=total*.70
+    while accum<target and (left>=0 or right<len(vols)):
+        lv=vols[left] if left>=0 else -1
+        rv=vols[right] if right<len(vols) else -1
+        if rv>lv:
+            chosen.add(right); accum+=max(0,float(rv)); right+=1
+        else:
+            chosen.add(left); accum+=max(0,float(lv)); left-=1
+
+    low_idx,high_idx=min(chosen),max(chosen)
+    return {
+        "session":str(session_date),
+        "poc":round(float(centers[poc_idx]),4),
+        "vah":round(float(edges[high_idx+1]),4),
+        "val":round(float(edges[low_idx]),4),
+        "bin_size":round(float(step),4),
+        "value_area_pct":70,
+        "total_volume":int(total),
+        "source":f"Alpaca {ALPACA_STOCK_FEED.upper()} 1Min bars",
+        "method":"1-minute volume distributed across each bar high-low range",
+        "bins":[{"price":round(float(centers[i]),4),"volume":int(round(vols[i]))} for i in range(len(vols))]
+    }
+
+
+def alpaca_session_volume_profiles(ticker):
+    """Latest/prior sessions plus current/prior week composite profiles."""
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        return {"session":None,"previous":None,"current_week":None,"previous_week":None,"error":"Alpaca is not configured."}
+    try:
+        from zoneinfo import ZoneInfo
+        et=ZoneInfo("America/New_York")
+        now=datetime.now(et)
+        url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+        params={
+            "timeframe":"1Min",
+            "start":(now-timedelta(days=20)).isoformat(),
+            "end":now.isoformat(),
+            "adjustment":"raw",
+            "feed":ALPACA_STOCK_FEED,
+            "sort":"asc",
+            "limit":10000
+        }
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+        if r.status_code in (401,403):
+            try: detail=(r.json() or {}).get("message") or r.text
+            except Exception: detail=r.text
+            return {"session":None,"previous":None,"current_week":None,"previous_week":None,
+                    "error":f"Alpaca stock-bar access rejected: {detail or r.status_code}"}
+        r.raise_for_status()
+        raw=(r.json() or {}).get("bars") or []
+
+        sessions={}
+        week_bars={}
+        for b in raw:
+            ts=b.get("t")
+            if not ts: continue
+            try:
+                dt=pd.Timestamp(ts)
+                if dt.tzinfo is None: dt=dt.tz_localize("UTC")
+                dt=dt.tz_convert("America/New_York")
+            except Exception:
+                continue
+            mins=dt.hour*60+dt.minute
+            if mins<570 or mins>=960:
+                continue
+            d=dt.date()
+            sessions.setdefault(d,[]).append(b)
+            iso=dt.isocalendar()
+            wk=(int(iso.year),int(iso.week))
+            week_bars.setdefault(wk,[]).append(b)
+
+        dates=sorted(d for d,v in sessions.items() if v)
+        if not dates:
+            return {"session":None,"previous":None,"current_week":None,"previous_week":None,
+                    "error":"No regular-session Alpaca bars returned."}
+        latest=dates[-1]
+        previous=dates[-2] if len(dates)>1 else None
+
+        weeks=sorted(k for k,v in week_bars.items() if v)
+        current_wk=weeks[-1] if weeks else None
+        previous_wk=weeks[-2] if len(weeks)>1 else None
+
+        current_week_profile=_profile_from_intraday_bars(week_bars[current_wk],f"{current_wk[0]}-W{current_wk[1]:02d}") if current_wk else None
+        previous_week_profile=_profile_from_intraday_bars(week_bars[previous_wk],f"{previous_wk[0]}-W{previous_wk[1]:02d}") if previous_wk else None
+        if current_week_profile:
+            current_week_profile["source"]=f"Alpaca {ALPACA_STOCK_FEED.upper()} 1Min weekly composite"
+        if previous_week_profile:
+            previous_week_profile["source"]=f"Alpaca {ALPACA_STOCK_FEED.upper()} 1Min weekly composite"
+
+        return {
+            "session":_profile_from_intraday_bars(sessions[latest],latest),
+            "previous":_profile_from_intraday_bars(sessions[previous],previous) if previous else None,
+            "current_week":current_week_profile,
+            "previous_week":previous_week_profile,
+            "error":None
+        }
+    except Exception as e:
+        return {"session":None,"previous":None,"current_week":None,"previous_week":None,"error":str(e)}
+
+def _period_start_et(period):
+    from zoneinfo import ZoneInfo
+    now=datetime.now(ZoneInfo("America/New_York"))
+    days={"1m":35,"3m":100,"6m":200}.get(period,35)
+    return now-timedelta(days=days),now
+
+def alpaca_chart_bars(ticker,timeframe,period):
+    """Intraday 1H/4H chart bars from Alpaca. Daily/weekly remain provider-independent below."""
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        return []
+    if timeframe not in ("1h","4h"):
+        return []
+    start,end=_period_start_et(period)
+    url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+    params={
+        "timeframe":"1Hour",
+        "start":start.isoformat(),
+        "end":end.isoformat(),
+        "adjustment":"raw",
+        "feed":ALPACA_STOCK_FEED,
+        "sort":"asc",
+        "limit":10000
+    }
+    r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+    r.raise_for_status()
+    raw=(r.json() or {}).get("bars") or []
+    if not raw:
+        return []
+
+    from zoneinfo import ZoneInfo
+    et=ZoneInfo("America/New_York")
+    parsed=[]
+    for b in raw:
+        try:
+            dt=pd.Timestamp(b.get("t"))
+            if dt.tzinfo is None: dt=dt.tz_localize("UTC")
+            dt=dt.tz_convert("America/New_York")
+        except Exception:
+            continue
+        mins=dt.hour*60+dt.minute
+        if mins<570 or mins>=960:
+            continue
+        parsed.append({
+            "dt":dt,
+            "open":float(b.get("o")),
+            "high":float(b.get("h")),
+            "low":float(b.get("l")),
+            "close":float(b.get("c")),
+            "volume":int(b.get("v") or 0)
+        })
+    if timeframe=="1h":
+        return parsed
+
+    # 4H bars anchored to the cash session: first block starts 09:30 ET.
+    groups={}
+    for b in parsed:
+        mins=b["dt"].hour*60+b["dt"].minute
+        slot=0 if mins < 810 else 1  # 09:30–13:30, then 13:30–16:00
+        key=(b["dt"].date(),slot)
+        groups.setdefault(key,[]).append(b)
+    out=[]
+    for key in sorted(groups):
+        g=groups[key]
+        out.append({
+            "dt":g[0]["dt"],
+            "open":g[0]["open"],
+            "high":max(x["high"] for x in g),
+            "low":min(x["low"] for x in g),
+            "close":g[-1]["close"],
+            "volume":sum(x["volume"] for x in g)
+        })
+    return out
 
 def sma(arr, n):
     return pd.Series(arr, dtype=float).rolling(n).mean().to_numpy()
@@ -1361,15 +1593,26 @@ def option_contract_row(symbol,snap,meta,spot):
         mid=(bid+ask)/2
         if mid>0: spread=(ask-bid)/mid*100
     moneyness=(strike/spot-1)*100 if strike and spot else None
-    if oi>=500 and vol>=100 and spread is not None and spread<=10: liq="Liquid"
-    elif oi>=100 and vol>=25 and spread is not None and spread<=15: liq="Tradable"
-    else: liq="Thin"
+    if oi>=500 and vol>=100 and spread is not None and spread<=10:
+        liq="Liquid"; execution_label="Liquid"
+    elif oi>=100 and vol>=25 and spread is not None and spread<=15:
+        liq="Tradable"; execution_label="Tradable"
+    else:
+        liq="Thin"
+        if spread is None:
+            execution_label="No Quote"
+        elif oi>=500 or vol>=100:
+            execution_label="Active · Wide Spread"
+        elif oi>=100 or vol>=25:
+            execution_label="Low Activity · Wide Spread" if spread>15 else "Low Activity"
+        else:
+            execution_label="Low Activity"
     return {
         "symbol":symbol,"type":(meta or {}).get("type"),"expiration":(meta or {}).get("expiration_date"),
         "strike":strike,"bid":bid,"ask":ask,"mid":mid,"last":last,"last_size":int(last_size),"trade_ts":t.get("t",t.get("timestamp")),"quote_ts":q.get("t",q.get("timestamp")),"volume":int(vol),"open_interest":int(oi),
         "iv":(iv*100 if iv is not None and iv<=5 else iv),"delta":_safe_float(g.get("delta")),
         "gamma":_safe_float(g.get("gamma")),"theta":_safe_float(g.get("theta")),"vega":_safe_float(g.get("vega")),
-        "spread_pct":spread,"moneyness_pct":moneyness,"liquidity":liq
+        "spread_pct":spread,"moneyness_pct":moneyness,"liquidity":liq,"execution_label":execution_label
     }
 
 
@@ -2114,29 +2357,52 @@ def api_chart_preview(ticker):
     ticker=ticker.upper().strip()
     try:
         period=(request.args.get("period") or "1m").lower()
-        if period not in ("1m","3m","6m"):
-            period="1m"
-        # True chart ranges using daily candles.
-        df=dl_ohlc(ticker,"1y")
-        if df is None or len(df)==0:
-            return jsonify({"ok":False,"error":"No price history available."}),404
-        df=df.dropna(subset=["Close"]).copy()
-        bars={"1m":22,"3m":66,"6m":126}.get(period,22)
-        df=df.tail(bars)
+        timeframe=(request.args.get("timeframe") or "1d").lower()
+        if period not in ("1m","3m","6m"): period="1m"
+        if timeframe not in ("1h","4h","1d","1w"): timeframe="1d"
+
         rows=[]
-        for idx,row in df.iterrows():
-            rows.append({
-                "date":pd.Timestamp(idx).strftime("%Y-%m-%d"),
-                "open":None if pd.isna(row.get("Open")) else round(float(row.get("Open")),4),
-                "high":None if pd.isna(row.get("High")) else round(float(row.get("High")),4),
-                "low":None if pd.isna(row.get("Low")) else round(float(row.get("Low")),4),
-                "close":round(float(row.get("Close")),4),
-                "volume":None if pd.isna(row.get("Volume")) else int(row.get("Volume")),
-            })
-        return jsonify({"ok":True,"ticker":ticker,"period":period,"bars":rows})
+        if timeframe in ("1h","4h"):
+            bars=alpaca_chart_bars(ticker,timeframe,period)
+            for b in bars:
+                rows.append({
+                    "date":pd.Timestamp(b["dt"]).strftime("%Y-%m-%dT%H:%M:%S"),
+                    "open":round(float(b["open"]),4),
+                    "high":round(float(b["high"]),4),
+                    "low":round(float(b["low"]),4),
+                    "close":round(float(b["close"]),4),
+                    "volume":int(b["volume"])
+                })
+        else:
+            df=dl_ohlc(ticker,"2y")
+            if df is None or len(df)==0:
+                return jsonify({"ok":False,"error":"No price history available."}),404
+            df=df.dropna(subset=["Close"]).copy()
+            if timeframe=="1w":
+                df=df.resample("W-FRI").agg({
+                    "Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"
+                }).dropna(subset=["Close"])
+                bars_n={"1m":8,"3m":16,"6m":30}.get(period,8)
+            else:
+                bars_n={"1m":22,"3m":66,"6m":126}.get(period,22)
+            df=df.tail(bars_n)
+            for idx,row in df.iterrows():
+                rows.append({
+                    "date":pd.Timestamp(idx).strftime("%Y-%m-%d"),
+                    "open":None if pd.isna(row.get("Open")) else round(float(row.get("Open")),4),
+                    "high":None if pd.isna(row.get("High")) else round(float(row.get("High")),4),
+                    "low":None if pd.isna(row.get("Low")) else round(float(row.get("Low")),4),
+                    "close":round(float(row.get("Close")),4),
+                    "volume":None if pd.isna(row.get("Volume")) else int(row.get("Volume"))
+                })
+
+        profiles=alpaca_session_volume_profiles(ticker)
+        return jsonify({
+            "ok":True,"ticker":ticker,"period":period,"timeframe":timeframe,
+            "bars":rows,"volume_profiles":profiles
+        })
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
-
 
 
 def _strat_scenario(prev, cur):
@@ -2590,6 +2856,17 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .priceChartLast{font-size:13px;font-weight:800;color:#dce6f0}
 .priceChartMeta{margin-top:3px;font-size:10px;color:#7f8c9d;letter-spacing:.3px}
 .priceChartControls{display:flex;gap:6px;align-items:center}
+.priceChartControlStack{display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.vpControls{display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.tfControls{display:flex;gap:5px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.tfBtn{padding:5px 8px;border-radius:6px;background:#0b141d;border:1px solid #28394a;color:#8ea0b3;font-size:9px;font-weight:800}
+.tfBtn.active{background:#183227;border-color:#2f7d57;color:#d1fae5}
+
+.vpLabel{font-size:9px;text-transform:uppercase;letter-spacing:.7px;color:#718196;margin-right:3px}
+.vpModeBtn{padding:5px 8px;border-radius:6px;background:#0b141d;border:1px solid #28394a;color:#8ea0b3;font-size:9px;font-weight:800}
+.vpModeBtn.active{background:#13283a;border-color:#3b82f6;color:#dbeafe}
+@media(max-width:900px){.priceChartControlStack{align-items:stretch}.vpControls{justify-content:flex-start}}
+
 .priceChartControls .previewPeriodBtn{min-width:44px;padding:6px 10px;border-radius:7px;background:#0c151e;border-color:#2a3a4b;color:#9eacbb;font-size:10px;font-weight:800}
 .priceChartControls .previewPeriodBtn.active{background:#0f2740;border-color:#2563eb;color:#dbeafe;box-shadow:inset 0 0 0 1px rgba(59,130,246,.15)}
 .priceChartCanvasWrap{border:1px solid #203142;border-radius:10px;background:linear-gradient(180deg,#081017,#070d13);overflow:hidden}
@@ -2705,7 +2982,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.12 candlestick proportion fix */
+/* v22.15 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -2718,7 +2995,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.12 layout + STRAT confluence */
+/* v22.15 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -2741,7 +3018,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.12 sector-summary containment */
+/* v22.15 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -2763,6 +3040,10 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb{background:#2a4053;border-radius:10px}
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
+
+/* v22.15 session volume profile */
+#previewVPStatus{color:#8ea2b5}
+
 </style>
 <div class="wrap">
 <header class="appHeader">
@@ -2776,7 +3057,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.12</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.15</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -2925,14 +3206,30 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
           <div class="priceChartTitle"><strong id="previewTitle">Chart Preview</strong><span id="previewLastPrice" class="priceChartLast"></span></div>
           <div id="previewMeta" class="priceChartMeta">Daily candles · select a ticker to preview</div>
         </div>
-        <div class="priceChartControls">
-          <button id="preview1M" class="previewPeriodBtn active">1M</button>
-          <button id="preview3M" class="previewPeriodBtn">3M</button>
-          <button id="preview6M" class="previewPeriodBtn">6M</button>
+        <div class="priceChartControlStack">
+          <div class="tfControls">
+            <span class="vpLabel">Chart</span>
+            <button id="tf1H" class="tfBtn">1H</button>
+            <button id="tf4H" class="tfBtn">4H</button>
+            <button id="tf1D" class="tfBtn active">1D</button>
+            <button id="tf1W" class="tfBtn">1W</button>
+          </div>
+          <div class="priceChartControls">
+            <button id="preview1M" class="previewPeriodBtn active">1M</button>
+            <button id="preview3M" class="previewPeriodBtn">3M</button>
+            <button id="preview6M" class="previewPeriodBtn">6M</button>
+          </div>
+          <div class="vpControls">
+            <span class="vpLabel">Volume Profile</span>
+            <button id="vpAuto" class="vpModeBtn active">Auto</button>
+            <button id="vpOff" class="vpModeBtn">Off</button>
+            <button id="vpSession" class="vpModeBtn">Session</button>
+            <button id="vpPrevious" class="vpModeBtn">Previous Session</button>
+          </div>
         </div>
       </div>
       <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1080" height="620"></canvas></div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny">Daily candles + volume · 1M / 3M / 6M structure view.</span></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile: Session · loads with ticker.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
@@ -3111,6 +3408,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 </div>
 <script>
 let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
+let previewVPMode="auto",previewPayload=null,previewTimeframe="1d";
 let sectorRRGMode="fast", sectorQuadrantFilter="all", dashboardPayload=null, dashboardHeatMode="composite";
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
@@ -3939,8 +4237,8 @@ let optionScanMap={},activeOptionsData=null;
 function optionBadgeHTML(x){
  if(!x)return '<span class="tiny">Not scanned</span>';
  if(x.error||x.ok===false)return '<span class="optBadge optBad">Error</span>';
- const liq=x.liquidity||"—",cls=liq==="Liquid"?"optGood":liq==="Tradable"?"optWarn":"optBad";
- return `<span class="optBadge ${cls}">${liq}</span><div class="tiny">${x.iv_state||"—"}</div>`;
+ const liq=x.liquidity||"—",label=x.execution_label||liq,cls=liq==="Liquid"?"optGood":liq==="Tradable"?"optWarn":"optBad";
+ return `<span class="optBadge ${cls}">${label}</span><div class="tiny">${x.iv_state||"—"}</div>`;
 }
 function dteFromExpiration(exp){
  if(!exp)return null;const a=new Date(exp+"T12:00:00"),b=new Date();
@@ -4048,10 +4346,24 @@ function drawGammaLandscape(p,spot){
    ctx.fillStyle=net>=0?"#4ade80":"#f87171";ctx.fillText(`${net>=0?"+":""}${moneyShort(net)}`,strikeR+netW/2,y);
    gammaLandscapeHitboxes.push({x:plotL,y:y-rowH/2,w:plotR-plotL,h:rowH,row:r});
  });
- const minS=rows[0].strike,maxS=rows[rows.length-1].strike;
- const yForStrike=v=>pad.t+(Number(v)-minS)/(Math.max(.0001,maxS-minS))*(H-pad.t-pad.b);
+ const minS=Number(rows[0].strike),maxS=Number(rows[rows.length-1].strike);
+ // IMPORTANT: the landscape is a categorical strike ladder. Map overlays to
+ // the same row centers, interpolating only between adjacent displayed strikes.
+ // This keeps spot/walls/flip aligned even when strike spacing is irregular.
+ const strikeCenters=rows.map((r,i)=>({s:Number(r.strike),y:pad.t+(i+.5)*rowH}));
+ const yForStrike=v=>{
+   const n=Number(v); if(!Number.isFinite(n)||n<minS||n>maxS)return null;
+   for(let i=0;i<strikeCenters.length;i++){
+     if(Math.abs(n-strikeCenters[i].s)<1e-9)return strikeCenters[i].y;
+     if(i<strikeCenters.length-1 && n>strikeCenters[i].s && n<strikeCenters[i+1].s){
+       const a=strikeCenters[i],b=strikeCenters[i+1],t=(n-a.s)/(b.s-a.s);
+       return a.y+t*(b.y-a.y);
+     }
+   }
+   return strikeCenters[strikeCenters.length-1].y;
+ };
  function rail(v,color,label,dash=[],side="left"){
-   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.55;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);
+   if(v==null||v<minS||v>maxS)return;const y=yForStrike(v);if(y==null)return;ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.55;ctx.beginPath();ctx.moveTo(plotL,y);ctx.lineTo(plotR,y);ctx.stroke();ctx.setLineDash([]);
    const txt=`${label} $${Number(v).toFixed(2)}`;ctx.font="bold 9px sans-serif";const tw=ctx.measureText(txt).width;const bx=side==="left"?6:W-tw-18,by=Math.max(25,Math.min(H-20,y-15));ctx.fillStyle="rgba(7,16,24,.92)";ctx.fillRect(bx-4,by-8,tw+8,16);ctx.fillStyle=color;ctx.textAlign="left";ctx.fillText(txt,bx,by);ctx.restore();
  }
  rail(spot,"#f8fafc","SPOT",[],"left");
@@ -4182,7 +4494,7 @@ function renderOptionsPanel(){
  <td>${r.open_interest??0}</td>
  <td>${r.iv==null?"—":fmt(r.iv,1)+"%"}</td>
  <td>${r.delta==null?"—":fmt(r.delta,2)}</td>
- <td>${optionBadgeHTML({liquidity:r.liquidity,iv_state:""})}</td>
+ <td>${optionBadgeHTML({liquidity:r.liquidity,execution_label:r.execution_label,iv_state:""})}</td>
  </tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
 }
 async function loadOptionsTicker(ticker,opts={}){
@@ -4276,10 +4588,21 @@ function drawPricePreview(payload){
  ctx.clearRect(0,0,W,H);
  const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
  if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load daily candles",24,34);return}
- const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14;
+ const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14,profileW=150,profileGap=16;
  const highs=rows.map(x=>Number(x.high??x.close)),lows=rows.map(x=>Number(x.low??x.close));
  let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.07;hi+=range*.07;
- const priceBottom=H-pad.b-volH-volGap,plotW=W-pad.l-pad.r;
+ const priceBottom=H-pad.b-volH-volGap;
+ const profiles=payload?.volume_profiles||{};
+ let vp=null,contextVp=null;
+ if(previewVPMode==="session")vp=profiles.session;
+ else if(previewVPMode==="previous")vp=profiles.previous;
+ else if(previewVPMode==="auto"){
+   if(previewTimeframe==="1w"){vp=profiles.current_week;contextVp=profiles.previous_week;}
+   else if(previewTimeframe==="1d"){vp=profiles.session;contextVp=profiles.previous;}
+   else {vp=profiles.session;}
+ }
+ const candleRight=W-pad.r-(vp?profileW+profileGap:0);
+ const plotW=candleRight-pad.l;
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
  ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";
@@ -4289,10 +4612,76 @@ function drawPricePreview(payload){
  rows.forEach((r,i)=>{const d=new Date(`${r.date}T00:00:00`);if(Number.isNaN(d.getTime()))return;const key=`${d.getFullYear()}-${d.getMonth()}`;if(key!==lastMonth){if(i>1){const x=X(i);ctx.strokeStyle="#101c25";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();ctx.fillStyle="#687789";ctx.textAlign="center";ctx.fillText(d.toLocaleString(undefined,{month:"short"}),x,H-15);ctx.textAlign="left"}lastMonth=key}});
  const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0))),bw=Math.max(3,Math.min(15,plotW/rows.length*.58));
  rows.forEach((r,i)=>{const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#16c784",bear="#ef4444";ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));ctx.fillRect(x-bw/2,top,bw,h);const vh=Number(r.volume||0)/maxVol*volH;ctx.globalAlpha=.42;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1});
- ctx.strokeStyle="#17232d";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(W-pad.r,H-pad.b-volH-volGap/2);ctx.stroke();
+ ctx.strokeStyle="#17232d";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
+ // Toggleable regular-session volume profile from Alpaca 1Min bars.
+ if(vp?.bins?.length){
+   const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
+   const maxPV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
+   const xRight=W-pad.r-4,xLeft=xRight-profileW;
+   ctx.save();
+   ctx.fillStyle="rgba(8,17,25,.72)";ctx.fillRect(xLeft-8,pad.t,profileW+12,priceBottom-pad.t);
+   ctx.strokeStyle="#223344";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xLeft-8,pad.t);ctx.lineTo(xLeft-8,priceBottom);ctx.stroke();
+   ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";ctx.fillStyle="#8ea2b5";const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":(previewTimeframe==="1w"&&previewVPMode==="auto"?"WEEKLY VP":"SESSION VP");ctx.fillText(vpTitle,xLeft,pad.t+11);
+   bins.forEach(b=>{
+     const py=Y(Number(b.price)); if(py<pad.t||py>priceBottom)return;
+     const w=(Number(b.volume)||0)/maxPV*(profileW-10);
+     const bh=Math.max(2,(priceBottom-pad.t)/Math.max(16,bins.length)*.68);
+     const inVA=Number(b.price)>=Number(vp.val)&&Number(b.price)<=Number(vp.vah);
+     ctx.fillStyle=inVA?"rgba(67,160,120,.48)":"rgba(71,94,113,.34)";
+     ctx.fillRect(xRight-w,py-bh/2,w,bh);
+   });
+   function vpRail(value,color,label,dash=[]){
+     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
+     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.1;ctx.beginPath();ctx.moveTo(xLeft-8,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
+     ctx.fillStyle=color;ctx.textAlign="right";ctx.font="bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillText(`${label} ${n.toFixed(2)}`,xRight-2,Math.max(pad.t+10,Math.min(priceBottom-4,y-3)));
+   }
+   vpRail(vp.vah,"#60a5fa","VAH",[3,3]);
+   vpRail(vp.val,"#60a5fa","VAL",[3,3]);
+   vpRail(vp.poc,"#f59e0b","POC",[]);
+   if(contextVp){
+     const prefix=previewTimeframe==="1w"?"PW":"PD";
+     vpRail(contextVp.vah,"#7c8da1",`${prefix} VAH`,[5,4]);
+     vpRail(contextVp.val,"#7c8da1",`${prefix} VAL`,[5,4]);
+     vpRail(contextVp.poc,"#a78bfa",`${prefix} POC`,[2,3]);
+   }
+   ctx.restore();
+ }
  const last=rows[rows.length-1],first=rows[0],lastPx=Number(last.close),firstPx=Number(first.close),chg=(lastPx/firstPx-1)*100;
  if(Number.isFinite(lastPx)){const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12,bx=W-pad.r+4,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";ctx.lineWidth=1;ctx.beginPath();if(ctx.roundRect){ctx.roundRect(bx,by,tw,18,4)}else{ctx.rect(bx,by,tw,18)}ctx.fill();ctx.stroke();ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.restore()}
  ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-15);
+}
+
+
+function updatePreviewVPStatus(){
+ const el=document.getElementById("previewVPStatus"); if(!el)return;
+ ["vpAuto","vpOff","vpSession","vpPrevious"].forEach(id=>document.getElementById(id)?.classList.remove("active"));
+ document.getElementById(previewVPMode==="auto"?"vpAuto":previewVPMode==="off"?"vpOff":previewVPMode==="session"?"vpSession":"vpPrevious")?.classList.add("active");
+ ["tf1H","tf4H","tf1D","tf1W"].forEach(id=>document.getElementById(id)?.classList.remove("active"));
+ document.getElementById(previewTimeframe==="1h"?"tf1H":previewTimeframe==="4h"?"tf4H":previewTimeframe==="1w"?"tf1W":"tf1D")?.classList.add("active");
+
+ if(previewVPMode==="off"){el.textContent="Volume Profile: Off";return;}
+ const p=previewPayload?.volume_profiles||{};
+ let vp=null,label="";
+ if(previewVPMode==="session"){vp=p.session;label="Session";}
+ else if(previewVPMode==="previous"){vp=p.previous;label="Previous Session";}
+ else if(previewTimeframe==="1w"){vp=p.current_week;label="Auto · Current Week + Prior Week levels";}
+ else if(previewTimeframe==="1d"){vp=p.session;label="Auto · Current Session + Prior Session levels";}
+ else {vp=p.session;label="Auto · Current Session";}
+ if(vp){
+   el.textContent=`${label} · POC $${Number(vp.poc).toFixed(2)} · VAH $${Number(vp.vah).toFixed(2)} · VAL $${Number(vp.val).toFixed(2)} · ${vp.source||"Alpaca 1Min"}`;
+ }else{
+   el.textContent=`${label} unavailable${p.error?` · ${p.error}`:""}`;
+ }
+}
+function setPreviewVPMode(mode){
+ previewVPMode=mode;
+ if(previewPayload)drawPricePreview(previewPayload);
+ updatePreviewVPStatus();
+}
+
+function setPreviewTimeframe(tf){
+ previewTimeframe=tf;
+ if(previewTicker)loadChartPreview(previewTicker,previewPeriod);
 }
 
 async function loadChartPreview(ticker,period=previewPeriod){
@@ -4306,16 +4695,18 @@ async function loadChartPreview(ticker,period=previewPeriod){
  document.getElementById("preview3M")?.classList.toggle("active",period==="3m");
  document.getElementById("preview6M")?.classList.toggle("active",period==="6m");
  try{
-   const r=await fetch(`/api/chart-preview/${encodeURIComponent(ticker)}?period=${period}`);
+   const r=await fetch(`/api/chart-preview/${encodeURIComponent(ticker)}?period=${period}&timeframe=${previewTimeframe}`);
    const j=await r.json();
    if(seq!==previewRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
+   previewPayload=j;
    drawPricePreview(j);
    const bars=j.bars||[],last=bars[bars.length-1],first=bars[0];
    const lp=document.getElementById("previewLastPrice"),meta=document.getElementById("previewMeta");
    if(lp&&last){const ch=first&&Number(first.close)?(Number(last.close)/Number(first.close)-1)*100:0;lp.textContent=`$${Number(last.close).toFixed(2)}  ${ch>=0?"+":""}${ch.toFixed(2)}%`;lp.style.color=ch>=0?"#7ee2ad":"#f38b8b";}
-   if(meta)meta.textContent=`1D candles · ${period.toUpperCase()} range · ${bars.length} sessions`;
-   if(st)st.textContent=`${period.toUpperCase()} · ${bars.length} daily candles`;
+   if(meta)meta.textContent=`${previewTimeframe.toUpperCase()} candles · ${period.toUpperCase()} range · ${bars.length} bars`;
+   if(st)st.textContent=`${previewTimeframe.toUpperCase()} · ${period.toUpperCase()} · ${bars.length} bars`;
+   updatePreviewVPStatus();
  }catch(e){
    if(seq!==previewRequestSeq)return;
    if(st)st.innerHTML=`<span class="error">${e.message}</span>`;
@@ -4706,6 +5097,14 @@ document.getElementById("groupFilter").addEventListener("change",renderGroups);d
 });document.getElementById("refreshMarket").addEventListener("click",()=>loadMarket(true));document.getElementById("liveHoldingsLimit").addEventListener("change",loadSector);document.getElementById("liveQuadrantFilter").addEventListener("change",renderLiveStocks);document.getElementById("liveTailFilter").addEventListener("change",renderLiveStocks);document.getElementById("preview1M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"1m")});
 document.getElementById("preview3M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"3m")});
 document.getElementById("preview6M").addEventListener("click",()=>{if(previewTicker)loadChartPreview(previewTicker,"6m")});
+document.getElementById("vpAuto")?.addEventListener("click",()=>setPreviewVPMode("auto"));
+document.getElementById("vpOff")?.addEventListener("click",()=>setPreviewVPMode("off"));
+document.getElementById("vpSession")?.addEventListener("click",()=>setPreviewVPMode("session"));
+document.getElementById("vpPrevious")?.addEventListener("click",()=>setPreviewVPMode("previous"));
+document.getElementById("tf1H")?.addEventListener("click",()=>setPreviewTimeframe("1h"));
+document.getElementById("tf4H")?.addEventListener("click",()=>setPreviewTimeframe("4h"));
+document.getElementById("tf1D")?.addEventListener("click",()=>setPreviewTimeframe("1d"));
+document.getElementById("tf1W")?.addEventListener("click",()=>setPreviewTimeframe("1w"));
 document.getElementById("liveTickerSearch").addEventListener("input",handleLiveTickerSearch);
 document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=>{
  if(e.key==="Enter"){
