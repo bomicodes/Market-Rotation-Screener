@@ -246,15 +246,10 @@ def _profile_from_intraday_bars(bars, session_date):
     if not np.isfinite(lo) or not np.isfinite(hi) or hi<=lo:
         return None
 
-    step=_nice_profile_step((hi-lo)/28.0)
-    edge_lo=math.floor(lo/step)*step
-    edge_hi=math.ceil(hi/step)*step
-    count=max(8,min(60,int(round((edge_hi-edge_lo)/step))))
-    edges=np.array([edge_lo+i*step for i in range(count+1)],dtype=float)
-    vols=np.zeros(len(edges)-1,dtype=float)
+    rows_count=200
+    edges=np.linspace(lo,hi,rows_count+1,dtype=float)
+    vols=np.zeros(rows_count,dtype=float)
 
-    # Approximate volume-at-price by distributing each 1-minute bar's volume
-    # proportionally across every price bin touched by its high-low range.
     for b in bars:
         bh=float(b.get("h") or 0); bl=float(b.get("l") or 0)
         bc=float(b.get("c") or (bh+bl)/2); vol=float(b.get("v") or 0)
@@ -262,16 +257,18 @@ def _profile_from_intraday_bars(bars, session_date):
             continue
         if bh<=bl:
             k=int(np.searchsorted(edges,bc,side="right")-1)
-            k=max(0,min(len(vols)-1,k)); vols[k]+=vol
+            k=max(0,min(rows_count-1,k)); vols[k]+=vol
             continue
+        i0=max(0,int(np.searchsorted(edges,bl,side="right")-1))
+        i1=min(rows_count-1,int(np.searchsorted(edges,bh,side="left")))
         touched=[]; total_overlap=0.0
-        for i in range(len(vols)):
+        for i in range(i0,i1+1):
             ov=max(0.0,min(bh,edges[i+1])-max(bl,edges[i]))
             if ov>0:
                 touched.append((i,ov)); total_overlap+=ov
         if total_overlap<=0:
             k=int(np.searchsorted(edges,bc,side="right")-1)
-            k=max(0,min(len(vols)-1,k)); vols[k]+=vol
+            k=max(0,min(rows_count-1,k)); vols[k]+=vol
         else:
             for i,ov in touched:
                 vols[i]+=vol*(ov/total_overlap)
@@ -282,16 +279,16 @@ def _profile_from_intraday_bars(bars, session_date):
 
     centers=(edges[:-1]+edges[1:])/2.0
     poc_idx=int(np.argmax(vols))
+    target=total*.68
     chosen={poc_idx}; accum=float(vols[poc_idx])
     left,right=poc_idx-1,poc_idx+1
-    target=total*.70
-    while accum<target and (left>=0 or right<len(vols)):
-        lv=vols[left] if left>=0 else -1
-        rv=vols[right] if right<len(vols) else -1
+    while accum<target and (left>=0 or right<rows_count):
+        lv=float(vols[left]) if left>=0 else -1.0
+        rv=float(vols[right]) if right<rows_count else -1.0
         if rv>lv:
-            chosen.add(right); accum+=max(0,float(rv)); right+=1
+            chosen.add(right); accum+=max(0.0,rv); right+=1
         else:
-            chosen.add(left); accum+=max(0,float(lv)); left-=1
+            chosen.add(left); accum+=max(0.0,lv); left-=1
 
     low_idx,high_idx=min(chosen),max(chosen)
     return {
@@ -299,12 +296,13 @@ def _profile_from_intraday_bars(bars, session_date):
         "poc":round(float(centers[poc_idx]),4),
         "vah":round(float(edges[high_idx+1]),4),
         "val":round(float(edges[low_idx]),4),
-        "bin_size":round(float(step),4),
-        "value_area_pct":70,
+        "row_count":rows_count,
+        "row_size":round(float((hi-lo)/rows_count),6),
+        "value_area_pct":68,
         "total_volume":int(total),
         "source":f"Alpaca {ALPACA_STOCK_FEED.upper()} 1Min bars",
-        "method":"1-minute volume distributed across each bar high-low range",
-        "bins":[{"price":round(float(centers[i]),4),"volume":int(round(vols[i]))} for i in range(len(vols))]
+        "method":"1-minute OHLCV volume distributed across 200 price rows",
+        "bins":[{"price":round(float(centers[i]),4),"volume":int(round(vols[i]))} for i in range(rows_count)]
     }
 
 
@@ -3009,7 +3007,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.19 candlestick proportion fix */
+/* v22.20 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3022,7 +3020,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.19 layout + STRAT confluence */
+/* v22.20 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3045,7 +3043,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.19 sector-summary containment */
+/* v22.20 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3068,7 +3066,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.19 session volume profile */
+/* v22.20 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3084,7 +3082,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.19</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.20</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3267,7 +3265,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         <div><span>PROFILE VOLUME</span><strong id="statSessionVol">—</strong><small>RTH source volume</small></div>
         <div><span>AVG VOLUME (20)</span><strong id="statAvgVol">—</strong><small id="statVsAvgVol">—</small></div>
       </div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile Auto · profile pane uses an expanded price scale for readability; VAH/POC/VAL rails on candles remain true-price aligned.</span></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">SVP Auto · 09:30–16:00 RTH · 200 rows · 68% value area · POC extended right.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
@@ -4632,12 +4630,12 @@ function drawPricePreview(payload){
  if(!c||!ctx)return;
  const rows=payload?.bars||[],W=c.width,H=c.height;
  ctx.clearRect(0,0,W,H);
- const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+ const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");
+ ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
  if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load candles",24,34);return}
 
- const pad={l:58,r:58,t:32,b:52},volH=86,volGap=14;
+ const pad={l:60,r:70,t:34,b:54},volH=88,volGap=14;
  const priceBottom=H-pad.b-volH-volGap;
-
  const profiles=payload?.volume_profiles||{};
  let vp=null;
  if(previewVPMode==="session")vp=profiles.session;
@@ -4648,33 +4646,42 @@ function drawPricePreview(payload){
    else vp=profiles.session;
  }
 
- // Layout closely matches the reference: candles left, readable profile right.
- const vpPaneW=vp?Math.round(W*.31):0;
- const dividerX=vp?W-pad.r-vpPaneW:W-pad.r;
- const candleRight=vp?dividerX-14:W-pad.r;
- const plotW=Math.max(120,candleRight-pad.l);
-
- const highs=rows.map(x=>Number(x.high??x.close)).filter(Number.isFinite);
- const lows=rows.map(x=>Number(x.low??x.close)).filter(Number.isFinite);
- let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);
- lo-=range*.07;hi+=range*.07;
-
+ const profileW=vp?Math.round(W*.24):0;
+ const candleRight=W-pad.r;
+ const plotW=candleRight-pad.l;
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
+
+ // Smart Y-axis zoom based on recent structure + active VP levels.
+ const lookback=previewTimeframe==="1h"?80:previewTimeframe==="4h"?50:previewTimeframe==="1w"?18:14;
+ const recent=rows.slice(-Math.min(rows.length,lookback));
+ const recentHighs=recent.map(r=>Number(r.high??r.close)).filter(Number.isFinite);
+ const recentLows=recent.map(r=>Number(r.low??r.close)).filter(Number.isFinite);
+ let focusLo=Math.min(...recentLows),focusHi=Math.max(...recentHighs);
+ const lastPx=Number(rows[rows.length-1].close);
+ if(vp){
+   [vp.val,vp.poc,vp.vah].map(Number).filter(Number.isFinite).forEach(v=>{
+     focusLo=Math.min(focusLo,v);focusHi=Math.max(focusHi,v);
+   });
+ }
+ if(Number.isFinite(lastPx)){focusLo=Math.min(focusLo,lastPx);focusHi=Math.max(focusHi,lastPx)}
+ let focusRange=Math.max(.01,focusHi-focusLo);
+ const padFrac=previewTimeframe==="1w"?.12:.16;
+ let lo=focusLo-focusRange*padFrac,hi=focusHi+focusRange*padFrac;
+ const minPctRange=previewTimeframe==="1h"?.025:previewTimeframe==="4h"?.04:previewTimeframe==="1w"?.10:.06;
+ if(Number.isFinite(lastPx)&&lastPx>0){
+   const desired=lastPx*minPctRange;
+   if((hi-lo)<desired){const mid=(hi+lo)/2;lo=mid-desired/2;hi=mid+desired/2}
+ }
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
 
- // Candle price grid / left price context.
  ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";
- ctx.textAlign="left";
- const gridCount=6;
- for(let k=0;k<gridCount;k++){
-   const y=pad.t+k*(priceBottom-pad.t)/(gridCount-1);
-   const level=hi-k*(hi-lo)/(gridCount-1);
-   ctx.strokeStyle="#192733";ctx.lineWidth=1;
-   ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(candleRight,y);ctx.stroke();
+ for(let k=0;k<6;k++){
+   const y=pad.t+k*(priceBottom-pad.t)/5;
+   const level=hi-k*(hi-lo)/5;
+   ctx.strokeStyle="#192733";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(candleRight,y);ctx.stroke();
    ctx.fillStyle="#8190a1";ctx.textAlign="right";ctx.fillText(level.toFixed(2),pad.l-8,y+3);
  }
 
- // Time separators.
  let lastKey="";
  rows.forEach((r,i)=>{
    const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
@@ -4691,14 +4698,14 @@ function drawPricePreview(payload){
    }
  });
 
- // Candles + volume.
  const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0)));
  const bw=Math.max(2,Math.min(14,plotW/rows.length*.58));
  rows.forEach((r,i)=>{
-   const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o;
-   const bull="#18c98b",bear="#f04b4b";
+   const rh=Number(r.high??r.close),rl=Number(r.low??r.close);
+   if(rh<lo||rl>hi)return;
+   const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#18c98b",bear="#f04b4b";
    ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;
-   if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}
+   ctx.beginPath();ctx.moveTo(x,Y(rh));ctx.lineTo(x,Y(rl));ctx.stroke();
    const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));
    ctx.fillRect(x-bw/2,top,bw,h);
    const vh=Number(r.volume||0)/maxVol*volH;
@@ -4706,96 +4713,69 @@ function drawPricePreview(payload){
  });
  ctx.strokeStyle="#1a2935";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
 
- // True VAH/POC/VAL rails on the candle scale.
- if(vp){
-   function candleRail(value,color,dash=[]){
-     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
-     const y=Y(n);ctx.save();ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.3;
-     ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(candleRight,y);ctx.stroke();ctx.restore();
-   }
-   candleRail(vp.vah,"#a78bfa",[6,4]);
-   candleRail(vp.poc,"#f59e0b",[]);
-   candleRail(vp.val,"#60a5fa",[6,4]);
- }
-
- // Dedicated VP pane with an independent vertical scale so a narrow session
- // range remains readable. Values are explicitly labeled; candle rails remain
- // on the true price scale at left.
  if(vp?.bins?.length){
    const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
-   const pPrices=bins.map(b=>Number(b.price));
-   let pLo=Math.min(...pPrices),pHi=Math.max(...pPrices),pRange=Math.max(.01,pHi-pLo);
-   pLo-=pRange*.10;pHi+=pRange*.10;
-   const PY=v=>pad.t+(pHi-v)/(pHi-pLo)*(priceBottom-pad.t);
-   const maxPV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
-   const xLeft=dividerX+12,xRight=W-pad.r;
+   const visible=bins.filter(b=>Number(b.price)>=lo&&Number(b.price)<=hi);
+   const maxPV=Math.max(1,...visible.map(b=>Number(b.volume)||0));
+   const xRight=W-pad.r-4,xLeft=xRight-profileW;
 
    ctx.save();
-   ctx.fillStyle="rgba(8,17,25,.93)";ctx.fillRect(dividerX,pad.t,xRight-dividerX,priceBottom-pad.t);
-   ctx.strokeStyle="#33495b";ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(dividerX,pad.t);ctx.lineTo(dividerX,priceBottom);ctx.stroke();
+   ctx.fillStyle="rgba(7,16,24,.38)";ctx.fillRect(xLeft-8,pad.t,profileW+12,priceBottom-pad.t);
 
-   const vpTitle=previewVPMode==="previous"?"PREVIOUS SESSION VP":
-     (previewVPMode==="auto"&&previewTimeframe==="1w"?"PREVIOUS WEEK VP":
-      previewVPMode==="auto"&&previewTimeframe==="1d"?"PREVIOUS SESSION VP":"SESSION VP");
-   ctx.textAlign="left";ctx.fillStyle="#c3cfda";ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
-   ctx.fillText(vpTitle,xLeft,pad.t+14);
-   ctx.fillStyle="#788b9c";ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
-   ctx.fillText("1m RTH profile · expanded scale",xLeft,pad.t+27);
-
-   // Profile price grid on its own scale.
-   for(let k=0;k<5;k++){
-     const y=pad.t+42+k*(priceBottom-pad.t-48)/4;
-     const level=pHi-k*(pHi-pLo)/4;
-     ctx.strokeStyle="rgba(43,62,78,.45)";ctx.beginPath();ctx.moveTo(xLeft,y);ctx.lineTo(xRight,y);ctx.stroke();
-     ctx.fillStyle="#718397";ctx.textAlign="right";ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
-     ctx.fillText(level.toFixed(2),xRight-2,y-3);
-   }
-
-   // Value-area background.
    if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
-     const y1=PY(Number(vp.vah)),y2=PY(Number(vp.val));
-     ctx.fillStyle="rgba(59,130,246,.09)";
-     ctx.fillRect(xLeft,Math.min(y1,y2),xRight-xLeft,Math.max(2,Math.abs(y2-y1)));
+     const y1=Y(Number(vp.vah)),y2=Y(Number(vp.val));
+     ctx.fillStyle="rgba(59,130,246,.07)";
+     ctx.fillRect(xLeft-8,Math.min(y1,y2),profileW+12,Math.max(1,Math.abs(y2-y1)));
    }
 
-   // Bars start at the divider and extend right, like the reference.
-   bins.forEach(b=>{
-     const py=PY(Number(b.price));
-     const w=(Number(b.volume)||0)/maxPV*(xRight-xLeft-18);
-     const bh=Math.max(4,(priceBottom-pad.t)/Math.max(18,bins.length)*.72);
-     const inVA=Number(b.price)>=Number(vp.val)&&Number(b.price)<=Number(vp.vah);
-     const isPoc=Math.abs(Number(b.price)-Number(vp.poc)) <= (Number(vp.bin_size)||0.01)/1.9;
-     ctx.fillStyle=isPoc?"rgba(245,158,11,.88)":inVA?"rgba(70,130,220,.66)":"rgba(59,88,126,.48)";
-     ctx.fillRect(xLeft,py-bh/2,w,bh);
-   });
+   const rowPx=Math.max(.0001,(Number(vp.row_size)||.01)*(priceBottom-pad.t)/(hi-lo));
+   const groupSize=Math.max(1,Math.ceil(2.2/rowPx));
+   for(let i=0;i<visible.length;i+=groupSize){
+     const group=visible.slice(i,i+groupSize);
+     const vol=group.reduce((s,b)=>s+Number(b.volume||0),0);
+     const pLow=Math.min(...group.map(b=>Number(b.price)));
+     const pHigh=Math.max(...group.map(b=>Number(b.price)));
+     const pMid=(pLow+pHigh)/2,py=Y(pMid);
+     const w=vol/maxPV*(profileW-12);
+     const bh=Math.max(2,Math.abs(Y(pLow)-Y(pHigh))+1.2);
+     const inVA=pMid>=Number(vp.val)&&pMid<=Number(vp.vah);
+     const pocHit=Number(vp.poc)>=pLow&&Number(vp.poc)<=pHigh;
+     ctx.fillStyle=pocHit?"rgba(245,158,11,.90)":inVA?"rgba(68,132,232,.72)":"rgba(60,90,124,.45)";
+     ctx.fillRect(xRight-w,py-bh/2,w,bh);
+   }
 
-   function profileRail(value,color,label,dash=[]){
-     const n=Number(value);if(!Number.isFinite(n))return;
-     const y=PY(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.3;
-     ctx.beginPath();ctx.moveTo(xLeft,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
+   function rail(value,color,label,dash=[],extend=false){
+     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
+     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.35;
+     ctx.beginPath();ctx.moveTo(extend?pad.l:xLeft-8,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
      const txt=`${label} ${n.toFixed(2)}`;ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
-     const tw=ctx.measureText(txt).width+10,by=Math.max(pad.t+34,Math.min(priceBottom-15,y-8));
-     ctx.fillStyle="rgba(7,16,24,.96)";ctx.fillRect(xRight-tw,by,tw,14);
+     const tw=ctx.measureText(txt).width+10,by=Math.max(pad.t+2,Math.min(priceBottom-15,y-8));
+     ctx.fillStyle="rgba(7,16,24,.95)";ctx.fillRect(xRight-tw,by,tw,14);
      ctx.fillStyle=color;ctx.textAlign="right";ctx.fillText(txt,xRight-4,by+10);
    }
-   profileRail(vp.vah,"#a78bfa","VAH",[5,4]);
-   profileRail(vp.poc,"#f59e0b","POC",[]);
-   profileRail(vp.val,"#60a5fa","VAL",[5,4]);
+   rail(vp.vah,"#a78bfa","VAH",[5,4],false);
+   rail(vp.poc,"#f59e0b","POC",[],true);
+   rail(vp.val,"#60a5fa","VAL",[5,4],false);
+
+   const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":
+     (previewVPMode==="auto"&&previewTimeframe==="1w"?"PREV WEEK VP":
+      previewVPMode==="auto"&&previewTimeframe==="1d"?"PREV SESSION VP":"SESSION VP");
+   ctx.fillStyle="#a7b7c7";ctx.textAlign="left";ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+   ctx.fillText(vpTitle,xLeft,pad.t+12);
+   ctx.fillStyle="#6f8295";ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
+   ctx.fillText(`${vp.row_count||200} rows · ${vp.value_area_pct||68}% VA`,xLeft,pad.t+24);
    ctx.restore();
  }
 
- // Current price badge stays with the candle scale, not the VP scale.
- const last=rows[rows.length-1],first=rows[0],lastPx=Number(last.close),firstPx=Number(first.close),chg=(lastPx/firstPx-1)*100;
- if(Number.isFinite(lastPx)){
+ const firstPx=Number(rows[0].close),chg=(lastPx/firstPx-1)*100;
+ if(Number.isFinite(lastPx)&&lastPx>=lo&&lastPx<=hi){
    const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
-   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12;
-   const bx=Math.min(candleRight-tw-3,Math.max(pad.l+4,candleRight-tw-3)),by=Math.max(pad.t,Math.min(priceBottom-18,py-9));
+   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12,bx=W-pad.r-tw,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));
    ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";
    if(ctx.roundRect){ctx.beginPath();ctx.roundRect(bx,by,tw,18,4);ctx.fill();ctx.stroke()}else{ctx.fillRect(bx,by,tw,18);ctx.strokeRect(bx,by,tw,18)}
    ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.restore();
  }
- ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";
- ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";
+ ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";
  ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-16);
 }
 
