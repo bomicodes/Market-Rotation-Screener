@@ -3007,7 +3007,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.20 candlestick proportion fix */
+/* v22.21 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3020,7 +3020,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.20 layout + STRAT confluence */
+/* v22.21 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3043,7 +3043,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.20 sector-summary containment */
+/* v22.21 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3066,7 +3066,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.20 session volume profile */
+/* v22.21 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3082,7 +3082,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.20</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.21</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -4646,8 +4646,8 @@ function drawPricePreview(payload){
    else vp=profiles.session;
  }
 
- const profileW=vp?Math.round(W*.24):0;
- const candleRight=W-pad.r;
+ const profileW=vp?Math.round(W*.38):0;
+ const candleRight=vp?Math.round(W*.62):W-pad.r;
  const plotW=candleRight-pad.l;
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
 
@@ -4717,10 +4717,10 @@ function drawPricePreview(payload){
    const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
    const visible=bins.filter(b=>Number(b.price)>=lo&&Number(b.price)<=hi);
    const maxPV=Math.max(1,...visible.map(b=>Number(b.volume)||0));
-   const xRight=W-pad.r-4,xLeft=xRight-profileW;
+   const xRight=W-pad.r-12,xLeft=candleRight+18;
 
    ctx.save();
-   ctx.fillStyle="rgba(7,16,24,.38)";ctx.fillRect(xLeft-8,pad.t,profileW+12,priceBottom-pad.t);
+   ctx.fillStyle="rgba(7,16,24,.52)";ctx.fillRect(xLeft-10,pad.t,(xRight-xLeft)+20,priceBottom-pad.t);
 
    if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
      const y1=Y(Number(vp.vah)),y2=Y(Number(vp.val));
@@ -4736,11 +4736,11 @@ function drawPricePreview(payload){
      const pLow=Math.min(...group.map(b=>Number(b.price)));
      const pHigh=Math.max(...group.map(b=>Number(b.price)));
      const pMid=(pLow+pHigh)/2,py=Y(pMid);
-     const w=vol/maxPV*(profileW-12);
-     const bh=Math.max(2,Math.abs(Y(pLow)-Y(pHigh))+1.2);
+     const w=Math.pow(vol/maxPV,.72)*Math.max(24,(xRight-xLeft-8));
+     const bh=Math.max(3.5,Math.abs(Y(pLow)-Y(pHigh))+1.8);
      const inVA=pMid>=Number(vp.val)&&pMid<=Number(vp.vah);
      const pocHit=Number(vp.poc)>=pLow&&Number(vp.poc)<=pHigh;
-     ctx.fillStyle=pocHit?"rgba(245,158,11,.90)":inVA?"rgba(68,132,232,.72)":"rgba(60,90,124,.45)";
+     ctx.fillStyle=pocHit?"rgba(245,158,11,.96)":inVA?"rgba(68,132,232,.82)":"rgba(72,103,138,.56)";
      ctx.fillRect(xRight-w,py-bh/2,w,bh);
    }
 
