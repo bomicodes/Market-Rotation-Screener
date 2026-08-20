@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "22.15"
+APP_VERSION = "22.16"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -390,69 +390,80 @@ def _period_start_et(period):
     return now-timedelta(days=days),now
 
 def alpaca_chart_bars(ticker,timeframe,period):
-    """Intraday 1H/4H chart bars from Alpaca. Daily/weekly remain provider-independent below."""
-    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
-        return []
+    """Return 1H/4H regular-session bars with Alpaca preferred and Yahoo fallback."""
     if timeframe not in ("1h","4h"):
         return []
-    start,end=_period_start_et(period)
-    url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
-    params={
-        "timeframe":"1Hour",
-        "start":start.isoformat(),
-        "end":end.isoformat(),
-        "adjustment":"raw",
-        "feed":ALPACA_STOCK_FEED,
-        "sort":"asc",
-        "limit":10000
-    }
-    r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
-    r.raise_for_status()
-    raw=(r.json() or {}).get("bars") or []
-    if not raw:
-        return []
 
-    from zoneinfo import ZoneInfo
-    et=ZoneInfo("America/New_York")
     parsed=[]
-    for b in raw:
+    if ALPACA_API_KEY and ALPACA_API_SECRET:
         try:
-            dt=pd.Timestamp(b.get("t"))
-            if dt.tzinfo is None: dt=dt.tz_localize("UTC")
-            dt=dt.tz_convert("America/New_York")
+            start,end=_period_start_et(period)
+            url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+            params={
+                "timeframe":"1Hour","start":start.isoformat(),"end":end.isoformat(),
+                "adjustment":"raw","feed":ALPACA_STOCK_FEED,"sort":"asc","limit":10000
+            }
+            r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+            if r.ok:
+                for b in ((r.json() or {}).get("bars") or []):
+                    try:
+                        dt=pd.Timestamp(b.get("t"))
+                        if dt.tzinfo is None: dt=dt.tz_localize("UTC")
+                        dt=dt.tz_convert("America/New_York")
+                    except Exception:
+                        continue
+                    mins=dt.hour*60+dt.minute
+                    if mins<570 or mins>=960: continue
+                    parsed.append({
+                        "dt":dt,"open":float(b.get("o")),"high":float(b.get("h")),
+                        "low":float(b.get("l")),"close":float(b.get("c")),
+                        "volume":int(b.get("v") or 0)
+                    })
         except Exception:
-            continue
-        mins=dt.hour*60+dt.minute
-        if mins<570 or mins>=960:
-            continue
-        parsed.append({
-            "dt":dt,
-            "open":float(b.get("o")),
-            "high":float(b.get("h")),
-            "low":float(b.get("l")),
-            "close":float(b.get("c")),
-            "volume":int(b.get("v") or 0)
-        })
+            parsed=[]
+
+    if not parsed:
+        try:
+            days={"1m":35,"3m":100,"6m":200}.get(period,35)
+            yperiod="1mo" if days<=35 else "3mo" if days<=100 else "6mo"
+            df=yf.download(
+                ticker,period=yperiod,interval="60m",auto_adjust=True,
+                progress=False,threads=False,prepost=False,timeout=25
+            )
+            if df is not None and len(df):
+                if isinstance(df.columns,pd.MultiIndex):
+                    df.columns=[c[0] for c in df.columns]
+                for idx,row in df.dropna(subset=["Close"]).iterrows():
+                    try:
+                        dt=pd.Timestamp(idx)
+                        if dt.tzinfo is not None: dt=dt.tz_convert("America/New_York")
+                    except Exception:
+                        continue
+                    parsed.append({
+                        "dt":dt,"open":float(row.get("Open",row["Close"])),
+                        "high":float(row.get("High",row["Close"])),
+                        "low":float(row.get("Low",row["Close"])),
+                        "close":float(row["Close"]),
+                        "volume":int(row.get("Volume") or 0)
+                    })
+        except Exception:
+            parsed=[]
+
     if timeframe=="1h":
         return parsed
 
-    # 4H bars anchored to the cash session: first block starts 09:30 ET.
     groups={}
     for b in parsed:
         mins=b["dt"].hour*60+b["dt"].minute
-        slot=0 if mins < 810 else 1  # 09:30–13:30, then 13:30–16:00
-        key=(b["dt"].date(),slot)
-        groups.setdefault(key,[]).append(b)
+        slot=0 if mins < 810 else 1
+        groups.setdefault((b["dt"].date(),slot),[]).append(b)
     out=[]
     for key in sorted(groups):
         g=groups[key]
         out.append({
-            "dt":g[0]["dt"],
-            "open":g[0]["open"],
-            "high":max(x["high"] for x in g),
-            "low":min(x["low"] for x in g),
-            "close":g[-1]["close"],
-            "volume":sum(x["volume"] for x in g)
+            "dt":g[0]["dt"],"open":g[0]["open"],
+            "high":max(x["high"] for x in g),"low":min(x["low"] for x in g),
+            "close":g[-1]["close"],"volume":sum(x["volume"] for x in g)
         })
     return out
 
@@ -2364,6 +2375,8 @@ def api_chart_preview(ticker):
         rows=[]
         if timeframe in ("1h","4h"):
             bars=alpaca_chart_bars(ticker,timeframe,period)
+            max_bars={"1h":{"1m":160,"3m":420,"6m":780},"4h":{"1m":44,"3m":110,"6m":210}}[timeframe][period]
+            bars=bars[-max_bars:]
             for b in bars:
                 rows.append({
                     "date":pd.Timestamp(b["dt"]).strftime("%Y-%m-%dT%H:%M:%S"),
@@ -2982,7 +2995,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.15 candlestick proportion fix */
+/* v22.16 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -2995,7 +3008,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.15 layout + STRAT confluence */
+/* v22.16 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3018,7 +3031,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.15 sector-summary containment */
+/* v22.16 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3041,7 +3054,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.15 session volume profile */
+/* v22.16 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3057,7 +3070,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.15</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.16</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3229,7 +3242,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         </div>
       </div>
       <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1080" height="620"></canvas></div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile: Session · loads with ticker.</span></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Volume Profile Auto · intraday=current session · daily=prior session · weekly=prior week.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
@@ -4588,7 +4601,7 @@ function drawPricePreview(payload){
  ctx.clearRect(0,0,W,H);
  const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,"#081119");bg.addColorStop(1,"#070d13");ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
  if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load daily candles",24,34);return}
- const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14,profileW=150,profileGap=16;
+ const pad={l:46,r:74,t:24,b:48},volH=82,volGap=14,profileW=Math.round(W*.21),profileGap=0;
  const highs=rows.map(x=>Number(x.high??x.close)),lows=rows.map(x=>Number(x.low??x.close));
  let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);lo-=range*.07;hi+=range*.07;
  const priceBottom=H-pad.b-volH-volGap;
@@ -4597,11 +4610,11 @@ function drawPricePreview(payload){
  if(previewVPMode==="session")vp=profiles.session;
  else if(previewVPMode==="previous")vp=profiles.previous;
  else if(previewVPMode==="auto"){
-   if(previewTimeframe==="1w"){vp=profiles.current_week;contextVp=profiles.previous_week;}
-   else if(previewTimeframe==="1d"){vp=profiles.session;contextVp=profiles.previous;}
+   if(previewTimeframe==="1w"){vp=profiles.previous_week;}
+   else if(previewTimeframe==="1d"){vp=profiles.previous;}
    else {vp=profiles.session;}
  }
- const candleRight=W-pad.r-(vp?profileW+profileGap:0);
+ const candleRight=W-pad.r;
  const plotW=candleRight-pad.l;
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
@@ -4609,7 +4622,21 @@ function drawPricePreview(payload){
  const gridCount=5;
  for(let k=0;k<gridCount;k++){const y=pad.t+k*(priceBottom-pad.t)/(gridCount-1),level=hi-k*(hi-lo)/(gridCount-1);ctx.strokeStyle="#1b2833";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();ctx.fillStyle="#758495";ctx.fillText(`$${level.toFixed(2)}`,W-pad.r+9,y+3)}
  let lastMonth="";
- rows.forEach((r,i)=>{const d=new Date(`${r.date}T00:00:00`);if(Number.isNaN(d.getTime()))return;const key=`${d.getFullYear()}-${d.getMonth()}`;if(key!==lastMonth){if(i>1){const x=X(i);ctx.strokeStyle="#101c25";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();ctx.fillStyle="#687789";ctx.textAlign="center";ctx.fillText(d.toLocaleString(undefined,{month:"short"}),x,H-15);ctx.textAlign="left"}lastMonth=key}});
+ rows.forEach((r,i)=>{
+   const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
+   if(Number.isNaN(d.getTime()))return;
+   const intraday=previewTimeframe==="1h"||previewTimeframe==="4h";
+   const key=intraday?`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`:`${d.getFullYear()}-${d.getMonth()}`;
+   if(key!==lastMonth){
+     if(i>1){
+       const x=X(i);ctx.strokeStyle="#101c25";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();
+       ctx.fillStyle="#687789";ctx.textAlign="center";
+       ctx.fillText(intraday?d.toLocaleDateString(undefined,{month:"short",day:"numeric"}):d.toLocaleString(undefined,{month:"short"}),x,H-15);
+       ctx.textAlign="left";
+     }
+     lastMonth=key;
+   }
+ });
  const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0))),bw=Math.max(3,Math.min(15,plotW/rows.length*.58));
  rows.forEach((r,i)=>{const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#16c784",bear="#ef4444";ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;if(r.high!=null&&r.low!=null){ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke()}const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));ctx.fillRect(x-bw/2,top,bw,h);const vh=Number(r.volume||0)/maxVol*volH;ctx.globalAlpha=.42;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1});
  ctx.strokeStyle="#17232d";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
@@ -4619,20 +4646,26 @@ function drawPricePreview(payload){
    const maxPV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
    const xRight=W-pad.r-4,xLeft=xRight-profileW;
    ctx.save();
-   ctx.fillStyle="rgba(8,17,25,.72)";ctx.fillRect(xLeft-8,pad.t,profileW+12,priceBottom-pad.t);
+   ctx.fillStyle="rgba(8,17,25,.34)";ctx.fillRect(xLeft-8,pad.t,profileW+12,priceBottom-pad.t);
    ctx.strokeStyle="#223344";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(xLeft-8,pad.t);ctx.lineTo(xLeft-8,priceBottom);ctx.stroke();
-   ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";ctx.fillStyle="#8ea2b5";const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":(previewTimeframe==="1w"&&previewVPMode==="auto"?"WEEKLY VP":"SESSION VP");ctx.fillText(vpTitle,xLeft,pad.t+11);
+   ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.textAlign="left";ctx.fillStyle="#8ea2b5";const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":(previewVPMode==="auto"&&previewTimeframe==="1w"?"PREV WEEK VP":previewVPMode==="auto"&&previewTimeframe==="1d"?"PREV SESSION VP":"SESSION VP");ctx.fillText(vpTitle,xLeft,pad.t+11);
+   if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
+     const y1=Y(Number(vp.vah)),y2=Y(Number(vp.val));
+     const top=Math.min(y1,y2),hh=Math.abs(y2-y1);
+     ctx.fillStyle="rgba(59,130,246,.055)";
+     ctx.fillRect(W-pad.r-profileW-18,top,profileW+18,Math.max(1,hh));
+   }
    bins.forEach(b=>{
      const py=Y(Number(b.price)); if(py<pad.t||py>priceBottom)return;
      const w=(Number(b.volume)||0)/maxPV*(profileW-10);
      const bh=Math.max(2,(priceBottom-pad.t)/Math.max(16,bins.length)*.68);
      const inVA=Number(b.price)>=Number(vp.val)&&Number(b.price)<=Number(vp.vah);
-     ctx.fillStyle=inVA?"rgba(67,160,120,.48)":"rgba(71,94,113,.34)";
+     ctx.fillStyle=inVA?"rgba(52,211,153,.44)":"rgba(100,116,139,.28)";
      ctx.fillRect(xRight-w,py-bh/2,w,bh);
    });
    function vpRail(value,color,label,dash=[]){
      const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
-     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.1;ctx.beginPath();ctx.moveTo(xLeft-8,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
+     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
      ctx.fillStyle=color;ctx.textAlign="right";ctx.font="bold 8px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillText(`${label} ${n.toFixed(2)}`,xRight-2,Math.max(pad.t+10,Math.min(priceBottom-4,y-3)));
    }
    vpRail(vp.vah,"#60a5fa","VAH",[3,3]);
@@ -4664,8 +4697,8 @@ function updatePreviewVPStatus(){
  let vp=null,label="";
  if(previewVPMode==="session"){vp=p.session;label="Session";}
  else if(previewVPMode==="previous"){vp=p.previous;label="Previous Session";}
- else if(previewTimeframe==="1w"){vp=p.current_week;label="Auto · Current Week + Prior Week levels";}
- else if(previewTimeframe==="1d"){vp=p.session;label="Auto · Current Session + Prior Session levels";}
+ else if(previewTimeframe==="1w"){vp=p.previous_week;label="Auto · Previous Week";}
+ else if(previewTimeframe==="1d"){vp=p.previous;label="Auto · Previous Session";}
  else {vp=p.session;label="Auto · Current Session";}
  if(vp){
    el.textContent=`${label} · POC $${Number(vp.poc).toFixed(2)} · VAH $${Number(vp.vah).toFixed(2)} · VAL $${Number(vp.val).toFixed(2)} · ${vp.source||"Alpaca 1Min"}`;
@@ -4681,6 +4714,9 @@ function setPreviewVPMode(mode){
 
 function setPreviewTimeframe(tf){
  previewTimeframe=tf;
+ ["tf1H","tf4H","tf1D","tf1W"].forEach(id=>document.getElementById(id)?.classList.remove("active"));
+ document.getElementById(tf==="1h"?"tf1H":tf==="4h"?"tf4H":tf==="1w"?"tf1W":"tf1D")?.classList.add("active");
+ const st=document.getElementById("previewStatus");if(st)st.textContent=`Loading ${tf.toUpperCase()}…`;
  if(previewTicker)loadChartPreview(previewTicker,previewPeriod);
 }
 
@@ -4690,7 +4726,7 @@ async function loadChartPreview(ticker,period=previewPeriod){
  loadStrat(ticker);
  const seq=++previewRequestSeq,st=document.getElementById("previewStatus"),title=document.getElementById("previewTitle");
  if(title)title.textContent=`${ticker} · Chart Preview`;
- if(st)st.textContent=`Loading ${period.toUpperCase()}…`;
+ if(st)st.textContent=`Loading ${previewTimeframe.toUpperCase()} · ${period.toUpperCase()}…`;
  document.getElementById("preview1M")?.classList.toggle("active",period==="1m");
  document.getElementById("preview3M")?.classList.toggle("active",period==="3m");
  document.getElementById("preview6M")?.classList.toggle("active",period==="6m");
@@ -4699,7 +4735,7 @@ async function loadChartPreview(ticker,period=previewPeriod){
    const j=await r.json();
    if(seq!==previewRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
-   previewPayload=j;
+   previewPayload=j;previewTimeframe=(j.timeframe||previewTimeframe).toLowerCase();
    drawPricePreview(j);
    const bars=j.bars||[],last=bars[bars.length-1],first=bars[0];
    const lp=document.getElementById("previewLastPrice"),meta=document.getElementById("previewMeta");
