@@ -235,7 +235,7 @@ def _nice_profile_step(raw_step):
     nice=1 if frac<=1 else 2 if frac<=2 else 2.5 if frac<=2.5 else 5 if frac<=5 else 10
     return max(0.01,nice*base)
 
-def _profile_from_intraday_bars(bars, session_date):
+def _profile_from_intraday_bars(bars, session_date, rows_count=64, value_area_pct=68):
     if not bars:
         return None
     lows=[float(b["l"]) for b in bars if b.get("l") is not None]
@@ -246,7 +246,7 @@ def _profile_from_intraday_bars(bars, session_date):
     if not np.isfinite(lo) or not np.isfinite(hi) or hi<=lo:
         return None
 
-    rows_count=200
+    rows_count=max(24,min(96,int(rows_count or 64)))
     edges=np.linspace(lo,hi,rows_count+1,dtype=float)
     vols=np.zeros(rows_count,dtype=float)
 
@@ -279,7 +279,7 @@ def _profile_from_intraday_bars(bars, session_date):
 
     centers=(edges[:-1]+edges[1:])/2.0
     poc_idx=int(np.argmax(vols))
-    target=total*.68
+    target=total*(float(value_area_pct)/100.0)
     chosen={poc_idx}; accum=float(vols[poc_idx])
     left,right=poc_idx-1,poc_idx+1
     while accum<target and (left>=0 or right<rows_count):
@@ -298,10 +298,10 @@ def _profile_from_intraday_bars(bars, session_date):
         "val":round(float(edges[low_idx]),4),
         "row_count":rows_count,
         "row_size":round(float((hi-lo)/rows_count),6),
-        "value_area_pct":68,
+        "value_area_pct":int(value_area_pct),
         "total_volume":int(total),
         "source":f"Alpaca {ALPACA_STOCK_FEED.upper()} 1Min bars",
-        "method":"1-minute OHLCV volume distributed across 200 price rows",
+        "method":f"Lower-timeframe OHLCV volume distributed across {rows_count} price rows",
         "bins":[{"price":round(float(centers[i]),4),"volume":int(round(vols[i]))} for i in range(rows_count)]
     }
 
@@ -380,6 +380,93 @@ def alpaca_session_volume_profiles(ticker):
         }
     except Exception as e:
         return {"session":None,"previous":None,"current_week":None,"previous_week":None,"error":str(e)}
+
+def alpaca_visible_profiles(ticker, period, chart_timeframe):
+    """Build one profile per visible RTH session (or per week for 1W).
+
+    Resolution is chosen to keep the request practical:
+      1M range -> 1Min bars
+      3M/6M range -> 5Min bars
+    This lets a daily chart show a separate profile for essentially every
+    displayed candle rather than one large profile for the entire window.
+    """
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        return {"sessions":[],"weeks":[],"source":None,"error":"Alpaca is not configured."}
+
+    try:
+        from zoneinfo import ZoneInfo
+        et=ZoneInfo("America/New_York")
+        now=datetime.now(et)
+
+        days={"1m":35,"3m":105,"6m":205}.get(period,35)
+        source_tf="1Min" if period=="1m" else "5Min"
+
+        url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+        params={
+            "timeframe":source_tf,
+            "start":(now-timedelta(days=days)).isoformat(),
+            "end":now.isoformat(),
+            "adjustment":"raw",
+            "feed":ALPACA_STOCK_FEED,
+            "sort":"asc",
+            "limit":10000
+        }
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=30)
+        if r.status_code in (401,403):
+            try: detail=(r.json() or {}).get("message") or r.text
+            except Exception: detail=r.text
+            return {"sessions":[],"weeks":[],"source":source_tf,
+                    "error":f"Alpaca stock-bar access rejected: {detail or r.status_code}"}
+        r.raise_for_status()
+        raw=(r.json() or {}).get("bars") or []
+
+        sessions={}
+        weeks={}
+        for b in raw:
+            ts=b.get("t")
+            if not ts:
+                continue
+            try:
+                dt=pd.Timestamp(ts)
+                if dt.tzinfo is None:
+                    dt=dt.tz_localize("UTC")
+                dt=dt.tz_convert("America/New_York")
+            except Exception:
+                continue
+            mins=dt.hour*60+dt.minute
+            if mins<570 or mins>=960:   # 09:30–16:00 ET
+                continue
+            d=dt.date()
+            sessions.setdefault(d,[]).append(b)
+            iso=dt.isocalendar()
+            wk=(int(iso.year),int(iso.week))
+            weeks.setdefault(wk,[]).append(b)
+
+        # Fewer rows per session makes the profiles visibly useful beside
+        # individual candles; the underlying lower-timeframe bars remain intact.
+        if chart_timeframe in ("1h","4h"):
+            session_rows=32
+        else:
+            session_rows=40
+
+        session_items=[]
+        for d in sorted(sessions):
+            p=_profile_from_intraday_bars(sessions[d],d,rows_count=session_rows,value_area_pct=68)
+            if p:
+                p["source"]=f"Alpaca {ALPACA_STOCK_FEED.upper()} {source_tf} RTH"
+                session_items.append({"date":str(d),"profile":p})
+
+        week_items=[]
+        for wk in sorted(weeks):
+            label=f"{wk[0]}-W{wk[1]:02d}"
+            p=_profile_from_intraday_bars(weeks[wk],label,rows_count=52,value_area_pct=68)
+            if p:
+                p["source"]=f"Alpaca {ALPACA_STOCK_FEED.upper()} {source_tf} weekly composite"
+                week_items.append({"week":label,"profile":p})
+
+        return {"sessions":session_items,"weeks":week_items,"source":source_tf,"error":None}
+    except Exception as e:
+        return {"sessions":[],"weeks":[],"source":None,"error":str(e)}
 
 def _period_start_et(period):
     from zoneinfo import ZoneInfo
@@ -2408,9 +2495,11 @@ def api_chart_preview(ticker):
                 })
 
         profiles=alpaca_session_volume_profiles(ticker)
+        visible_profiles=alpaca_visible_profiles(ticker,period,timeframe)
         return jsonify({
             "ok":True,"ticker":ticker,"period":period,"timeframe":timeframe,
-            "bars":rows,"volume_profiles":profiles
+            "bars":rows,"volume_profiles":profiles,
+            "visible_profiles":visible_profiles
         })
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -3007,7 +3096,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.21 candlestick proportion fix */
+/* v22.23 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3020,7 +3109,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.21 layout + STRAT confluence */
+/* v22.23 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3043,7 +3132,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.21 sector-summary containment */
+/* v22.23 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3066,7 +3155,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.21 session volume profile */
+/* v22.23 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3082,7 +3171,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.21</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.23</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3246,7 +3335,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
           </div>
           <div class="vpControls">
             <span class="vpLabel">Volume Profile</span>
-            <button id="vpAuto" class="vpModeBtn active">Auto</button>
+            <button id="vpAuto" class="vpModeBtn active">Per Session</button>
             <button id="vpOff" class="vpModeBtn">Off</button>
             <button id="vpSession" class="vpModeBtn">Session</button>
             <button id="vpPrevious" class="vpModeBtn">Previous Session</button>
@@ -3265,7 +3354,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         <div><span>PROFILE VOLUME</span><strong id="statSessionVol">—</strong><small>RTH source volume</small></div>
         <div><span>AVG VOLUME (20)</span><strong id="statAvgVol">—</strong><small id="statVsAvgVol">—</small></div>
       </div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">SVP Auto · 09:30–16:00 RTH · 200 rows · 68% value area · POC extended right.</span></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Per-session SVP · one profile per RTH session/candle · adaptive 32–52 rows · 68% value area.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
@@ -4634,63 +4723,67 @@ function drawPricePreview(payload){
  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
  if(!rows.length){ctx.fillStyle="#7f8c9d";ctx.font="12px sans-serif";ctx.fillText("Select a ticker to load candles",24,34);return}
 
- const pad={l:60,r:70,t:34,b:54},volH=88,volGap=14;
+ const pad={l:62,r:76,t:32,b:54},volH=84,volGap=14;
  const priceBottom=H-pad.b-volH-volGap;
- const profiles=payload?.volume_profiles||{};
- let vp=null;
- if(previewVPMode==="session")vp=profiles.session;
- else if(previewVPMode==="previous")vp=profiles.previous;
- else if(previewVPMode==="auto"){
-   if(previewTimeframe==="1w")vp=profiles.previous_week;
-   else if(previewTimeframe==="1d")vp=profiles.previous;
-   else vp=profiles.session;
- }
-
- const profileW=vp?Math.round(W*.38):0;
- const candleRight=vp?Math.round(W*.62):W-pad.r;
- const plotW=candleRight-pad.l;
+ const plotW=W-pad.l-pad.r;
  const X=i=>pad.l+(i+.5)*plotW/rows.length;
+ const spacing=plotW/rows.length;
 
- // Smart Y-axis zoom based on recent structure + active VP levels.
- const lookback=previewTimeframe==="1h"?80:previewTimeframe==="4h"?50:previewTimeframe==="1w"?18:14;
- const recent=rows.slice(-Math.min(rows.length,lookback));
- const recentHighs=recent.map(r=>Number(r.high??r.close)).filter(Number.isFinite);
- const recentLows=recent.map(r=>Number(r.low??r.close)).filter(Number.isFinite);
- let focusLo=Math.min(...recentLows),focusHi=Math.max(...recentHighs);
- const lastPx=Number(rows[rows.length-1].close);
- if(vp){
-   [vp.val,vp.poc,vp.vah].map(Number).filter(Number.isFinite).forEach(v=>{
-     focusLo=Math.min(focusLo,v);focusHi=Math.max(focusHi,v);
-   });
+ const profiles=payload?.volume_profiles||{};
+ const visibleProfiles=payload?.visible_profiles||{};
+ let singleVp=null;
+ if(previewVPMode==="session")singleVp=profiles.session;
+ else if(previewVPMode==="previous")singleVp=profiles.previous;
+
+ // Map session profiles to YYYY-MM-DD for quick lookup.
+ const sessionMap=new Map((visibleProfiles.sessions||[]).map(x=>[x.date,x.profile]));
+ const weekMap=new Map((visibleProfiles.weeks||[]).map(x=>[x.week,x.profile]));
+
+ function rowDateKey(r){
+   const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
+   if(Number.isNaN(d.getTime()))return "";
+   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
  }
- if(Number.isFinite(lastPx)){focusLo=Math.min(focusLo,lastPx);focusHi=Math.max(focusHi,lastPx)}
- let focusRange=Math.max(.01,focusHi-focusLo);
- const padFrac=previewTimeframe==="1w"?.12:.16;
- let lo=focusLo-focusRange*padFrac,hi=focusHi+focusRange*padFrac;
- const minPctRange=previewTimeframe==="1h"?.025:previewTimeframe==="4h"?.04:previewTimeframe==="1w"?.10:.06;
- if(Number.isFinite(lastPx)&&lastPx>0){
-   const desired=lastPx*minPctRange;
-   if((hi-lo)<desired){const mid=(hi+lo)/2;lo=mid-desired/2;hi=mid+desired/2}
+ function weekKey(r){
+   const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
+   if(Number.isNaN(d.getTime()))return "";
+   const u=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+   const day=u.getUTCDay()||7;u.setUTCDate(u.getUTCDate()+4-day);
+   const yearStart=new Date(Date.UTC(u.getUTCFullYear(),0,1));
+   const week=Math.ceil((((u-yearStart)/86400000)+1)/7);
+   return `${u.getUTCFullYear()}-W${String(week).padStart(2,"0")}`;
  }
+
+ // Price scale uses the displayed candles. Per-session profiles align exactly
+ // to the candle price axis, which is the key difference from the prior build.
+ const highs=rows.map(r=>Number(r.high??r.close)).filter(Number.isFinite);
+ const lows=rows.map(r=>Number(r.low??r.close)).filter(Number.isFinite);
+ let lo=Math.min(...lows),hi=Math.max(...highs),range=Math.max(.01,hi-lo);
+ lo-=range*.06;hi+=range*.06;
  const Y=v=>pad.t+(hi-v)/(hi-lo)*(priceBottom-pad.t);
 
- ctx.font="10px ui-monospace, SFMono-Regular, Menlo, monospace";
- for(let k=0;k<6;k++){
-   const y=pad.t+k*(priceBottom-pad.t)/5;
-   const level=hi-k*(hi-lo)/5;
-   ctx.strokeStyle="#192733";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(candleRight,y);ctx.stroke();
-   ctx.fillStyle="#8190a1";ctx.textAlign="right";ctx.fillText(level.toFixed(2),pad.l-8,y+3);
+ // More price points for easier node reading.
+ ctx.font="9px ui-monospace, SFMono-Regular, Menlo, monospace";
+ const gridCount=11;
+ for(let k=0;k<gridCount;k++){
+   const y=pad.t+k*(priceBottom-pad.t)/(gridCount-1);
+   const level=hi-k*(hi-lo)/(gridCount-1);
+   ctx.strokeStyle=k%2===0?"#1b2a36":"#13212b";ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke();
+   ctx.fillStyle="#8392a3";ctx.textAlign="right";ctx.fillText(level.toFixed(2),pad.l-8,y+3);
  }
 
+ // Time separators.
  let lastKey="";
  rows.forEach((r,i)=>{
    const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
    if(Number.isNaN(d.getTime()))return;
    const intraday=previewTimeframe==="1h"||previewTimeframe==="4h";
-   const key=intraday?`${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`:`${d.getFullYear()}-${d.getMonth()}`;
+   const key=intraday?rowDateKey(r):`${d.getFullYear()}-${d.getMonth()}`;
    if(key!==lastKey){
-     if(i>1){
-       const x=X(i);ctx.strokeStyle="#101c25";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();
+     if(i>0){
+       const x=X(i)-spacing*.5;
+       ctx.strokeStyle="#10202a";ctx.beginPath();ctx.moveTo(x,pad.t);ctx.lineTo(x,H-pad.b);ctx.stroke();
        ctx.fillStyle="#718094";ctx.textAlign="center";
        ctx.fillText(intraday?d.toLocaleDateString(undefined,{month:"short",day:"numeric"}):d.toLocaleString(undefined,{month:"short"}),x,H-16);
      }
@@ -4698,77 +4791,132 @@ function drawPricePreview(payload){
    }
  });
 
- const maxVol=Math.max(1,...rows.map(x=>Number(x.volume||0)));
- const bw=Math.max(2,Math.min(14,plotW/rows.length*.58));
- rows.forEach((r,i)=>{
-   const rh=Number(r.high??r.close),rl=Number(r.low??r.close);
-   if(rh<lo||rl>hi)return;
-   const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o,bull="#18c98b",bear="#f04b4b";
-   ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.1;
-   ctx.beginPath();ctx.moveTo(x,Y(rh));ctx.lineTo(x,Y(rl));ctx.stroke();
-   const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));
-   ctx.fillRect(x-bw/2,top,bw,h);
-   const vh=Number(r.volume||0)/maxVol*volH;
-   ctx.globalAlpha=.48;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1;
- });
- ctx.strokeStyle="#1a2935";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(candleRight,H-pad.b-volH-volGap/2);ctx.stroke();
-
- if(vp?.bins?.length){
-   const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
-   const visible=bins.filter(b=>Number(b.price)>=lo&&Number(b.price)<=hi);
-   const maxPV=Math.max(1,...visible.map(b=>Number(b.volume)||0));
-   const xRight=W-pad.r-12,xLeft=candleRight+18;
-
+ // -------------------- Per-session SVP --------------------
+ if(previewVPMode==="auto"){
    ctx.save();
-   ctx.fillStyle="rgba(7,16,24,.52)";ctx.fillRect(xLeft-10,pad.t,(xRight-xLeft)+20,priceBottom-pad.t);
+   const isWeekly=previewTimeframe==="1w";
 
-   if(Number.isFinite(Number(vp.vah))&&Number.isFinite(Number(vp.val))){
-     const y1=Y(Number(vp.vah)),y2=Y(Number(vp.val));
-     ctx.fillStyle="rgba(59,130,246,.07)";
-     ctx.fillRect(xLeft-8,Math.min(y1,y2),profileW+12,Math.max(1,Math.abs(y2-y1)));
+   if(isWeekly){
+     rows.forEach((r,i)=>{
+       const vp=weekMap.get(weekKey(r));
+       if(!vp?.bins?.length)return;
+       const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
+       const maxV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
+       const center=X(i),left=center-spacing*.40,right=center+spacing*.40;
+       bins.forEach(b=>{
+         const p=Number(b.price);if(p<lo||p>hi)return;
+         const w=(Number(b.volume)||0)/maxV*(right-left);
+         const rowPx=Math.max(1.6,Number(vp.row_size||.01)*(priceBottom-pad.t)/(hi-lo));
+         const inVA=p>=Number(vp.val)&&p<=Number(vp.vah);
+         const isPoc=Math.abs(p-Number(vp.poc))<=Number(vp.row_size||.01);
+         ctx.fillStyle=isPoc?"rgba(245,158,11,.88)":inVA?"rgba(64,126,219,.48)":"rgba(69,93,119,.27)";
+         ctx.fillRect(right-w,Y(p)-rowPx/2,w,rowPx);
+       });
+     });
+   } else {
+     // Find contiguous blocks belonging to each RTH session. Daily has one
+     // candle per block; 1H/4H have several candles per block.
+     let i=0;
+     while(i<rows.length){
+       const key=rowDateKey(rows[i]);
+       let j=i;
+       while(j+1<rows.length && rowDateKey(rows[j+1])===key)j++;
+       const vp=sessionMap.get(key);
+       if(vp?.bins?.length){
+         const bins=vp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
+         const maxV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
+         const blockLeft=X(i)-spacing*.42;
+         const blockRight=X(j)+spacing*.42;
+
+         // Daily: keep the profile beside the candle. Intraday: use the right
+         // half of that session's block so the session auction remains visible.
+         const profLeft=previewTimeframe==="1d"
+           ? X(i)+Math.min(5,spacing*.10)
+           : blockLeft+(blockRight-blockLeft)*.52;
+         const profRight=blockRight;
+
+         bins.forEach(b=>{
+           const p=Number(b.price);if(p<lo||p>hi)return;
+           const w=(Number(b.volume)||0)/maxV*Math.max(4,profRight-profLeft);
+           const rowPx=Math.max(1.8,Number(vp.row_size||.01)*(priceBottom-pad.t)/(hi-lo));
+           const inVA=p>=Number(vp.val)&&p<=Number(vp.vah);
+           const isPoc=Math.abs(p-Number(vp.poc))<=Number(vp.row_size||.01);
+           ctx.fillStyle=isPoc?"rgba(245,158,11,.86)":inVA?"rgba(65,132,231,.46)":"rgba(67,94,123,.25)";
+           ctx.fillRect(profRight-w,Y(p)-rowPx/2,w,rowPx);
+         });
+
+         // Tiny POC mark for each completed session.
+         const poc=Number(vp.poc);
+         if(Number.isFinite(poc)&&poc>=lo&&poc<=hi){
+           ctx.strokeStyle="rgba(245,158,11,.55)";ctx.lineWidth=1;
+           ctx.beginPath();ctx.moveTo(profLeft,Y(poc));ctx.lineTo(profRight,Y(poc));ctx.stroke();
+         }
+       }
+       i=j+1;
+     }
    }
-
-   const rowPx=Math.max(.0001,(Number(vp.row_size)||.01)*(priceBottom-pad.t)/(hi-lo));
-   const groupSize=Math.max(1,Math.ceil(2.2/rowPx));
-   for(let i=0;i<visible.length;i+=groupSize){
-     const group=visible.slice(i,i+groupSize);
-     const vol=group.reduce((s,b)=>s+Number(b.volume||0),0);
-     const pLow=Math.min(...group.map(b=>Number(b.price)));
-     const pHigh=Math.max(...group.map(b=>Number(b.price)));
-     const pMid=(pLow+pHigh)/2,py=Y(pMid);
-     const w=Math.pow(vol/maxPV,.72)*Math.max(24,(xRight-xLeft-8));
-     const bh=Math.max(3.5,Math.abs(Y(pLow)-Y(pHigh))+1.8);
-     const inVA=pMid>=Number(vp.val)&&pMid<=Number(vp.vah);
-     const pocHit=Number(vp.poc)>=pLow&&Number(vp.poc)<=pHigh;
-     ctx.fillStyle=pocHit?"rgba(245,158,11,.96)":inVA?"rgba(68,132,232,.82)":"rgba(72,103,138,.56)";
-     ctx.fillRect(xRight-w,py-bh/2,w,bh);
-   }
-
-   function rail(value,color,label,dash=[],extend=false){
-     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
-     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.35;
-     ctx.beginPath();ctx.moveTo(extend?pad.l:xLeft-8,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
-     const txt=`${label} ${n.toFixed(2)}`;ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
-     const tw=ctx.measureText(txt).width+10,by=Math.max(pad.t+2,Math.min(priceBottom-15,y-8));
-     ctx.fillStyle="rgba(7,16,24,.95)";ctx.fillRect(xRight-tw,by,tw,14);
-     ctx.fillStyle=color;ctx.textAlign="right";ctx.fillText(txt,xRight-4,by+10);
-   }
-   rail(vp.vah,"#a78bfa","VAH",[5,4],false);
-   rail(vp.poc,"#f59e0b","POC",[],true);
-   rail(vp.val,"#60a5fa","VAL",[5,4],false);
-
-   const vpTitle=previewVPMode==="previous"?"PREV SESSION VP":
-     (previewVPMode==="auto"&&previewTimeframe==="1w"?"PREV WEEK VP":
-      previewVPMode==="auto"&&previewTimeframe==="1d"?"PREV SESSION VP":"SESSION VP");
-   ctx.fillStyle="#a7b7c7";ctx.textAlign="left";ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
-   ctx.fillText(vpTitle,xLeft,pad.t+12);
-   ctx.fillStyle="#6f8295";ctx.font="8px ui-monospace, SFMono-Regular, Menlo, monospace";
-   ctx.fillText(`${vp.row_count||200} rows · ${vp.value_area_pct||68}% VA`,xLeft,pad.t+24);
    ctx.restore();
  }
 
- const firstPx=Number(rows[0].close),chg=(lastPx/firstPx-1)*100;
- if(Number.isFinite(lastPx)&&lastPx>=lo&&lastPx<=hi){
+ // -------------------- Candles + volume --------------------
+ const maxVol=Math.max(1,...rows.map(r=>Number(r.volume||0)));
+ const bw=Math.max(2,Math.min(13,spacing*.40));
+ rows.forEach((r,i)=>{
+   const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o;
+   const bull="#18c98b",bear="#f04b4b";
+   ctx.strokeStyle=up?bull:bear;ctx.fillStyle=up?bull:bear;ctx.lineWidth=1.15;
+   if(r.high!=null&&r.low!=null){
+     ctx.beginPath();ctx.moveTo(x,Y(Number(r.high)));ctx.lineTo(x,Y(Number(r.low)));ctx.stroke();
+   }
+   const yo=Y(o),yc=Y(cl),top=Math.min(yo,yc),h=Math.max(2,Math.abs(yc-yo));
+   ctx.fillRect(x-bw/2,top,bw,h);
+   const vh=Number(r.volume||0)/maxVol*volH;
+   ctx.globalAlpha=.50;ctx.fillRect(x-bw/2,H-pad.b-vh,bw,vh);ctx.globalAlpha=1;
+ });
+ ctx.strokeStyle="#1a2935";ctx.beginPath();ctx.moveTo(pad.l,H-pad.b-volH-volGap/2);ctx.lineTo(W-pad.r,H-pad.b-volH-volGap/2);ctx.stroke();
+
+ // -------------------- Single current/previous-session mode --------------------
+ if(singleVp?.bins?.length && previewVPMode!=="auto"){
+   const bins=singleVp.bins.filter(b=>Number.isFinite(Number(b.price))&&Number.isFinite(Number(b.volume)));
+   const maxV=Math.max(1,...bins.map(b=>Number(b.volume)||0));
+   const xRight=W-pad.r-4,xLeft=xRight-Math.round(W*.28);
+   ctx.save();
+   ctx.fillStyle="rgba(7,16,24,.52)";ctx.fillRect(xLeft-8,pad.t,xRight-xLeft+12,priceBottom-pad.t);
+   bins.forEach(b=>{
+     const p=Number(b.price);if(p<lo||p>hi)return;
+     const w=(Number(b.volume)||0)/maxV*(xRight-xLeft-8);
+     const rowPx=Math.max(2.2,Number(singleVp.row_size||.01)*(priceBottom-pad.t)/(hi-lo));
+     const inVA=p>=Number(singleVp.val)&&p<=Number(singleVp.vah);
+     const isPoc=Math.abs(p-Number(singleVp.poc))<=Number(singleVp.row_size||.01);
+     ctx.fillStyle=isPoc?"rgba(245,158,11,.92)":inVA?"rgba(68,132,232,.68)":"rgba(60,90,124,.42)";
+     ctx.fillRect(xRight-w,Y(p)-rowPx/2,w,rowPx);
+   });
+   function rail(value,color,label,dash=[],extend=false){
+     const n=Number(value);if(!Number.isFinite(n)||n<lo||n>hi)return;
+     const y=Y(n);ctx.setLineDash(dash);ctx.strokeStyle=color;ctx.lineWidth=1.3;
+     ctx.beginPath();ctx.moveTo(extend?pad.l:xLeft,y);ctx.lineTo(xRight,y);ctx.stroke();ctx.setLineDash([]);
+     ctx.fillStyle=color;ctx.textAlign="right";ctx.font="bold 9px ui-monospace, SFMono-Regular, Menlo, monospace";
+     ctx.fillText(`${label} ${n.toFixed(2)}`,xRight-4,y-3);
+   }
+   rail(singleVp.vah,"#a78bfa","VAH",[5,4],false);
+   rail(singleVp.poc,"#f59e0b","POC",[],true);
+   rail(singleVp.val,"#60a5fa","VAL",[5,4],false);
+   ctx.restore();
+ }
+
+ // Latest profile values used by header badges when Per Session is active.
+ let activeLatest=null;
+ if(previewVPMode==="auto"){
+   if(previewTimeframe==="1w"){
+     const last=rows[rows.length-1];activeLatest=weekMap.get(weekKey(last))||null;
+   }else{
+     for(let i=rows.length-1;i>=0&&!activeLatest;i--)activeLatest=sessionMap.get(rowDateKey(rows[i]))||null;
+   }
+ }
+
+ // Current price badge.
+ const lastPx=Number(rows[rows.length-1].close),firstPx=Number(rows[0].close),chg=(lastPx/firstPx-1)*100;
+ if(Number.isFinite(lastPx)){
    const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
    const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12,bx=W-pad.r-tw,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));
    ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";
@@ -4777,6 +4925,9 @@ function drawPricePreview(payload){
  }
  ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";
  ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-16);
+
+ // Expose the last visible per-session profile for the top badges/stats.
+ payload._activeSessionProfile=activeLatest||singleVp||null;
 }
 
 
@@ -4788,17 +4939,22 @@ function updatePreviewVPStatus(){
  document.getElementById(previewTimeframe==="1h"?"tf1H":previewTimeframe==="4h"?"tf4H":previewTimeframe==="1w"?"tf1W":"tf1D")?.classList.add("active");
 
  if(previewVPMode==="off"){el.textContent="Volume Profile: Off";return;}
+
+ if(previewVPMode==="auto"){
+   const v=previewPayload?.visible_profiles||{};
+   const count=previewTimeframe==="1w"?(v.weeks||[]).length:(v.sessions||[]).length;
+   const src=v.source||"lower timeframe";
+   el.textContent=`Per-session SVP · ${count} ${previewTimeframe==="1w"?"weekly":"RTH session"} profiles · ${src} source · 68% value area`;
+   return;
+ }
+
  const p=previewPayload?.volume_profiles||{};
- let vp=null,label="";
- if(previewVPMode==="session"){vp=p.session;label="Session";}
- else if(previewVPMode==="previous"){vp=p.previous;label="Previous Session";}
- else if(previewTimeframe==="1w"){vp=p.previous_week;label="Auto · Previous Week";}
- else if(previewTimeframe==="1d"){vp=p.previous;label="Auto · Previous Session";}
- else {vp=p.session;label="Auto · Current Session";}
+ const vp=previewVPMode==="session"?p.session:p.previous;
+ const label=previewVPMode==="session"?"Session":"Previous Session";
  if(vp){
-   el.textContent=`${label} · POC $${Number(vp.poc).toFixed(2)} · VAH $${Number(vp.vah).toFixed(2)} · VAL $${Number(vp.val).toFixed(2)} · ${vp.source||"Alpaca 1Min"}`;
+   el.textContent=`${label} · POC $${Number(vp.poc).toFixed(2)} · VAH $${Number(vp.vah).toFixed(2)} · VAL $${Number(vp.val).toFixed(2)} · ${vp.source||"Alpaca"}`;
  }else{
-   el.textContent=`${label} unavailable${p.error?` · ${p.error}`:""}`;
+   el.textContent=`${label} VP unavailable${p.error?` · ${p.error}`:""}`;
  }
 }
 function setPreviewVPMode(mode){
@@ -4839,10 +4995,9 @@ async function loadChartPreview(ticker,period=previewPeriod){
    if(st)st.textContent=`${previewTimeframe.toUpperCase()} · ${period.toUpperCase()} · ${bars.length} bars`;
    updatePreviewVPStatus();
    const p=j.volume_profiles||{};
-   let activeVp=null;
+   let activeVp=j._activeSessionProfile||null;
    if(previewVPMode==="session")activeVp=p.session;
    else if(previewVPMode==="previous")activeVp=p.previous;
-   else if(previewVPMode==="auto")activeVp=previewTimeframe==="1w"?p.previous_week:previewTimeframe==="1d"?p.previous:p.session;
 
    const topVah=document.getElementById("vpVahTop"),topPoc=document.getElementById("vpPocTop"),topVal=document.getElementById("vpValTop");
    if(topVah)topVah.textContent=activeVp?`$${Number(activeVp.vah).toFixed(2)}`:"—";
