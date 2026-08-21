@@ -3029,7 +3029,14 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
 .pageIntro{display:none}
 .panel{background:linear-gradient(180deg,rgba(16,24,33,.98),rgba(12,18,25,.98));border-color:#213043;box-shadow:0 8px 24px rgba(0,0,0,.12)}
 .dashboardGrid{display:grid;grid-template-columns:minmax(260px,.78fr) minmax(560px,1.75fr) minmax(250px,.72fr);gap:12px;align-items:start}
-.dashCol{min-width:0}.topSetupsPanel{margin-bottom:12px;border:1px solid #29415a}.topSetupsGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.topSetupCard{border:1px solid #26384a;border-radius:9px;padding:10px;background:#0a121a;cursor:pointer}.topSetupCard.aPlus{border-color:#2d7b59;background:linear-gradient(145deg,rgba(20,76,56,.22),#0a121a 55%)}.topSetupHead{display:flex;justify-content:space-between}.topSetupTicker{font-size:17px;font-weight:900}.topSetupScore{font-size:15px;font-weight:900;color:#75e7ad}.topSetupStatus{font-size:8px;font-weight:900;color:#f7c65d}.topSetupReasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}.topSetupReasons span{font-size:8px;border:1px solid #26384a;border-radius:999px;padding:3px 5px}.topSetupReasons .good{border-color:#25694c;color:#71dfaa}.topSetupReasons .warn{border-color:#805d25;color:#f4c363}.topSetupTrigger{margin-top:8px;padding-top:7px;border-top:1px solid #1c2b37;font-size:9px}.topSetupsEmpty{grid-column:1/-1;padding:13px;border:1px dashed #2b3b4b;border-radius:8px;color:#8092a4;font-size:10px}@media(max-width:900px){.topSetupsGrid{grid-template-columns:1fr}}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
+.dashCol{min-width:0}.topSetupsPanel{margin-bottom:12px;border:1px solid #29415a}.topSetupsGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.topSetupCard{border:1px solid #26384a;border-radius:9px;padding:10px;background:#0a121a;cursor:pointer}.topSetupCard.aPlus{border-color:#2d7b59;background:linear-gradient(145deg,rgba(20,76,56,.22),#0a121a 55%)}.topSetupHead{display:flex;justify-content:space-between}.topSetupTicker{font-size:17px;font-weight:900}.topSetupScore{font-size:15px;font-weight:900;color:#75e7ad}.topSetupStatus{font-size:8px;font-weight:900;color:#f7c65d}.topSetupReasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}.topSetupReasons span{font-size:8px;border:1px solid #26384a;border-radius:999px;padding:3px 5px}.topSetupReasons .good{border-color:#25694c;color:#71dfaa}.topSetupReasons .warn{border-color:#805d25;color:#f4c363}.topSetupTrigger{margin-top:8px;padding-top:7px;border-top:1px solid #1c2b37;font-size:9px}
+.topSetupActions{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.topSetupAction{border:1px solid #2a4054;background:#0c1721;color:#cbd8e5;border-radius:6px;padding:5px 8px;font-size:8px;font-weight:800;cursor:pointer}
+.topSetupAction:hover{border-color:#4e7da3;color:#fff;background:#102131}
+.topSetupAction.primaryDive{border-color:#2d7b59;color:#79e4ad;background:#0d2119}
+.topSetupAction.gexDive{border-color:#65458e;color:#c6a8ff;background:#181022}
+.topSetupAction.optionsDive{border-color:#315c87;color:#83c5ff;background:#0d1926}
+.topSetupsEmpty{grid-column:1/-1;padding:13px;border:1px dashed #2b3b4b;border-radius:8px;color:#8092a4;font-size:10px}@media(max-width:900px){.topSetupsGrid{grid-template-columns:1fr}}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
 .marketOverviewGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid #1b2a38;border-radius:9px;overflow:hidden}.marketQuote{padding:10px 8px;border-right:1px solid #1b2a38;background:#0b1219}.marketQuote:last-child{border-right:0}.marketQuote .sym{font-size:11px;color:#c9d3df}.marketQuote .px{font-size:17px;font-weight:750;margin-top:3px}.marketQuote .chg{font-size:11px;margin-top:2px}
 .dashHeatGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}.dashHeatTile{min-height:90px;border-radius:7px;padding:8px;border:1px solid #263548;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;transition:.15s}.dashHeatTile:hover{transform:translateY(-1px);filter:brightness(1.08)}.dashHeatTile.selected{outline:2px solid #60a5fa}.dashHeatTile.h0,.dashHeatTile.h1{background:linear-gradient(145deg,#5b171a,#b3262c)}.dashHeatTile.h2,.dashHeatTile.h3{background:linear-gradient(145deg,#3f1b1f,#71252a)}.dashHeatTile.h4,.dashHeatTile.h5{background:linear-gradient(145deg,#1a242f,#253444)}.dashHeatTile.h6,.dashHeatTile.h7{background:linear-gradient(145deg,#153029,#1d4d3c)}.dashHeatTile.h8,.dashHeatTile.h9,.dashHeatTile.h10{background:linear-gradient(145deg,#114029,#18733d)}
 .dashHeatTile .sym{font-weight:850;font-size:13px}.dashHeatTile .score{font-size:19px;font-weight:850}.dashHeatTile .state{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#d8e1ea}.miniSpark{height:17px;width:100%;opacity:.75}
@@ -3096,7 +3103,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.28 candlestick proportion fix */
+/* v22.29 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3109,7 +3116,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.28 layout + STRAT confluence */
+/* v22.29 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3152,7 +3159,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.28 sector-summary containment */
+/* v22.29 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3175,7 +3182,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.28 session volume profile */
+/* v22.29 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3191,7 +3198,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.28</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.29</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3226,7 +3233,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 <div id="rotation" class="view active">
   <div class="panel topSetupsPanel">
-    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Automatic market-wide scan · max 2 · no forced picks</span></div><div style="display:flex;align-items:center;gap:8px"><button class="secondary" style="padding:5px 8px;font-size:9px" onclick="runAutomaticTopSetups(true)">↻ Scan all</button><span id="topSetupsStatus" class="note">Waiting for market data</span></div></div>
+    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Automatic market-wide scan · click a setup to dive deeper</span></div><div style="display:flex;align-items:center;gap:8px"><button class="secondary" style="padding:5px 8px;font-size:9px" onclick="runAutomaticTopSetups(true)">↻ Scan all</button><span id="topSetupsStatus" class="note">Waiting for market data</span></div></div>
     <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Automatic scan starts after market data loads.</div></div>
   </div>
   <div class="dashboardGrid">
@@ -5425,6 +5432,43 @@ async function runAutomaticTopSetups(force=false){
  }
 }
 
+async function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
+ const t=String(ticker||"").toUpperCase();if(!t)return;
+ const status=document.getElementById("topSetupsStatus");
+ if(status)status.textContent=`Opening ${t} deep dive…`;
+
+ // Bring the parent group into the stock screen so the ticker's RRG context
+ // is available without requiring the user to manually select the sector/theme.
+ if(parentTicker){
+   try{
+     currentSector=String(parentTicker).toUpperCase();
+     updateSelectedSectorCard(currentSector);
+     const sel=document.getElementById("coreSectorSelect");
+     if(sel&&[...sel.options].some(o=>o.value===currentSector))sel.value=currentSector;
+     await loadSector(false,false);
+   }catch(e){console.warn("Parent context load failed",e)}
+ }
+
+ activateViewById("rotation");
+ await loadChartPreview(t);
+ loadStrat(t);
+ if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});
+
+ if(target==="gex"){
+   const inp=document.getElementById("gexTickerInput");if(inp)inp.value=t;
+   activateViewById("gexpage");
+   mountGexPage();
+   setTimeout(()=>document.getElementById("positioningSection")?.scrollIntoView({behavior:"smooth",block:"start"}),80);
+ }else if(target==="options"){
+   activateViewById("rotation");
+   setTimeout(()=>document.getElementById("optionsPanel")?.scrollIntoView({behavior:"smooth",block:"start"}),80);
+ }else{
+   activateViewById("rotation");
+   setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);
+ }
+ if(status)status.textContent=`${t} loaded · chart + STRAT + options ready`;
+}
+
 function renderTopSetups(){
  const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
  const source=(globalTopSetupData&&globalTopSetupData.length)?globalTopSetupData:[];
@@ -5434,8 +5478,19 @@ function renderTopSetups(){
    const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. The scanner will not force a pick.";
    g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>`;return
  }
- g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div></div>`}).join("");
- document.querySelectorAll("[data-top-setup]").forEach(el=>el.onclick=async()=>{const x=el.dataset.topSetup;await loadChartPreview(x);loadStrat(x);if(alpacaConfigured!==false)await loadOptionsTicker(x,{scroll:false});document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"})});
+ g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div>
+<div class="topSetupActions">
+  <button class="topSetupAction primaryDive" data-top-open="${x.ticker}" data-parent="${x._parentTicker||""}">Open setup</button>
+  <button class="topSetupAction gexDive" data-top-gex="${x.ticker}" data-parent="${x._parentTicker||""}">GEX</button>
+  <button class="topSetupAction optionsDive" data-top-options="${x.ticker}" data-parent="${x._parentTicker||""}">Options</button>
+</div></div>`}).join("");
+ document.querySelectorAll("[data-top-setup]").forEach(el=>el.onclick=async evt=>{
+   if(evt.target.closest(".topSetupAction"))return;
+   await openTopSetupDeepDive(el.dataset.topSetup,el.querySelector("[data-parent]")?.dataset.parent||null,"chart");
+ });
+ document.querySelectorAll("[data-top-open]").forEach(btn=>btn.onclick=async evt=>{evt.stopPropagation();await openTopSetupDeepDive(btn.dataset.topOpen,btn.dataset.parent||null,"chart")});
+ document.querySelectorAll("[data-top-gex]").forEach(btn=>btn.onclick=async evt=>{evt.stopPropagation();await openTopSetupDeepDive(btn.dataset.topGex,btn.dataset.parent||null,"gex")});
+ document.querySelectorAll("[data-top-options]").forEach(btn=>btn.onclick=async evt=>{evt.stopPropagation();await openTopSetupDeepDive(btn.dataset.topOptions,btn.dataset.parent||null,"options")});
 }
 function opportunityScore(x){
  let score=0;
