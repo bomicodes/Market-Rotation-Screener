@@ -3103,7 +3103,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.29 candlestick proportion fix */
+/* v22.30 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3116,7 +3116,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.29 layout + STRAT confluence */
+/* v22.30 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3159,7 +3159,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.29 sector-summary containment */
+/* v22.30 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3182,7 +3182,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.29 session volume profile */
+/* v22.30 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3193,12 +3193,12 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="tab active" data-view="rotation"><span class="navIcon">▦</span><span>Dashboard</span></button>
     <button class="tab" data-view="history"><span class="navIcon">⌁</span><span>RRG Historical</span></button>
     <button class="tab" data-view="gexpage" id="navGex"><span class="navIcon">⌗</span><span>GEX Landscape</span></button>
-    <button class="tab" data-view="earnings"><span class="navIcon">◫</span><span>Earnings Movers</span></button>
+    <button class="tab" data-view="earnings" id="navEarnings"><span class="navIcon">◫</span><span>Earnings Movers</span></button>
     <button class="navJump" id="navOptions"><span class="navIcon">▤</span><span>Options Scanner</span></button>
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.29</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.30</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3378,7 +3378,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         <div class="vpLevelItem"><span class="vpSwatch poc"></span><span>POC</span><strong id="vpPocTop">—</strong></div>
         <div class="vpLevelItem"><span class="vpSwatch val"></span><span>VAL</span><strong id="vpValTop">—</strong></div>
       </div>
-      <div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1180" height="680"></canvas></div>
+      <div id="stockDeepDiveAnchor"></div><div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1180" height="680"></canvas></div>
       <div class="chartStatsStrip">
         <div><span>PROFILE RANGE</span><strong id="statSessionRange">—</strong><small id="statSessionRangePct">—</small></div>
         <div><span>VISIBLE RANGE</span><strong id="statVisibleRange">—</strong><small id="statVisibleRangePct">—</small></div>
@@ -5433,40 +5433,62 @@ async function runAutomaticTopSetups(force=false){
 }
 
 async function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
- const t=String(ticker||"").toUpperCase();if(!t)return;
+ const sym=String(ticker||"").trim().toUpperCase();if(!sym)return;
  const status=document.getElementById("topSetupsStatus");
- if(status)status.textContent=`Opening ${t} deep dive…`;
+ if(status)status.textContent=`Opening ${sym}…`;
 
- // Bring the parent group into the stock screen so the ticker's RRG context
- // is available without requiring the user to manually select the sector/theme.
- if(parentTicker){
-   try{
-     currentSector=String(parentTicker).toUpperCase();
-     updateSelectedSectorCard(currentSector);
-     const sel=document.getElementById("coreSectorSelect");
-     if(sel&&[...sel.options].some(o=>o.value===currentSector))sel.value=currentSector;
-     await loadSector(false,false);
-   }catch(e){console.warn("Parent context load failed",e)}
- }
-
- activateViewById("rotation");
- await loadChartPreview(t);
- loadStrat(t);
- if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});
-
+ // Navigate FIRST. Do not make page navigation depend on any network request.
  if(target==="gex"){
-   const inp=document.getElementById("gexTickerInput");if(inp)inp.value=t;
+   const inp=document.getElementById("gexTickerInput");if(inp)inp.value=sym;
    activateViewById("gexpage");
    mountGexPage();
-   setTimeout(()=>document.getElementById("positioningSection")?.scrollIntoView({behavior:"smooth",block:"start"}),80);
- }else if(target==="options"){
-   activateViewById("rotation");
-   setTimeout(()=>document.getElementById("optionsPanel")?.scrollIntoView({behavior:"smooth",block:"start"}),80);
+   window.scrollTo({top:0,behavior:"smooth"});
  }else{
    activateViewById("rotation");
-   setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);
+   const targetEl=target==="options"
+      ?document.getElementById("optionsPanel")
+      :(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"));
+   setTimeout(()=>targetEl?.scrollIntoView({behavior:"smooth",block:"start"}),30);
  }
- if(status)status.textContent=`${t} loaded · chart + STRAT + options ready`;
+
+ // Parent RRG context loads in the background and is allowed to fail without
+ // preventing the stock itself from opening.
+ if(parentTicker){
+   const parent=String(parentTicker).trim().toUpperCase();
+   if(parent){
+     (async()=>{
+       try{
+         currentSector=parent;
+         updateSelectedSectorCard(parent);
+         const sel=document.getElementById("coreSectorSelect");
+         if(sel&&[...sel.options].some(o=>o.value===parent))sel.value=parent;
+         await loadSector(false,false);
+       }catch(e){console.warn("Parent context load failed",e)}
+     })();
+   }
+ }
+
+ // Resolve the actual stock modules independently. One failed endpoint should
+ // never block the other modules or the navigation.
+ const jobs=[
+   loadChartPreview(sym).catch(e=>console.warn(`${sym} chart failed`,e)),
+   Promise.resolve(loadStrat(sym)).catch(e=>console.warn(`${sym} STRAT failed`,e))
+ ];
+ if(alpacaConfigured!==false){
+   jobs.push(loadOptionsTicker(sym,{scroll:false}).catch(e=>console.warn(`${sym} options failed`,e)));
+ }
+ await Promise.allSettled(jobs);
+
+ if(target==="gex"){
+   const inp=document.getElementById("gexTickerInput");if(inp)inp.value=sym;
+   mountGexPage();
+   setTimeout(()=>document.getElementById("positioningSection")?.scrollIntoView({behavior:"smooth",block:"start"}),60);
+ }else if(target==="options"){
+   setTimeout(()=>document.getElementById("optionsPanel")?.scrollIntoView({behavior:"smooth",block:"start"}),60);
+ }else{
+   setTimeout(()=>(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"))?.scrollIntoView({behavior:"smooth",block:"start"}),60);
+ }
+ if(status)status.textContent=`${sym} deep dive loaded`;
 }
 
 function renderTopSetups(){
@@ -5484,13 +5506,7 @@ function renderTopSetups(){
   <button class="topSetupAction gexDive" data-top-gex="${x.ticker}" data-parent="${x._parentTicker||""}">GEX</button>
   <button class="topSetupAction optionsDive" data-top-options="${x.ticker}" data-parent="${x._parentTicker||""}">Options</button>
 </div></div>`}).join("");
- document.querySelectorAll("[data-top-setup]").forEach(el=>el.onclick=async evt=>{
-   if(evt.target.closest(".topSetupAction"))return;
-   await openTopSetupDeepDive(el.dataset.topSetup,el.querySelector("[data-parent]")?.dataset.parent||null,"chart");
- });
- document.querySelectorAll("[data-top-open]").forEach(btn=>btn.onclick=async evt=>{evt.stopPropagation();await openTopSetupDeepDive(btn.dataset.topOpen,btn.dataset.parent||null,"chart")});
- document.querySelectorAll("[data-top-gex]").forEach(btn=>btn.onclick=async evt=>{evt.stopPropagation();await openTopSetupDeepDive(btn.dataset.topGex,btn.dataset.parent||null,"gex")});
- document.querySelectorAll("[data-top-options]").forEach(btn=>btn.onclick=async evt=>{evt.stopPropagation();await openTopSetupDeepDive(btn.dataset.topOptions,btn.dataset.parent||null,"options")});
+
 }
 function opportunityScore(x){
  let score=0;
@@ -5834,15 +5850,39 @@ function jumpToRotationTarget(id){
   setTimeout(()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"}),70);
 }
 document.getElementById("navOptions")?.addEventListener("click",()=>jumpToRotationTarget("optionsPanel"));
-document.getElementById("navWatch")?.addEventListener("click",()=>jumpToRotationTarget("watchlistPanel"));
+document.getElementById("topSetupsGrid")?.addEventListener("click",async evt=>{
+ const button=evt.target.closest(".topSetupAction");
+ const card=evt.target.closest("[data-top-setup]");
+ if(!button&&!card)return;
+ evt.preventDefault();evt.stopPropagation();
+ const ticker=button?.dataset.topOpen||button?.dataset.topGex||button?.dataset.topOptions||card?.dataset.topSetup;
+ const parent=button?.dataset.parent||card?.querySelector("[data-parent]")?.dataset.parent||null;
+ const target=button?.dataset.topGex?"gex":button?.dataset.topOptions?"options":"chart";
+ await openTopSetupDeepDive(ticker,parent,target);
+});
 
-document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",()=>{
- document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));
- document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));
- b.classList.add("active");
- const target=document.getElementById(b.dataset.view);if(target)target.classList.add("active");
- if(b.dataset.view==="heatmap")renderHeatMap();
- if(b.dataset.view==="gexpage")mountGexPage(); else restoreGexSection();
+document.getElementById("navWatch")?.addEventListener("click",()=>jumpToRotationTarget("watchlistPanel"));
+let earningsAutoOpened=false;
+document.getElementById("navEarnings")?.addEventListener("click",async evt=>{
+ evt.preventDefault();
+ activateViewById("earnings");
+ window.scrollTo({top:0,behavior:"smooth"});
+ const rows=document.getElementById("earnRows");
+ if(!earningsAutoOpened && (!rows||!rows.children.length)){
+   earningsAutoOpened=true;
+   try{await runEarnings()}catch(e){
+     const st=document.getElementById("estatus");
+     if(st)st.innerHTML=`<span class="error">${e.message||e}</span>`;
+   }
+ }
+});
+
+
+document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",evt=>{
+ if(b.id==="navEarnings")return; // explicit handler above owns Earnings navigation
+ evt.preventDefault();
+ activateViewById(b.dataset.view);
+ window.scrollTo({top:0,behavior:"smooth"});
 }));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("macroBasketFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
  if(e.target.value)selectSector(e.target.value,{source:"dropdown"});
