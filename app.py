@@ -3103,7 +3103,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.32 candlestick proportion fix */
+/* v22.33 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3116,7 +3116,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.32 layout + STRAT confluence */
+/* v22.33 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3159,7 +3159,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.32 sector-summary containment */
+/* v22.33 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3182,7 +3182,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.32 session volume profile */
+/* v22.33 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3198,7 +3198,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.32</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.33</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3621,9 +3621,11 @@ function isSafeStockTicker(raw){
  return /^[A-Z0-9.^-]{1,20}$/.test(t);
 }
 function safeTickerEndpoint(path,ticker,query=""){
- const t=normalizeStockTicker(ticker);
- if(!isSafeStockTicker(t))throw new Error(`Invalid ticker symbol: ${t||ticker}`);
- return `${path}/${encodeURIComponent(t)}${query}`;
+ const sym=normalizeStockTicker(ticker);
+ if(!isSafeStockTicker(sym))throw new Error(`Invalid ticker symbol: ${sym||ticker}`);
+ const base=String(window.location.origin||"").replace(/\/+$/,"");
+ const p=String(path||"").startsWith("/")?String(path):`/${String(path||"")}`;
+ return `${base}${p}/${encodeURIComponent(sym)}${query||""}`;
 }
 async function openSectorStockTicker(rawTicker,{scroll=true}={}){
  const ticker=normalizeStockTicker(rawTicker);
@@ -3636,6 +3638,11 @@ async function openSectorStockTicker(rawTicker,{scroll=true}={}){
    // Update selection first so the UI responds immediately.
    toggleRRGFocus("stockChart",ticker);
    syncLiveRowSelection();
+   if(activeOptionsData?.ticker && activeOptionsData.ticker!==ticker){
+     activeOptionsData=null;
+     const ost=document.getElementById("optionsStatus");
+     if(ost)ost.textContent=`Loading ${ticker} options…`;
+   }
 
    // Load each data module independently so one failure cannot block the others.
    const tasks=[
@@ -3736,6 +3743,7 @@ function renderLiveWatchlist(){
      if(evt.target.closest("[data-live-watch-remove]"))return;
      const t=row.dataset.watchOpen;if(!t)return;
      loadChartPreview(t);
+     loadStrat(t);
      if(alpacaConfigured!==false)loadOptionsTicker(t,{scroll:false});
    }));
    document.querySelectorAll("[data-live-watch-remove]").forEach(btn=>btn.addEventListener("click",()=>{
@@ -4737,7 +4745,7 @@ async function loadOptionsTicker(ticker,opts={}){
  }
  st.textContent=`Loading ${ticker} options…`;
  try{
-   const r=await fetch(safeTickerEndpoint("/api/options",ticker)),j=await r.json();
+   const r=await fetch(safeTickerEndpoint("/api/options",ticker),{headers:{"Accept":"application/json"}}),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
@@ -4758,7 +4766,7 @@ async function loadOptionsTicker(ticker,opts={}){
      renderLiveWatchlist();
    }
    renderOptionsPanel();renderLiveStocks();loadFlowTicker(ticker,false);
- }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
+ }catch(e){console.error("Options request failed",ticker,e);st.innerHTML=`<span class="error">${ticker} options: ${e?.message||e}</span>`}
 }
 async function scanVisibleOptions(){
  focusOptionsPanel();
@@ -4908,13 +4916,13 @@ async function loadStrat(ticker){
  if(box)box.innerHTML="";
  if(cont){cont.className="stratContinuity";cont.textContent="…";}
  try{
-   const r=await fetch(safeTickerEndpoint("/api/strat",ticker)),j=await r.json();
+   const r=await fetch(safeTickerEndpoint("/api/strat",ticker),{headers:{"Accept":"application/json"}}),j=await r.json();
    if(seq!==stratRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"STRAT load failed");
    stratSignalMap[String(ticker).toUpperCase()]=j;
    renderStrat(j);
    renderTopSetups();
- }catch(e){if(status)status.innerHTML=`<span class="error">STRAT unavailable: ${e.message}</span>`;}
+ }catch(e){console.error("STRAT request failed",ticker,e);if(status)status.innerHTML=`<span class="error">STRAT unavailable for ${ticker}: ${e?.message||e}</span>`;}
 }
 
 function drawPricePreview(payload){
@@ -5186,7 +5194,6 @@ async function loadChartPreview(ticker,period=previewPeriod){
  if(!isSafeStockTicker(ticker))return false;
  if(!ticker)return;
  previewTicker=ticker;previewPeriod=period;
- loadStrat(ticker);
  const seq=++previewRequestSeq,st=document.getElementById("previewStatus"),title=document.getElementById("previewTitle");
  if(title)title.textContent=`${ticker} · Chart Preview`;
  if(st)st.textContent=`Loading ${previewTimeframe.toUpperCase()} · ${period.toUpperCase()}…`;
@@ -5194,7 +5201,8 @@ async function loadChartPreview(ticker,period=previewPeriod){
  document.getElementById("preview3M")?.classList.toggle("active",period==="3m");
  document.getElementById("preview6M")?.classList.toggle("active",period==="6m");
  try{
-   const r=await fetch(`/api/chart-preview/${encodeURIComponent(ticker)}?period=${period}&timeframe=${previewTimeframe}`);
+   const chartUrl=safeTickerEndpoint("/api/chart-preview",ticker,`?period=${encodeURIComponent(period)}&timeframe=${encodeURIComponent(previewTimeframe)}`);
+   const r=await fetch(chartUrl,{headers:{"Accept":"application/json"}});
    const j=await r.json();
    if(seq!==previewRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
@@ -5244,7 +5252,7 @@ async function loadChartPreview(ticker,period=previewPeriod){
    }
  }catch(e){
    if(seq!==previewRequestSeq)return;
-   if(st)st.innerHTML=`<span class="error">${e.message}</span>`;
+   console.error("Chart preview request failed",ticker,e);if(st)st.innerHTML=`<span class="error">${ticker} chart: ${e?.message||e}</span>`;
    drawPricePreview({bars:[]});
  }
 }
