@@ -3096,7 +3096,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.23 candlestick proportion fix */
+/* v22.24 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3109,7 +3109,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.23 layout + STRAT confluence */
+/* v22.24 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3132,7 +3132,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.23 sector-summary containment */
+/* v22.24 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3155,7 +3155,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.23 session volume profile */
+/* v22.24 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3171,7 +3171,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.23</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.24</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3354,7 +3354,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         <div><span>PROFILE VOLUME</span><strong id="statSessionVol">—</strong><small>RTH source volume</small></div>
         <div><span>AVG VOLUME (20)</span><strong id="statAvgVol">—</strong><small id="statVsAvgVol">—</small></div>
       </div>
-      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Per-session SVP · one profile per RTH session/candle · adaptive 32–52 rows · 68% value area.</span></div>
+      <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Per-session SVP · cleaner profile separation · 68% value area · price badge moved to axis gutter.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
@@ -4831,9 +4831,11 @@ function drawPricePreview(payload){
          // Daily: keep the profile beside the candle. Intraday: use the right
          // half of that session's block so the session auction remains visible.
          const profLeft=previewTimeframe==="1d"
-           ? X(i)+Math.min(5,spacing*.10)
-           : blockLeft+(blockRight-blockLeft)*.52;
-         const profRight=blockRight;
+           ? X(i)+Math.min(3,spacing*.06)
+           : blockLeft+(blockRight-blockLeft)*.46;
+         const profRight=previewTimeframe==="1d"
+           ? X(i)+spacing*.47
+           : blockRight;
 
          bins.forEach(b=>{
            const p=Number(b.price);if(p<lo||p>hi)return;
@@ -4841,14 +4843,14 @@ function drawPricePreview(payload){
            const rowPx=Math.max(1.8,Number(vp.row_size||.01)*(priceBottom-pad.t)/(hi-lo));
            const inVA=p>=Number(vp.val)&&p<=Number(vp.vah);
            const isPoc=Math.abs(p-Number(vp.poc))<=Number(vp.row_size||.01);
-           ctx.fillStyle=isPoc?"rgba(245,158,11,.86)":inVA?"rgba(65,132,231,.46)":"rgba(67,94,123,.25)";
-           ctx.fillRect(profRight-w,Y(p)-rowPx/2,w,rowPx);
+           ctx.fillStyle=isPoc?"rgba(245,158,11,.94)":inVA?"rgba(72,139,235,.64)":"rgba(76,103,132,.34)";
+           ctx.fillRect(profRight-w,Y(p)-rowPx/2,w,Math.max(2.2,rowPx));
          });
 
          // Tiny POC mark for each completed session.
          const poc=Number(vp.poc);
          if(Number.isFinite(poc)&&poc>=lo&&poc<=hi){
-           ctx.strokeStyle="rgba(245,158,11,.55)";ctx.lineWidth=1;
+           ctx.strokeStyle="rgba(245,158,11,.78)";ctx.lineWidth=1.15;
            ctx.beginPath();ctx.moveTo(profLeft,Y(poc));ctx.lineTo(profRight,Y(poc));ctx.stroke();
          }
        }
@@ -4860,7 +4862,7 @@ function drawPricePreview(payload){
 
  // -------------------- Candles + volume --------------------
  const maxVol=Math.max(1,...rows.map(r=>Number(r.volume||0)));
- const bw=Math.max(2,Math.min(13,spacing*.40));
+ const bw=Math.max(2,Math.min(11,spacing*.34));
  rows.forEach((r,i)=>{
    const x=X(i),o=Number(r.open??r.close),cl=Number(r.close),up=cl>=o;
    const bull="#18c98b",bear="#f04b4b";
@@ -4918,10 +4920,15 @@ function drawPricePreview(payload){
  const lastPx=Number(rows[rows.length-1].close),firstPx=Number(rows[0].close),chg=(lastPx/firstPx-1)*100;
  if(Number.isFinite(lastPx)){
    const py=Y(lastPx);ctx.save();ctx.font="bold 10px ui-monospace, SFMono-Regular, Menlo, monospace";
-   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12,bx=W-pad.r-tw,by=Math.max(pad.t,Math.min(priceBottom-18,py-9));
+   const label=`$${lastPx.toFixed(2)}`,tw=ctx.measureText(label).width+12;
+   // Keep the badge in the dedicated right-axis gutter so it never covers the final candle/profile.
+   const bx=Math.min(W-tw-6, W-pad.r+10),by=Math.max(pad.t,Math.min(priceBottom-18,py-9));
    ctx.fillStyle=chg>=0?"#d9fbe8":"#ffe0e0";ctx.strokeStyle=chg>=0?"#2f9e6d":"#b94a4a";
    if(ctx.roundRect){ctx.beginPath();ctx.roundRect(bx,by,tw,18,4);ctx.fill();ctx.stroke()}else{ctx.fillRect(bx,by,tw,18);ctx.strokeRect(bx,by,tw,18)}
-   ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);ctx.restore();
+   ctx.fillStyle=chg>=0?"#0f5132":"#7f1d1d";ctx.textAlign="center";ctx.fillText(label,bx+tw/2,by+12);
+   ctx.setLineDash([3,3]);ctx.strokeStyle="rgba(226,232,240,.28)";ctx.lineWidth=1;
+   ctx.beginPath();ctx.moveTo(X(rows.length-1)+bw*.8,py);ctx.lineTo(bx-4,py);ctx.stroke();ctx.setLineDash([]);
+   ctx.restore();
  }
  ctx.font="bold 11px ui-monospace, SFMono-Regular, Menlo, monospace";ctx.fillStyle=chg>=0?"#7ee2ad":"#f38b8b";ctx.textAlign="left";
  ctx.fillText(`${lastPx.toFixed(2)}  ${chg>=0?"+":""}${chg.toFixed(2)}%`,pad.l,H-16);
