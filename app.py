@@ -3096,7 +3096,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.24 candlestick proportion fix */
+/* v22.25 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3109,7 +3109,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.24 layout + STRAT confluence */
+/* v22.25 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3126,13 +3126,33 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .stratPanel{margin:0;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,#0d1720,#091119)}
 .stratHead{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;border-bottom:1px solid #1d3040;padding-bottom:10px;margin-bottom:9px}.stratContinuity{font-size:10px;font-weight:900;border:1px solid #334155;border-radius:999px;padding:5px 8px;color:#a9b5c3;white-space:nowrap}.stratContinuity.bullish{color:#68e89a;border-color:#1b6b3e;background:#0c2618}.stratContinuity.bearish{color:#ff8181;border-color:#74313a;background:#281217}.stratContinuity.mixed{color:#f5c451;border-color:#6a5520;background:#231d0d}
 .stratFrames{display:grid;gap:8px;margin-top:9px}.stratFrame{border:1px solid #223547;background:#0a141d;border-radius:9px;padding:10px}.stratFrameTop{display:flex;align-items:center;justify-content:space-between;gap:8px}.stratTf{font-weight:900;font-size:13px}.stratScenario{font-size:11px;font-weight:900;border-radius:6px;padding:3px 7px;background:#14202b}.stratScenario.bullish{color:#57e78d;background:#0e2a1a}.stratScenario.bearish{color:#ff6c72;background:#30151a}.stratScenario.neutral{color:#b6c3d0;background:#17212b}.stratPattern{font-size:11px;color:#e0e7ef;font-weight:700;margin-top:6px}.stratTrigger{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:7px}.stratTrigger div{background:#0d1822;border-radius:6px;padding:6px;font-size:9px;color:#8fa0b3}.stratTrigger b{display:block;font-size:11px;margin-top:2px;color:#dce7f2}.stratTrigger .up b{color:#5be28e}.stratTrigger .down b{color:#ff7979}.stratFTC{font-size:9px;margin-top:6px;color:#7f90a2}.stratFoot{margin-top:auto;padding-top:10px;border-top:1px solid #1c2b39;color:#748598;line-height:1.45}
+.valueAcceptanceCard{margin:10px 0 12px;padding:11px 12px;border:1px solid #26394a;border-radius:10px;background:#0a131c;transition:.15s ease}
+.valueAcceptanceCard.bullish{border-color:#1f6f50;background:linear-gradient(135deg,rgba(20,83,60,.20),#0a131c 58%)}
+.valueAcceptanceCard.bearish{border-color:#7b3137;background:linear-gradient(135deg,rgba(111,38,45,.20),#0a131c 58%)}
+.valueAcceptanceCard.developing{border-color:#8a6420;background:linear-gradient(135deg,rgba(126,86,18,.17),#0a131c 58%)}
+.valueAcceptanceCard.warning{border-color:#8a4c28;background:linear-gradient(135deg,rgba(122,60,25,.18),#0a131c 58%)}
+.valueAcceptanceCard.neutral{border-color:#26394a}
+.valueAcceptanceTop{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.valueAcceptanceTop>div{display:flex;flex-direction:column;gap:3px}
+.vaEyebrow{font-size:8px;letter-spacing:.9px;color:#74879a;font-weight:800}
+.valueAcceptanceTop strong{font-size:12px;color:#edf4fa}
+.vaPill{padding:4px 7px;border-radius:999px;border:1px solid #33485b;font-size:8px;font-weight:900;letter-spacing:.4px;color:#9dafbf;background:#101a24;white-space:nowrap}
+.vaPill.bullish{border-color:#25835d;color:#71e6ae;background:#0b261c}
+.vaPill.bearish{border-color:#94404a;color:#ff8f98;background:#2a1115}
+.vaPill.developing{border-color:#9b7023;color:#f8c557;background:#2b210d}
+.vaPill.warning{border-color:#a65d2c;color:#ffad72;background:#2d170d}
+.vaPill.neutral{border-color:#33485b;color:#9dafbf;background:#101a24}
+.valueAcceptanceLevels{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:9px 0 7px}
+.valueAcceptanceLevels span{padding:6px 7px;border:1px solid #1c2b37;border-radius:6px;color:#728598;font-size:8px}
+.valueAcceptanceLevels b{display:block;margin-top:2px;color:#dbe6ef;font-size:10px}
+
 @media(max-width:1050px){.priceActionGrid{grid-template-columns:1fr}.stratFrames{grid-template-columns:repeat(4,minmax(0,1fr))}.stratFoot{margin-top:10px}.rrgSelectFilters{flex-wrap:wrap}.rrgSelectFilters label{min-width:150px}.dashRight .sectorSummaryPanel{min-height:420px}}
 @media(max-width:760px){#sectorChart{height:470px}.rrgFilterBar{align-items:stretch}.rrgSelectFilters{display:grid;grid-template-columns:1fr}.rrgSelectFilters label{max-width:none}.rrgInlineFilters{margin-left:0}.stratFrames{grid-template-columns:1fr 1fr}#pricePreviewChart{aspect-ratio:1080/620}}
 @media(max-width:1100px){.rrgControlStack{align-items:stretch}.rrgInlineFilters{flex-wrap:wrap}.rrgInlineFilters .filterPills{justify-content:flex-start}.dashRight .sectorSummaryPanel .scroll{max-height:300px}}
 
 
 
-/* v22.24 sector-summary containment */
+/* v22.25 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3155,7 +3175,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.24 session volume profile */
+/* v22.25 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3171,7 +3191,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.24</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.25</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3359,6 +3379,18 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <aside class="panel stratPanel" id="stratPanel">
       <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
       <div id="stratStatus" class="tiny">Select a ticker to load STRAT scenarios.</div>
+      <div class="valueAcceptanceCard neutral" id="valueAcceptanceCard">
+        <div class="valueAcceptanceTop">
+          <div><span class="vaEyebrow">VALUE ACCEPTANCE</span><strong id="valueAcceptanceState">Awaiting chart</strong></div>
+          <span class="vaPill neutral" id="valueAcceptancePill">—</span>
+        </div>
+        <div class="valueAcceptanceLevels">
+          <span>VAH <b id="analysisVah">—</b></span>
+          <span>POC <b id="analysisPoc">—</b></span>
+          <span>VAL <b id="analysisVal">—</b></span>
+        </div>
+        <div class="tiny" id="valueAcceptanceDetail">Uses the completed profile immediately preceding the current trigger period.</div>
+      </div>
       <div id="stratFrames" class="stratFrames"></div>
       <div class="stratFoot tiny">FTC compares each current timeframe candle with its open. Trigger levels are the current bar high/low for the next directional break.</div>
     </aside>
@@ -4682,6 +4714,105 @@ async function scanVisibleOptions(){
 
 
 let stratRequestSeq=0;
+const valueAcceptanceMap={};
+
+function classifyValueAcceptance(payload){
+ const bars=payload?.bars||[];
+ const vis=payload?.visible_profiles||{};
+ const tf=(payload?.timeframe||previewTimeframe||"1d").toLowerCase();
+ if(!bars.length)return null;
+
+ function dkey(r){
+   const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
+   if(Number.isNaN(d.getTime()))return "";
+   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+ }
+ function wkey(r){
+   const d=new Date(String(r.date).includes("T")?r.date:`${r.date}T00:00:00`);
+   if(Number.isNaN(d.getTime()))return "";
+   const u=new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));
+   const day=u.getUTCDay()||7;u.setUTCDate(u.getUTCDate()+4-day);
+   const ys=new Date(Date.UTC(u.getUTCFullYear(),0,1));
+   const wk=Math.ceil((((u-ys)/86400000)+1)/7);
+   return `${u.getUTCFullYear()}-W${String(wk).padStart(2,"0")}`;
+ }
+
+ let reference=null,referenceLabel="Prior session";
+ if(tf==="1w"){
+   const weeks=vis.weeks||[];
+   const curKey=wkey(bars[bars.length-1]);
+   const idx=weeks.findIndex(x=>x.week===curKey);
+   reference=(idx>0?weeks[idx-1]:weeks.length>1?weeks[weeks.length-2]:weeks[0])?.profile||null;
+   referenceLabel="Prior week";
+ }else{
+   const sessions=vis.sessions||[];
+   const curKey=dkey(bars[bars.length-1]);
+   const idx=sessions.findIndex(x=>x.date===curKey);
+   reference=(idx>0?sessions[idx-1]:sessions.length>1?sessions[sessions.length-2]:sessions[0])?.profile||null;
+ }
+ if(!reference)return null;
+
+ const vah=Number(reference.vah),poc=Number(reference.poc),val=Number(reference.val);
+ if(![vah,poc,val].every(Number.isFinite))return null;
+
+ const last=bars[bars.length-1],prev=bars.length>1?bars[bars.length-2]:null;
+ const close=Number(last.close),high=Number(last.high??last.close),low=Number(last.low??last.close);
+ const prevClose=prev?Number(prev.close):NaN;
+ if(!Number.isFinite(close))return null;
+
+ let state="Inside value",kind="neutral",strength="NEUTRAL",direction="neutral",score=0,detail=`Price remains inside ${referenceLabel.toLowerCase()} value.`;
+ const priorAbove=Number.isFinite(prevClose)&&prevClose>vah;
+ const priorBelow=Number.isFinite(prevClose)&&prevClose<val;
+
+ if(close>vah){
+   direction="bullish";
+   if(priorAbove || low>=vah){
+     state="Accepted above VAH";kind="bullish";strength="CONFIRMED";score=1;
+     detail=`Break above ${referenceLabel.toLowerCase()} VAH is holding outside value — bullish acceptance.`;
+   }else{
+     state="Breaking above VAH";kind="developing";strength="DEVELOPING";score=.5;
+     detail=`Closed above VAH, but acceptance still needs another hold/close outside value.`;
+   }
+ }else if(close<val){
+   direction="bearish";
+   if(priorBelow || high<=val){
+     state="Accepted below VAL";kind="bearish";strength="CONFIRMED";score=1;
+     detail=`Break below ${referenceLabel.toLowerCase()} VAL is holding outside value — bearish acceptance.`;
+   }else{
+     state="Breaking below VAL";kind="developing";strength="DEVELOPING";score=.5;
+     detail=`Closed below VAL, but acceptance still needs another hold/close outside value.`;
+   }
+ }else if(high>vah && close<=vah){
+   state="VAH rejection";kind="warning";strength="REJECTION";direction="bearish";score=-.5;
+   detail=`Price auctioned above VAH but closed back inside value — failed upside auction.`;
+ }else if(low<val && close>=val){
+   state="VAL rejection";kind="warning";strength="REJECTION";direction="bullish";score=-.5;
+   detail=`Price auctioned below VAL but closed back inside value — failed downside auction.`;
+ }
+
+ return {state,kind,strength,direction,score,vah,poc,val,close,referenceLabel};
+}
+
+function renderValueAcceptance(sig){
+ const card=document.getElementById("valueAcceptanceCard"),state=document.getElementById("valueAcceptanceState"),
+       pill=document.getElementById("valueAcceptancePill"),detail=document.getElementById("valueAcceptanceDetail");
+ if(!card||!state||!pill||!detail)return;
+ const vah=document.getElementById("analysisVah"),poc=document.getElementById("analysisPoc"),val=document.getElementById("analysisVal");
+ if(!sig){
+   card.className="valueAcceptanceCard neutral";state.textContent="Profile unavailable";pill.className="vaPill neutral";pill.textContent="—";
+   detail.textContent="Needs a completed prior-session/prior-week profile.";
+   if(vah)vah.textContent="—";if(poc)poc.textContent="—";if(val)val.textContent="—";return;
+ }
+ card.className=`valueAcceptanceCard ${sig.kind}`;
+ state.textContent=sig.state;
+ pill.className=`vaPill ${sig.kind}`;
+ pill.textContent=sig.strength;
+ detail.textContent=sig.detail;
+ if(vah)vah.textContent=`$${sig.vah.toFixed(2)}`;
+ if(poc)poc.textContent=`$${sig.poc.toFixed(2)}`;
+ if(val)val.textContent=`$${sig.val.toFixed(2)}`;
+}
+
 function stratScenarioClass(frame){
  if(frame?.direction==="bullish")return "bullish";
  if(frame?.direction==="bearish")return "bearish";
@@ -4995,6 +5126,9 @@ async function loadChartPreview(ticker,period=previewPeriod){
    if(!r.ok||!j.ok)throw Error(j.error||"Chart preview failed");
    previewPayload=j;previewTimeframe=(j.timeframe||previewTimeframe).toLowerCase();
    drawPricePreview(j);
+   const valueSig=classifyValueAcceptance(j);
+   if(ticker){valueAcceptanceMap[String(ticker).toUpperCase()]=valueSig;}
+   renderValueAcceptance(valueSig);
    const bars=j.bars||[],last=bars[bars.length-1],first=bars[0];
    const lp=document.getElementById("previewLastPrice"),meta=document.getElementById("previewMeta");
    if(lp&&last){const ch=first&&Number(first.close)?(Number(last.close)/Number(first.close)-1)*100:0;lp.textContent=`$${Number(last.close).toFixed(2)}  ${ch>=0?"+":""}${ch.toFixed(2)}%`;lp.style.color=ch>=0?"#7ee2ad":"#f38b8b";}
@@ -5066,7 +5200,7 @@ function renderHeatMap(){
    catch(e){if(hs)hs.innerHTML=`<span class="error">${(e&&e.message)?e.message:String(e)}</span>`;}
  }));
  const stocks=filteredLiveStocks?filteredLiveStocks():(liveStockData||[]); if(title)title.textContent=currentSector?`${currentSector} · Stock Map`:'Stock Map';
- tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
+ tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;const va=valueAcceptanceMap[x.ticker];if(va)meta+=` · ${va.state}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
  document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatStock,hs=document.getElementById("heatStatus");document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));if(hs)hs.textContent=`Opening ${t} chart + positioning…`;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view==="rotation"));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id==="rotation"));await loadChartPreview(t);if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);}));
 }
 function opportunityScore(x){
@@ -5081,11 +5215,13 @@ function opportunityScore(x){
  const f=x.fast||x;
  if(f?.tail_trajectory==="Rotating In")score+=1;
  if(f?.tail_trajectory==="Rotating Out")score-=1;
+ const va=valueAcceptanceMap[x.ticker];
+ if(va)score+=Number(va.score||0);
  return Math.max(0,Math.min(10,score));
 }
 function opportunityHTML(x){
  const s=opportunityScore(x),stars=Math.max(1,Math.min(5,Math.ceil(s/2)));
- return `<b>${"★".repeat(stars)}${"☆".repeat(5-stars)}</b><div class="tiny">${s}/10 · rotation + options</div>`;
+ return `<b>${"★".repeat(stars)}${"☆".repeat(5-stars)}</b><div class="tiny">${s}/10 · rotation + options${valueAcceptanceMap[x.ticker]?` + value`:""}</div>`;
 }
 function renderLiveStocks(){
  const data=filteredLiveStocks();
