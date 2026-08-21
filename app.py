@@ -3103,7 +3103,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.30 candlestick proportion fix */
+/* v22.32 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3116,7 +3116,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.30 layout + STRAT confluence */
+/* v22.32 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3159,7 +3159,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.30 sector-summary containment */
+/* v22.32 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3182,7 +3182,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.30 session volume profile */
+/* v22.32 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3198,7 +3198,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.30</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.32</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3610,6 +3610,56 @@ function saveLiveWatchlist(){
  refreshLiveBookmarkButtons();
 }
 
+function normalizeStockTicker(raw){
+ const t=String(raw||"").trim().toUpperCase();
+ // Normalize common class-share separator for market-data endpoints.
+ // Keep ^ only for index symbols; stock holdings should not contain it.
+ return t.replace(/\//g,".").replace(/\s+/g,"");
+}
+function isSafeStockTicker(raw){
+ const t=normalizeStockTicker(raw);
+ return /^[A-Z0-9.^-]{1,20}$/.test(t);
+}
+function safeTickerEndpoint(path,ticker,query=""){
+ const t=normalizeStockTicker(ticker);
+ if(!isSafeStockTicker(t))throw new Error(`Invalid ticker symbol: ${t||ticker}`);
+ return `${path}/${encodeURIComponent(t)}${query}`;
+}
+async function openSectorStockTicker(rawTicker,{scroll=true}={}){
+ const ticker=normalizeStockTicker(rawTicker);
+ const st=document.getElementById("sstatus");
+ if(!isSafeStockTicker(ticker)){
+   if(st)st.textContent=`Could not open ticker: ${ticker||rawTicker}`;
+   return false;
+ }
+ try{
+   // Update selection first so the UI responds immediately.
+   toggleRRGFocus("stockChart",ticker);
+   syncLiveRowSelection();
+
+   // Load each data module independently so one failure cannot block the others.
+   const tasks=[
+     Promise.resolve(loadChartPreview(ticker)).catch(e=>console.warn(`${ticker} chart failed`,e)),
+     Promise.resolve(loadStrat(ticker)).catch(e=>console.warn(`${ticker} STRAT failed`,e))
+   ];
+   if(alpacaConfigured!==false){
+     tasks.push(Promise.resolve(loadOptionsTicker(ticker,{scroll:false})).catch(e=>console.warn(`${ticker} options failed`,e)));
+   }
+   if(scroll){
+     setTimeout(()=>{
+       const el=document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart");
+       try{if(el)el.scrollIntoView()}catch(e){}
+     },25);
+   }
+   await Promise.allSettled(tasks);
+   return true;
+ }catch(e){
+   console.error("Sector ticker open failed",e);
+   if(st)st.textContent=`${ticker} load failed: ${e?.message||e}`;
+   return false;
+ }
+}
+
 function liveWatchKey(ticker){
  return String(ticker||"").toUpperCase();
 }
@@ -3978,8 +4028,7 @@ function installRRGInteractions(id){
    if(!ticker)return;
    toggleRRGFocus(id,ticker);
    if(id==="stockChart"){
-     loadChartPreview(ticker);
-     if(alpacaConfigured!==false)loadOptionsTicker(ticker,{scroll:false});
+     openSectorStockTicker(ticker,{scroll:true});
    }
    if(id==="sectorChart"){
      syncSectorRowSelection();
@@ -4209,7 +4258,7 @@ async function selectSector(ticker,{source="ui",scrollToStocks=false,force=false
  if(ok){
    renderHeatMap();
    if(source==="heat"&&hs)hs.textContent=`${t} loaded · click a stock tile to open its chart/positioning`;
-   if(scrollToStocks)setTimeout(()=>document.getElementById("stockHeatTitle")?.scrollIntoView({behavior:"smooth",block:"start"}),50);
+   if(scrollToStocks)setTimeout(()=>{try{document.getElementById("stockHeatTitle")?.scrollIntoView()}catch(e){}},50);
  }
  return ok;
 }
@@ -4678,6 +4727,8 @@ function renderOptionsPanel(){
  </tr>`).join(""):'<tr><td colspan="11" class="note">No contracts match these filters.</td></tr>';
 }
 async function loadOptionsTicker(ticker,opts={}){
+ ticker=normalizeStockTicker(ticker);
+ if(!isSafeStockTicker(ticker))return;
  if(opts.scroll!==false)focusOptionsPanel();
  const st=document.getElementById("optionsStatus");
  if(alpacaConfigured===false){
@@ -4686,7 +4737,7 @@ async function loadOptionsTicker(ticker,opts={}){
  }
  st.textContent=`Loading ${ticker} options…`;
  try{
-   const r=await fetch(`/api/options/${encodeURIComponent(ticker)}`),j=await r.json();
+   const r=await fetch(safeTickerEndpoint("/api/options",ticker)),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
@@ -4849,13 +4900,15 @@ function renderStrat(data){
  }).join("");
 }
 async function loadStrat(ticker){
+ ticker=normalizeStockTicker(ticker);
+ if(!isSafeStockTicker(ticker))return;
  const seq=++stratRequestSeq,status=document.getElementById("stratStatus"),box=document.getElementById("stratFrames"),cont=document.getElementById("stratContinuity");
  if(!ticker)return;
  if(status)status.textContent=`Loading ${ticker} STRAT…`;
  if(box)box.innerHTML="";
  if(cont){cont.className="stratContinuity";cont.textContent="…";}
  try{
-   const r=await fetch(`/api/strat/${encodeURIComponent(ticker)}`),j=await r.json();
+   const r=await fetch(safeTickerEndpoint("/api/strat",ticker)),j=await r.json();
    if(seq!==stratRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"STRAT load failed");
    stratSignalMap[String(ticker).toUpperCase()]=j;
@@ -5129,6 +5182,8 @@ function setPreviewTimeframe(tf){
 }
 
 async function loadChartPreview(ticker,period=previewPeriod){
+ ticker=normalizeStockTicker(ticker);
+ if(!isSafeStockTicker(ticker))return false;
  if(!ticker)return;
  previewTicker=ticker;previewPeriod=period;
  loadStrat(ticker);
@@ -5221,7 +5276,15 @@ function renderHeatMap(){
  }));
  const stocks=filteredLiveStocks?filteredLiveStocks():(liveStockData||[]); if(title)title.textContent=currentSector?`${currentSector} · Stock Map`:'Stock Map';
  tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;const va=valueAcceptanceMap[x.ticker];if(va)meta+=` · ${va.state}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
- document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatStock,hs=document.getElementById("heatStatus");document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));if(hs)hs.textContent=`Opening ${t} chart + positioning…`;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view==="rotation"));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id==="rotation"));await loadChartPreview(t);if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);}));
+ document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{
+ const ticker=normalizeStockTicker(el.dataset.heatStock);
+ const hs=document.getElementById("heatStatus");
+ document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",normalizeStockTicker(n.dataset.heatStock)===ticker));
+ if(hs)hs.textContent=`Opening ${ticker} chart + positioning…`;
+ activateViewById("rotation");
+ await openSectorStockTicker(ticker,{scroll:true});
+ if(hs)hs.textContent=`${ticker} loaded`;
+}));
 }
 function topSetupEvaluation(x){
  const reasons=[],f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
@@ -5432,63 +5495,63 @@ async function runAutomaticTopSetups(force=false){
  }
 }
 
-async function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
- const sym=String(ticker||"").trim().toUpperCase();if(!sym)return;
+function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
+ const sym=String(ticker||"").trim().toUpperCase();
+ if(!sym)return;
  const status=document.getElementById("topSetupsStatus");
  if(status)status.textContent=`Opening ${sym}…`;
 
- // Navigate FIRST. Do not make page navigation depend on any network request.
- if(target==="gex"){
-   const inp=document.getElementById("gexTickerInput");if(inp)inp.value=sym;
-   activateViewById("gexpage");
-   mountGexPage();
-   window.scrollTo({top:0,behavior:"smooth"});
- }else{
-   activateViewById("rotation");
-   const targetEl=target==="options"
-      ?document.getElementById("optionsPanel")
-      :(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"));
-   setTimeout(()=>targetEl?.scrollIntoView({behavior:"smooth",block:"start"}),30);
+ try{
+   if(target==="gex"){
+     const inp=document.getElementById("gexTickerInput");
+     if(inp)inp.value=sym;
+     activateViewById("gexpage");
+     mountGexPage();
+     window.scrollTo(0,0);
+   }else{
+     activateViewById("rotation");
+     const el=target==="options"
+       ?document.getElementById("optionsPanel")
+       :(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"));
+     if(el)el.scrollIntoView();
+   }
+ }catch(navErr){
+   console.warn("Immediate navigation warning",navErr);
  }
 
- // Parent RRG context loads in the background and is allowed to fail without
- // preventing the stock itself from opening.
+ // Load each module independently; navigation never waits for these calls.
+ Promise.resolve(loadChartPreview(sym)).catch(e=>console.warn("Chart load failed",e));
+ Promise.resolve(loadStrat(sym)).catch(e=>console.warn("STRAT load failed",e));
+ if(alpacaConfigured!==false){
+   Promise.resolve(loadOptionsTicker(sym,{scroll:false})).catch(e=>console.warn("Options load failed",e));
+ }
+
+ // Load parent context last, and never let it prevent the ticker from opening.
  if(parentTicker){
-   const parent=String(parentTicker).trim().toUpperCase();
-   if(parent){
-     (async()=>{
+   const parent=String(parentTicker||"").trim().toUpperCase();
+   if(parent && /^[A-Z0-9.^-]{1,12}$/.test(parent)){
+     setTimeout(()=>{
        try{
          currentSector=parent;
          updateSelectedSectorCard(parent);
          const sel=document.getElementById("coreSectorSelect");
-         if(sel&&[...sel.options].some(o=>o.value===parent))sel.value=parent;
-         await loadSector(false,false);
-       }catch(e){console.warn("Parent context load failed",e)}
-     })();
+         if(sel){
+           for(const o of sel.options){if(o.value===parent){sel.value=parent;break;}}
+         }
+         Promise.resolve(loadSector(false,false)).catch(e=>console.warn("Parent context failed",e));
+       }catch(e){console.warn("Parent context failed",e)}
+     },0);
    }
  }
 
- // Resolve the actual stock modules independently. One failed endpoint should
- // never block the other modules or the navigation.
- const jobs=[
-   loadChartPreview(sym).catch(e=>console.warn(`${sym} chart failed`,e)),
-   Promise.resolve(loadStrat(sym)).catch(e=>console.warn(`${sym} STRAT failed`,e))
- ];
- if(alpacaConfigured!==false){
-   jobs.push(loadOptionsTicker(sym,{scroll:false}).catch(e=>console.warn(`${sym} options failed`,e)));
- }
- await Promise.allSettled(jobs);
-
  if(target==="gex"){
-   const inp=document.getElementById("gexTickerInput");if(inp)inp.value=sym;
-   mountGexPage();
-   setTimeout(()=>document.getElementById("positioningSection")?.scrollIntoView({behavior:"smooth",block:"start"}),60);
+   setTimeout(()=>{try{mountGexPage();const el=document.getElementById("positioningSection");if(el)el.scrollIntoView()}catch(e){}},250);
  }else if(target==="options"){
-   setTimeout(()=>document.getElementById("optionsPanel")?.scrollIntoView({behavior:"smooth",block:"start"}),60);
+   setTimeout(()=>{try{const el=document.getElementById("optionsPanel");if(el)el.scrollIntoView()}catch(e){}},100);
  }else{
-   setTimeout(()=>(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"))?.scrollIntoView({behavior:"smooth",block:"start"}),60);
+   setTimeout(()=>{try{const el=document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart");if(el)el.scrollIntoView()}catch(e){}},100);
  }
- if(status)status.textContent=`${sym} deep dive loaded`;
+ if(status)status.textContent=`${sym} opened`;
 }
 
 function renderTopSetups(){
@@ -5507,6 +5570,23 @@ function renderTopSetups(){
   <button class="topSetupAction optionsDive" data-top-options="${x.ticker}" data-parent="${x._parentTicker||""}">Options</button>
 </div></div>`}).join("");
 
+
+ const open=(ticker,parent,target)=>{
+   try{ openTopSetupDeepDive(ticker,parent,target); }
+   catch(e){
+     console.error("Top Setup navigation failed",e);
+     const s=document.getElementById("topSetupsStatus");
+     if(s)s.textContent=`Open failed: ${e?.message||e}`;
+   }
+ };
+ g.querySelectorAll("[data-top-open]").forEach(btn=>btn.onclick=e=>{e.preventDefault();e.stopPropagation();open(btn.dataset.topOpen,btn.dataset.parent||null,"chart")});
+ g.querySelectorAll("[data-top-gex]").forEach(btn=>btn.onclick=e=>{e.preventDefault();e.stopPropagation();open(btn.dataset.topGex,btn.dataset.parent||null,"gex")});
+ g.querySelectorAll("[data-top-options]").forEach(btn=>btn.onclick=e=>{e.preventDefault();e.stopPropagation();open(btn.dataset.topOptions,btn.dataset.parent||null,"options")});
+ g.querySelectorAll("[data-top-setup]").forEach(card=>card.onclick=e=>{
+   if(e.target && e.target.closest && e.target.closest(".topSetupAction"))return;
+   const btn=card.querySelector("[data-top-open]");
+   open(card.dataset.topSetup,btn?btn.dataset.parent:null,"chart");
+ });
 }
 function opportunityScore(x){
  let score=0;
@@ -5538,13 +5618,9 @@ function renderLiveStocks(){
  <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td><td>${opportunityHTML(x)}</td>
  <td>${optionBadgeHTML(optionScanMap[x.ticker])}</td></tr>`).join("");
  document.querySelectorAll("[data-live-bookmark]").forEach(btn=>btn.addEventListener("click",evt=>{evt.stopPropagation();const ticker=btn.dataset.liveBookmark;const x=data.find(r=>r.ticker===ticker)||liveStockData.find(r=>r.ticker===ticker);if(x)toggleLiveWatch(currentLiveWatchItem(x))}));
- document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",()=>{
-   const ticker=row.dataset.liveTicker;
-   toggleRRGFocus("stockChart",ticker);
-   if(ticker){
-     loadChartPreview(ticker);
-     if(alpacaConfigured!==false)loadOptionsTicker(ticker,{scroll:false});
-   }
+ document.querySelectorAll("[data-live-ticker]").forEach(row=>row.addEventListener("click",evt=>{
+   if(evt.target.closest("[data-live-bookmark]"))return;
+   openSectorStockTicker(row.dataset.liveTicker,{scroll:true});
  }));
  refreshLiveBookmarkButtons();syncLiveRowSelection();
  renderInternalRotation();
@@ -5850,30 +5926,21 @@ function jumpToRotationTarget(id){
   setTimeout(()=>document.getElementById(id)?.scrollIntoView({behavior:"smooth",block:"start"}),70);
 }
 document.getElementById("navOptions")?.addEventListener("click",()=>jumpToRotationTarget("optionsPanel"));
-document.getElementById("topSetupsGrid")?.addEventListener("click",async evt=>{
- const button=evt.target.closest(".topSetupAction");
- const card=evt.target.closest("[data-top-setup]");
- if(!button&&!card)return;
- evt.preventDefault();evt.stopPropagation();
- const ticker=button?.dataset.topOpen||button?.dataset.topGex||button?.dataset.topOptions||card?.dataset.topSetup;
- const parent=button?.dataset.parent||card?.querySelector("[data-parent]")?.dataset.parent||null;
- const target=button?.dataset.topGex?"gex":button?.dataset.topOptions?"options":"chart";
- await openTopSetupDeepDive(ticker,parent,target);
-});
+
 
 document.getElementById("navWatch")?.addEventListener("click",()=>jumpToRotationTarget("watchlistPanel"));
 let earningsAutoOpened=false;
-document.getElementById("navEarnings")?.addEventListener("click",async evt=>{
+document.getElementById("navEarnings")?.addEventListener("click",evt=>{
  evt.preventDefault();
  activateViewById("earnings");
- window.scrollTo({top:0,behavior:"smooth"});
+ window.scrollTo(0,0);
  const rows=document.getElementById("earnRows");
  if(!earningsAutoOpened && (!rows||!rows.children.length)){
    earningsAutoOpened=true;
-   try{await runEarnings()}catch(e){
+   Promise.resolve(runEarnings()).catch(e=>{
      const st=document.getElementById("estatus");
-     if(st)st.innerHTML=`<span class="error">${e.message||e}</span>`;
-   }
+     if(st)st.textContent=`Earnings load failed: ${e?.message||e}`;
+   });
  }
 });
 
@@ -5882,7 +5949,7 @@ document.querySelectorAll(".tab").forEach(b=>b.addEventListener("click",evt=>{
  if(b.id==="navEarnings")return; // explicit handler above owns Earnings navigation
  evt.preventDefault();
  activateViewById(b.dataset.view);
- window.scrollTo({top:0,behavior:"smooth"});
+ window.scrollTo(0,0);
 }));
 document.getElementById("groupFilter").addEventListener("change",renderGroups);document.getElementById("macroBasketFilter").addEventListener("change",renderGroups);document.getElementById("coreSectorSelect").addEventListener("change",(e)=>{
  if(e.target.value)selectSector(e.target.value,{source:"dropdown"});
@@ -5921,7 +5988,13 @@ document.getElementById("dashHeatComposite")?.addEventListener("click",()=>{dash
 document.getElementById("dashHeatFast")?.addEventListener("click",()=>{dashboardHeatMode="fast";document.getElementById("dashHeatFast")?.classList.add("active");document.getElementById("dashHeatComposite")?.classList.remove("active");document.getElementById("dashHeatTrend")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashHeatTrend")?.addEventListener("click",()=>{dashboardHeatMode="trend";document.getElementById("dashHeatTrend")?.classList.add("active");document.getElementById("dashHeatFast")?.classList.remove("active");document.getElementById("dashHeatComposite")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashRefreshMarket")?.addEventListener("click",()=>loadMarket(true));
-function activateViewById(id){document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view===id));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id===id));if(id==="heatmap")renderHeatMap();if(id==="gexpage")mountGexPage();else restoreGexSection();}
+function activateViewById(id){
+ const wanted=String(id||"");
+ document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",String(x.dataset.view||"")===wanted));
+ document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id===wanted));
+ if(wanted==="heatmap")renderHeatMap();
+ if(wanted==="gexpage")mountGexPage();else restoreGexSection();
+}
 loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
 </script>
 """
