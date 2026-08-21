@@ -3096,7 +3096,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.26 candlestick proportion fix */
+/* v22.27 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3109,7 +3109,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.26 layout + STRAT confluence */
+/* v22.27 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3152,7 +3152,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.26 sector-summary containment */
+/* v22.27 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3175,7 +3175,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.26 session volume profile */
+/* v22.27 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3191,7 +3191,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.26</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.27</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3226,7 +3226,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 <div id="rotation" class="view active">
   <div class="panel topSetupsPanel">
-    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Max 2 · no forced picks</span></div><span id="topSetupsStatus" class="note">Load a sector to rank candidates</span></div>
+    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Max 2 · trajectory-first RRG · no forced picks</span></div><span id="topSetupsStatus" class="note">Load a sector to rank candidates</span></div>
     <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Waiting for rotation + options data.</div></div>
   </div>
   <div class="dashboardGrid">
@@ -5213,33 +5213,88 @@ function renderHeatMap(){
  document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatStock,hs=document.getElementById("heatStatus");document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));if(hs)hs.textContent=`Opening ${t} chart + positioning…`;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view==="rotation"));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id==="rotation"));await loadChartPreview(t);if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);}));
 }
 function topSetupEvaluation(x){
- const reasons=[],stage=rotationStage(x),f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
+ const reasons=[],f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
  let raw=0;
- if(stage.level>=4){raw+=30;reasons.push(["RRG aligned","good"])}else if(stage.level>=3){raw+=24;reasons.push(["RRG rotating","good"])}
- if(f?.tail_trajectory==="Rotating In"){raw+=10;reasons.push(["NE tail","good"])}
- const trendOK=["Leading","Improving"].includes(t?.quadrant)&&t?.rs_up!==false&&t?.mom_up!==false;
- if(trendOK){raw+=15;reasons.push(["Trend confirms","good"])}
+
+ const fq=String(f?.quadrant||""),tq=String(t?.quadrant||"");
+ const fIn=f?.tail_trajectory==="Rotating In" || (f?.rs_up===true&&f?.mom_up===true);
+ const tIn=t?.tail_trajectory==="Rotating In" || (t?.rs_up===true&&t?.mom_up===true);
+ const fOut=f?.tail_trajectory==="Rotating Out" || (f?.rs_up===false&&f?.mom_up===false);
+ const tOut=t?.tail_trajectory==="Rotating Out" || (t?.rs_up===false&&t?.mom_up===false);
+ const fGood=["Improving","Leading"].includes(fq);
+ const tGood=["Improving","Leading"].includes(tq);
+
+ // Trajectory is weighted more heavily than the static quadrant label.
+ // FULL = both horizons are already favorable and not rolling over.
+ // EARLY = Fast is favorable/rotating in while Trend is still Lagging/Weakening
+ //         but its tail is turning NE. This is intentionally allowed.
+ let align="NONE";
+ if(fGood&&tGood&&fIn&&!tOut) align="FULL";
+ else if(fIn && (fGood||fq==="Lagging") && tIn && !tOut) align="EARLY";
+ else if(fGood&&tGood&&!fOut&&!tOut) align="FULL";
+
+ if(align==="FULL"){raw+=35;reasons.push(["Full RRG alignment","good"]);}
+ else if(align==="EARLY"){raw+=32;reasons.push(["Early RRG alignment","good"]);}
+ else if(fIn&&!fOut){raw+=18;reasons.push(["Fast rotation only","warn"]);}
+
+ if(fIn){raw+=8;reasons.push(["Fast tail NE","good"]);}
+ if(tIn){raw+=8;reasons.push(["Trend tail NE","good"]);}
+ if(fOut){raw-=12;reasons.push(["Fast rotating out","warn"]);}
+ if(tOut){raw-=15;reasons.push(["Trend rotating out","warn"]);}
+
+ // Static quadrant contributes, but less than trajectory.
+ if(fGood)raw+=5;
+ if(tGood)raw+=5;
+ else if(tIn)reasons.push([`${tq||"Trend"} turning NE`,"good"]);
+
+ // Options: Liquid OR Tradable qualify.
  const liq=opt?.liquidity;
- if(liq==="Liquid"){raw+=15;reasons.push(["Options liquid","good"])}
- else if(liq==="Tradable"){raw+=11;reasons.push(["Options tradable","good"])}
- if(opt?.iv_state==="Cheap / Crushed"){raw+=5;reasons.push(["IV attractive","good"])}
- else if(opt?.iv_state==="Normal")raw+=3;else if(opt?.iv_state==="Juiced"){raw-=5;reasons.push(["IV juiced","warn"])}
- if(va?.strength==="CONFIRMED"){raw+=15;reasons.push([va.state,"good"])}
- else if(va?.strength==="DEVELOPING"){raw+=8;reasons.push([va.state,"warn"])}
- else if(va?.strength==="REJECTION")raw-=10;
+ if(liq==="Liquid"){raw+=12;reasons.push(["Options liquid","good"]);}
+ else if(liq==="Tradable"){raw+=9;reasons.push(["Options tradable","good"]);}
+ if(opt?.iv_state==="Cheap / Crushed"){raw+=4;reasons.push(["IV attractive","good"]);}
+ else if(opt?.iv_state==="Normal")raw+=2;
+ else if(opt?.iv_state==="Juiced"){raw-=5;reasons.push(["IV juiced","warn"]);}
+
+ // Value acceptance.
+ if(va?.strength==="CONFIRMED"){raw+=13;reasons.push([va.state,"good"]);}
+ else if(va?.strength==="DEVELOPING"){raw+=7;reasons.push([va.state,"warn"]);}
+ else if(va?.strength==="REJECTION"){raw-=10;reasons.push([va.state,"warn"]);}
+
+ // STRAT.
  let stratPass=false;
- if(strat){stratPass=strat.continuity==="bullish"||strat.continuity==="bearish";if(stratPass){raw+=10;reasons.push([`${strat.continuity==="bullish"?"Bullish":"Bearish"} STRAT`,"good"])}}else reasons.push(["STRAT pending","warn"]);
- if(stratPass&&va?.direction&&va.direction!=="neutral"){if(strat.continuity===va.direction){raw+=5;reasons.push(["STRAT + value agree","good"])}else raw-=15}
- const mom=Number(f.rs_momentum??f.momentum);if(Number.isFinite(mom)&&mom>105){raw-=7;reasons.push(["Extended","warn"])}
+ if(strat){
+   stratPass=strat.continuity==="bullish"||strat.continuity==="bearish";
+   if(stratPass){raw+=9;reasons.push([`${strat.continuity==="bullish"?"Bullish":"Bearish"} STRAT`,"good"]);}
+   else reasons.push(["STRAT mixed","warn"]);
+ }else reasons.push(["STRAT pending","warn"]);
+
+ // Directional agreement between STRAT and value.
+ if(stratPass&&va?.direction&&va.direction!=="neutral"){
+   if(strat.continuity===va.direction){raw+=5;reasons.push(["STRAT + value agree","good"]);}
+   else {raw-=15;reasons.push(["STRAT/value conflict","warn"]);}
+ }
+
+ // Extension penalty: favor the setup before the obvious move.
+ const mom=Number(f.rs_momentum??f.momentum);
+ if(Number.isFinite(mom)&&mom>105){raw-=7;reasons.push(["Extended","warn"]);}
+
  const score=Math.max(0,Math.min(100,Math.round(raw)));
- return {score,reasons,va,stratPass,hardPass:stage.level>=3&&f?.tail_trajectory!=="Rotating Out"&&trendOK&&(liq==="Liquid"||liq==="Tradable")&&va?.strength!=="REJECTION"};
+
+ // RRG gate is now trajectory based. A Lagging Trend quadrant is allowed when
+ // its tail is rotating NE; a Trend rotating out is not.
+ const rrgPass=(align==="FULL"||align==="EARLY");
+ const hardPass=rrgPass && !fOut && !tOut &&
+   (liq==="Liquid"||liq==="Tradable") &&
+   va?.strength!=="REJECTION";
+
+ return {score,reasons,va,stratPass,hardPass,alignment:align};
 }
 function renderTopSetups(){
  const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
  const rows=(liveStockData||[]).map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score).slice(0,2);
  if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`:"No A-quality setup currently";
  if(!rows.length){g.innerHTML='<div class="topSetupsEmpty">No stock clears the rotation + trend + Liquid/Tradable options gate. The scanner will not force a pick.</div>';return}
- g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div></div>`}).join("");
+ g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div></div>`}).join("");
  document.querySelectorAll("[data-top-setup]").forEach(el=>el.onclick=async()=>{const x=el.dataset.topSetup;await loadChartPreview(x);loadStrat(x);if(alpacaConfigured!==false)await loadOptionsTicker(x,{scroll:false});document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"})});
 }
 function opportunityScore(x){
