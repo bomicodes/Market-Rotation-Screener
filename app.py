@@ -3029,7 +3029,7 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
 .pageIntro{display:none}
 .panel{background:linear-gradient(180deg,rgba(16,24,33,.98),rgba(12,18,25,.98));border-color:#213043;box-shadow:0 8px 24px rgba(0,0,0,.12)}
 .dashboardGrid{display:grid;grid-template-columns:minmax(260px,.78fr) minmax(560px,1.75fr) minmax(250px,.72fr);gap:12px;align-items:start}
-.dashCol{min-width:0}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
+.dashCol{min-width:0}.topSetupsPanel{margin-bottom:12px;border:1px solid #29415a}.topSetupsGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.topSetupCard{border:1px solid #26384a;border-radius:9px;padding:10px;background:#0a121a;cursor:pointer}.topSetupCard.aPlus{border-color:#2d7b59;background:linear-gradient(145deg,rgba(20,76,56,.22),#0a121a 55%)}.topSetupHead{display:flex;justify-content:space-between}.topSetupTicker{font-size:17px;font-weight:900}.topSetupScore{font-size:15px;font-weight:900;color:#75e7ad}.topSetupStatus{font-size:8px;font-weight:900;color:#f7c65d}.topSetupReasons{display:flex;flex-wrap:wrap;gap:4px;margin-top:8px}.topSetupReasons span{font-size:8px;border:1px solid #26384a;border-radius:999px;padding:3px 5px}.topSetupReasons .good{border-color:#25694c;color:#71dfaa}.topSetupReasons .warn{border-color:#805d25;color:#f4c363}.topSetupTrigger{margin-top:8px;padding-top:7px;border-top:1px solid #1c2b37;font-size:9px}.topSetupsEmpty{grid-column:1/-1;padding:13px;border:1px dashed #2b3b4b;border-radius:8px;color:#8092a4;font-size:10px}@media(max-width:900px){.topSetupsGrid{grid-template-columns:1fr}}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
 .marketOverviewGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid #1b2a38;border-radius:9px;overflow:hidden}.marketQuote{padding:10px 8px;border-right:1px solid #1b2a38;background:#0b1219}.marketQuote:last-child{border-right:0}.marketQuote .sym{font-size:11px;color:#c9d3df}.marketQuote .px{font-size:17px;font-weight:750;margin-top:3px}.marketQuote .chg{font-size:11px;margin-top:2px}
 .dashHeatGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}.dashHeatTile{min-height:90px;border-radius:7px;padding:8px;border:1px solid #263548;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;transition:.15s}.dashHeatTile:hover{transform:translateY(-1px);filter:brightness(1.08)}.dashHeatTile.selected{outline:2px solid #60a5fa}.dashHeatTile.h0,.dashHeatTile.h1{background:linear-gradient(145deg,#5b171a,#b3262c)}.dashHeatTile.h2,.dashHeatTile.h3{background:linear-gradient(145deg,#3f1b1f,#71252a)}.dashHeatTile.h4,.dashHeatTile.h5{background:linear-gradient(145deg,#1a242f,#253444)}.dashHeatTile.h6,.dashHeatTile.h7{background:linear-gradient(145deg,#153029,#1d4d3c)}.dashHeatTile.h8,.dashHeatTile.h9,.dashHeatTile.h10{background:linear-gradient(145deg,#114029,#18733d)}
 .dashHeatTile .sym{font-weight:850;font-size:13px}.dashHeatTile .score{font-size:19px;font-weight:850}.dashHeatTile .state{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#d8e1ea}.miniSpark{height:17px;width:100%;opacity:.75}
@@ -3096,7 +3096,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.25 candlestick proportion fix */
+/* v22.26 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3109,7 +3109,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.25 layout + STRAT confluence */
+/* v22.26 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3152,7 +3152,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.25 sector-summary containment */
+/* v22.26 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3175,7 +3175,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.25 session volume profile */
+/* v22.26 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3191,7 +3191,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.25</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.26</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3225,6 +3225,10 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 </div>
 
 <div id="rotation" class="view active">
+  <div class="panel topSetupsPanel">
+    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Max 2 · no forced picks</span></div><span id="topSetupsStatus" class="note">Load a sector to rank candidates</span></div>
+    <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Waiting for rotation + options data.</div></div>
+  </div>
   <div class="dashboardGrid">
     <aside class="dashCol dashLeft">
       <div class="panel">
@@ -4674,6 +4678,7 @@ async function loadOptionsTicker(ticker,opts={}){
    const r=await fetch(`/api/options/${encodeURIComponent(ticker)}`),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
    activeOptionsData=j;optionScanMap[ticker]=j;
+   renderTopSetups();
    const wi=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===liveWatchKey(ticker));
    if(wi>=0){
      if(liveWatchlist[wi].added_price==null)liveWatchlist[wi].added_price=j.spot??null;
@@ -4715,6 +4720,7 @@ async function scanVisibleOptions(){
 
 let stratRequestSeq=0;
 const valueAcceptanceMap={};
+const stratSignalMap={};
 
 function classifyValueAcceptance(payload){
  const bars=payload?.bars||[];
@@ -4841,7 +4847,9 @@ async function loadStrat(ticker){
    const r=await fetch(`/api/strat/${encodeURIComponent(ticker)}`),j=await r.json();
    if(seq!==stratRequestSeq)return;
    if(!r.ok||!j.ok)throw Error(j.error||"STRAT load failed");
+   stratSignalMap[String(ticker).toUpperCase()]=j;
    renderStrat(j);
+   renderTopSetups();
  }catch(e){if(status)status.innerHTML=`<span class="error">STRAT unavailable: ${e.message}</span>`;}
 }
 
@@ -5129,6 +5137,7 @@ async function loadChartPreview(ticker,period=previewPeriod){
    const valueSig=classifyValueAcceptance(j);
    if(ticker){valueAcceptanceMap[String(ticker).toUpperCase()]=valueSig;}
    renderValueAcceptance(valueSig);
+   renderTopSetups();
    const bars=j.bars||[],last=bars[bars.length-1],first=bars[0];
    const lp=document.getElementById("previewLastPrice"),meta=document.getElementById("previewMeta");
    if(lp&&last){const ch=first&&Number(first.close)?(Number(last.close)/Number(first.close)-1)*100:0;lp.textContent=`$${Number(last.close).toFixed(2)}  ${ch>=0?"+":""}${ch.toFixed(2)}%`;lp.style.color=ch>=0?"#7ee2ad":"#f38b8b";}
@@ -5203,6 +5212,36 @@ function renderHeatMap(){
  tg.innerHTML=stocks.length?[...stocks].sort((a,b)=>opportunityScore(b)-opportunityScore(a)).map(x=>{const sc=opportunityScore(x),o=optionScanMap[x.ticker],flow=(activeFlowData?.ticker===x.ticker)?activeFlowData:null;let meta=`${rotationStage(x).label}`;if(o?.liquidity)meta+=` · ${o.liquidity}`;if(flow)meta+=` · Flow ${moneyShort(flow.institutional_premium||0)}`;const va=valueAcceptanceMap[x.ticker];if(va)meta+=` · ${va.state}`;return `<div class="heatTile ${heatTone(sc)}" data-heat-stock="${x.ticker}"><div class="heatHead"><div><div class="heatTicker">${x.ticker}</div><div class="tiny">${x.fast?.quadrant||x.quadrant||'—'}</div></div><div class="heatScore">${sc.toFixed(1)}</div></div><div class="heatMeta">${meta}</div><div class="heatTags">${heatTagsFor(x,true)}</div></div>`}).join(""):'<div class="note">Click a sector/group tile above to load its stock opportunity map.</div>';
  document.querySelectorAll("[data-heat-stock]").forEach(el=>el.addEventListener("click",async()=>{const t=el.dataset.heatStock,hs=document.getElementById("heatStatus");document.querySelectorAll("[data-heat-stock]").forEach(n=>n.classList.toggle("selected",n.dataset.heatStock===t));if(hs)hs.textContent=`Opening ${t} chart + positioning…`;document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",x.dataset.view==="rotation"));document.querySelectorAll(".view").forEach(x=>x.classList.toggle("active",x.id==="rotation"));await loadChartPreview(t);if(alpacaConfigured!==false)await loadOptionsTicker(t,{scroll:false});setTimeout(()=>document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"}),80);}));
 }
+function topSetupEvaluation(x){
+ const reasons=[],stage=rotationStage(x),f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
+ let raw=0;
+ if(stage.level>=4){raw+=30;reasons.push(["RRG aligned","good"])}else if(stage.level>=3){raw+=24;reasons.push(["RRG rotating","good"])}
+ if(f?.tail_trajectory==="Rotating In"){raw+=10;reasons.push(["NE tail","good"])}
+ const trendOK=["Leading","Improving"].includes(t?.quadrant)&&t?.rs_up!==false&&t?.mom_up!==false;
+ if(trendOK){raw+=15;reasons.push(["Trend confirms","good"])}
+ const liq=opt?.liquidity;
+ if(liq==="Liquid"){raw+=15;reasons.push(["Options liquid","good"])}
+ else if(liq==="Tradable"){raw+=11;reasons.push(["Options tradable","good"])}
+ if(opt?.iv_state==="Cheap / Crushed"){raw+=5;reasons.push(["IV attractive","good"])}
+ else if(opt?.iv_state==="Normal")raw+=3;else if(opt?.iv_state==="Juiced"){raw-=5;reasons.push(["IV juiced","warn"])}
+ if(va?.strength==="CONFIRMED"){raw+=15;reasons.push([va.state,"good"])}
+ else if(va?.strength==="DEVELOPING"){raw+=8;reasons.push([va.state,"warn"])}
+ else if(va?.strength==="REJECTION")raw-=10;
+ let stratPass=false;
+ if(strat){stratPass=strat.continuity==="bullish"||strat.continuity==="bearish";if(stratPass){raw+=10;reasons.push([`${strat.continuity==="bullish"?"Bullish":"Bearish"} STRAT`,"good"])}}else reasons.push(["STRAT pending","warn"]);
+ if(stratPass&&va?.direction&&va.direction!=="neutral"){if(strat.continuity===va.direction){raw+=5;reasons.push(["STRAT + value agree","good"])}else raw-=15}
+ const mom=Number(f.rs_momentum??f.momentum);if(Number.isFinite(mom)&&mom>105){raw-=7;reasons.push(["Extended","warn"])}
+ const score=Math.max(0,Math.min(100,Math.round(raw)));
+ return {score,reasons,va,stratPass,hardPass:stage.level>=3&&f?.tail_trajectory!=="Rotating Out"&&trendOK&&(liq==="Liquid"||liq==="Tradable")&&va?.strength!=="REJECTION"};
+}
+function renderTopSetups(){
+ const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
+ const rows=(liveStockData||[]).map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score).slice(0,2);
+ if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`:"No A-quality setup currently";
+ if(!rows.length){g.innerHTML='<div class="topSetupsEmpty">No stock clears the rotation + trend + Liquid/Tradable options gate. The scanner will not force a pick.</div>';return}
+ g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div></div>`}).join("");
+ document.querySelectorAll("[data-top-setup]").forEach(el=>el.onclick=async()=>{const x=el.dataset.topSetup;await loadChartPreview(x);loadStrat(x);if(alpacaConfigured!==false)await loadOptionsTicker(x,{scroll:false});document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"})});
+}
 function opportunityScore(x){
  let score=0;
  const stage=rotationStage(x).level;
@@ -5244,6 +5283,7 @@ function renderLiveStocks(){
  refreshLiveBookmarkButtons();syncLiveRowSelection();
  renderInternalRotation();
  renderHeatMap();
+ renderTopSetups();
 }
 
 function rotationStage(x){
