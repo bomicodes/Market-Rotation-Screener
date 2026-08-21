@@ -3096,7 +3096,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.27 candlestick proportion fix */
+/* v22.28 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3109,7 +3109,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.27 layout + STRAT confluence */
+/* v22.28 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3152,7 +3152,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.27 sector-summary containment */
+/* v22.28 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3175,7 +3175,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.27 session volume profile */
+/* v22.28 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3191,7 +3191,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.27</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.28</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3226,8 +3226,8 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 <div id="rotation" class="view active">
   <div class="panel topSetupsPanel">
-    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Max 2 · trajectory-first RRG · no forced picks</span></div><span id="topSetupsStatus" class="note">Load a sector to rank candidates</span></div>
-    <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Waiting for rotation + options data.</div></div>
+    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Automatic market-wide scan · max 2 · no forced picks</span></div><div style="display:flex;align-items:center;gap:8px"><button class="secondary" style="padding:5px 8px;font-size:9px" onclick="runAutomaticTopSetups(true)">↻ Scan all</button><span id="topSetupsStatus" class="note">Waiting for market data</span></div></div>
+    <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Automatic scan starts after market data loads.</div></div>
   </div>
   <div class="dashboardGrid">
     <aside class="dashCol dashLeft">
@@ -3577,6 +3577,8 @@ function fmtCompact(n){
  return Math.round(x).toLocaleString();
 }
 let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
+let globalTopSetupData=[],automaticTopSetupsRunning=false,automaticTopSetupsLastRun=0;
+
 let previewVPMode="auto",previewPayload=null,previewTimeframe="1d";
 let sectorRRGMode="fast", sectorQuadrantFilter="all", dashboardPayload=null, dashboardHeatMode="composite";
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
@@ -4065,6 +4067,7 @@ function applyMarketPayload(j,fromCache=false){
  renderGroups();
  renderHeatMap();
  renderDashboardMarket(j);
+ setTimeout(()=>runAutomaticTopSetups(false),80);
 }
 
 function fmtDashValue(v,d=2){return v==null?"—":Number(v).toFixed(d)}
@@ -4094,6 +4097,7 @@ function populateDashboardSectorSelect(){const sel=document.getElementById("dash
 
 async function loadMarket(force=false){
  const st=document.getElementById("mstatus");
+ if(force)automaticTopSetupsLastRun=0;
  if(!force&&clientCache.market){applyMarketPayload(clientCache.market,true);return}
  if(st)st.textContent="Updating…";
  try{
@@ -5216,6 +5220,16 @@ function topSetupEvaluation(x){
  const reasons=[],f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
  let raw=0;
 
+ const parent=x._parentGroup||null;
+ if(parent){
+   const pf=parent.fast||parent,pt=parent.trend||{};
+   const pFastIn=pf?.tail_trajectory==="Rotating In"||(pf?.rs_up===true&&pf?.mom_up===true);
+   const pTrendIn=pt?.tail_trajectory==="Rotating In"||(pt?.rs_up===true&&pt?.mom_up===true);
+   const pGood=["Leading","Improving"].includes(pf?.quadrant)&&(["Leading","Improving"].includes(pt?.quadrant)||pTrendIn);
+   if(pGood||pFastIn){raw+=10;reasons.push([`${x._parentTicker||"Group"} supportive`,"good"]);}
+   else {raw-=6;reasons.push([`${x._parentTicker||"Group"} mixed`,"warn"]);}
+ }
+
  const fq=String(f?.quadrant||""),tq=String(t?.quadrant||"");
  const fIn=f?.tail_trajectory==="Rotating In" || (f?.rs_up===true&&f?.mom_up===true);
  const tIn=t?.tail_trajectory==="Rotating In" || (t?.rs_up===true&&t?.mom_up===true);
@@ -5289,12 +5303,138 @@ function topSetupEvaluation(x){
 
  return {score,reasons,va,stratPass,hardPass,alignment:align};
 }
+function groupTrajectoryPass(g){
+ const f=g?.fast||g||{},t=g?.trend||{};
+ const fIn=f?.tail_trajectory==="Rotating In"||(f?.rs_up===true&&f?.mom_up===true);
+ const tIn=t?.tail_trajectory==="Rotating In"||(t?.rs_up===true&&t?.mom_up===true);
+ const fOut=f?.tail_trajectory==="Rotating Out"||(f?.rs_up===false&&f?.mom_up===false);
+ const tOut=t?.tail_trajectory==="Rotating Out"||(t?.rs_up===false&&t?.mom_up===false);
+ const fGood=["Leading","Improving"].includes(f?.quadrant),tGood=["Leading","Improving"].includes(t?.quadrant);
+ return !fOut&&!tOut && ((fGood&&tGood)||(fIn&&tIn)||(fGood&&tIn));
+}
+function stockTrajectoryPrefilter(x){
+ const f=x?.fast||x||{},t=x?.trend||{};
+ const fIn=f?.tail_trajectory==="Rotating In"||(f?.rs_up===true&&f?.mom_up===true);
+ const tIn=t?.tail_trajectory==="Rotating In"||(t?.rs_up===true&&t?.mom_up===true);
+ const fOut=f?.tail_trajectory==="Rotating Out"||(f?.rs_up===false&&f?.mom_up===false);
+ const tOut=t?.tail_trajectory==="Rotating Out"||(t?.rs_up===false&&t?.mom_up===false);
+ const fGood=["Leading","Improving"].includes(f?.quadrant),tGood=["Leading","Improving"].includes(t?.quadrant);
+ return !fOut&&!tOut && ((fGood&&tGood)||(fIn&&tIn)||(fGood&&tIn)||(fIn&&tGood));
+}
+function preliminaryRRGScore(x){
+ const f=x.fast||x,t=x.trend||{};let s=0;
+ if(["Leading","Improving"].includes(f?.quadrant))s+=4;
+ if(["Leading","Improving"].includes(t?.quadrant))s+=3;
+ if(f?.tail_trajectory==="Rotating In"||(f?.rs_up&&f?.mom_up))s+=3;
+ if(t?.tail_trajectory==="Rotating In"||(t?.rs_up&&t?.mom_up))s+=3;
+ s+=Math.max(0,Math.min(4,Number(x._parentHeat||0)/2.5));
+ return s;
+}
+
+async function runAutomaticTopSetups(force=false){
+ const st=document.getElementById("topSetupsStatus");
+ if(automaticTopSetupsRunning)return;
+ if(!force && globalTopSetupData.length && Date.now()-automaticTopSetupsLastRun<5*60*1000){
+   renderTopSetups();return;
+ }
+ if(!sectorData?.length){if(st)st.textContent="Waiting for market data";return;}
+
+ automaticTopSetupsRunning=true;globalTopSetupData=[];
+ if(st)st.textContent="Scanning all sectors + themes…";
+ renderTopSetups();
+
+ try{
+   // Every sector/theme is considered at Layer 1. Only supportive groups move
+   // into the more expensive holdings/options/chart stages.
+   const groups=(sectorData||[]).filter(g=>["Core Sector","Industry / Theme"].includes(g.group));
+   const supportive=groups.filter(groupTrajectoryPass).sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a));
+   if(st)st.textContent=`Layer 1 · ${supportive.length}/${groups.length} supportive groups`;
+
+   const pool=[];
+   // Fetch holdings without changing currentSector/UI selection.
+   for(let n=0;n<supportive.length;n+=4){
+     const batch=supportive.slice(n,n+4);
+     const results=await Promise.all(batch.map(async g=>{
+       try{
+         const key=cacheKeySector(g.ticker,"20");
+         if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
+         const r=await fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"}});
+         const j=await r.json();if(!r.ok||!j.ok)return null;
+         clientCache.sectors.set(key,j);return {g,j};
+       }catch(e){return null}
+     }));
+     results.filter(Boolean).forEach(({g,j})=>{
+       (j.results||[]).forEach(x=>{
+         if(!stockTrajectoryPrefilter(x))return;
+         pool.push({...x,_parentTicker:g.ticker,_parentGroup:g,_parentHeat:sectorHeatScore(g)});
+       });
+     });
+     if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+4,supportive.length)}/${supportive.length} supportive groups`;
+   }
+
+   // Deduplicate overlapping ETF holdings; keep the strongest parent-group context.
+   const dedupe=new Map();
+   pool.forEach(x=>{
+     const old=dedupe.get(x.ticker);
+     if(!old || Number(x._parentHeat||0)>Number(old._parentHeat||0))dedupe.set(x.ticker,x);
+   });
+   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,100);
+   if(!candidates.length)throw Error("No stocks passed the market-wide RRG trajectory gate.");
+
+   if(st)st.textContent=`Layer 3 · checking options on ${candidates.length} RRG candidates`;
+   const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)})});
+   const oj=await or.json();
+   if(or.ok&&oj.ok)(oj.results||[]).forEach(o=>{if(o?.ticker&&o.ok!==false)optionScanMap[o.ticker]=o});
+
+   candidates=candidates.filter(x=>["Liquid","Tradable"].includes(optionScanMap[x.ticker]?.liquidity));
+   if(!candidates.length)throw Error("No RRG candidates passed the Liquid / Tradable options gate.");
+
+   // Only the best inexpensive candidates get chart/VP + STRAT resolution.
+   const finalists=candidates.sort((a,b)=>{
+     const ao=optionScanMap[a.ticker],bo=optionScanMap[b.ticker];
+     const aq=(ao?.liquidity==="Liquid"?2:1)+(ao?.iv_state==="Cheap / Crushed"?2:ao?.iv_state==="Normal"?1:0);
+     const bq=(bo?.liquidity==="Liquid"?2:1)+(bo?.iv_state==="Cheap / Crushed"?2:bo?.iv_state==="Normal"?1:0);
+     return (preliminaryRRGScore(b)+bq)-(preliminaryRRGScore(a)+aq);
+   }).slice(0,10);
+
+   if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;
+   for(let n=0;n<finalists.length;n+=3){
+     const batch=finalists.slice(n,n+3);
+     await Promise.all(batch.map(async x=>{
+       try{
+         const [cr,sr]=await Promise.all([
+           fetch(`/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d`),
+           fetch(`/api/strat/${encodeURIComponent(x.ticker)}`)
+         ]);
+         const cj=await cr.json(),sj=await sr.json();
+         if(cr.ok&&cj.ok)valueAcceptanceMap[x.ticker]=classifyValueAcceptance(cj);
+         if(sr.ok&&sj.ok)stratSignalMap[x.ticker]=sj;
+       }catch(e){}
+     }));
+   }
+
+   globalTopSetupData=finalists;
+   automaticTopSetupsLastRun=Date.now();
+   if(st)st.textContent=`Market-wide scan complete · ${groups.length} groups considered · ${finalists.length} finalists`;
+ }catch(e){
+   globalTopSetupData=[];
+   if(st)st.textContent=`Top Setup scan: ${e.message}`;
+ }finally{
+   automaticTopSetupsRunning=false;
+   renderTopSetups();
+ }
+}
+
 function renderTopSetups(){
  const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
- const rows=(liveStockData||[]).map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score).slice(0,2);
+ const source=(globalTopSetupData&&globalTopSetupData.length)?globalTopSetupData:[];
+ const rows=source.map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score).slice(0,2);
  if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`:"No A-quality setup currently";
- if(!rows.length){g.innerHTML='<div class="topSetupsEmpty">No stock clears the rotation + trend + Liquid/Tradable options gate. The scanner will not force a pick.</div>';return}
- g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div></div>`}).join("");
+ if(!rows.length){
+   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. The scanner will not force a pick.";
+   g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>`;return
+ }
+ g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div></div>`}).join("");
  document.querySelectorAll("[data-top-setup]").forEach(el=>el.onclick=async()=>{const x=el.dataset.topSetup;await loadChartPreview(x);loadStrat(x);if(alpacaConfigured!==false)await loadOptionsTicker(x,{scroll:false});document.getElementById("pricePreviewChart")?.scrollIntoView({behavior:"smooth",block:"center"})});
 }
 function opportunityScore(x){
