@@ -21,3 +21,5 @@ services:
         sync: false
       - key: UW_API_TOKEN
         sync: false
+      - key: DATABASE_URL
+        sync: false

@@ -1,3 +1,28 @@
+v23.1 — PERSISTENT HISTORICAL SETUP STORAGE
+- Historical setup snapshots now use PostgreSQL whenever DATABASE_URL is configured.
+- SQLite remains a local-development fallback only.
+- PostgreSQL writes use an upsert keyed by trade date + ticker + setup signature, so refreshes do not create duplicate daily observations.
+- /health and /api/diagnostics report whether historical setup storage is persistent.
+- Database connections remain lazy; app startup still makes no database/network request.
+
+RENDER / HOSTED DATABASE SETUP
+1. Create or use a managed PostgreSQL database (Render Postgres, Neon, Supabase, etc.).
+2. Add its connection string to the Render web service as DATABASE_URL.
+3. Redeploy. v23.1 creates the setup_snapshots table automatically on the first historical-setup write/read.
+4. Do not commit the database URL or credentials to GitHub.
+
+IMPORTANT
+- If DATABASE_URL is not set, the app deliberately falls back to /tmp SQLite and historical setup data can be lost on a Render restart/redeploy.
+- Existing v23 Trade Thesis, GEX timeframe buckets, confluence zones, value migration, and historical performance UI are preserved.
+
+v23.0 — Thesis + GEX horizons + confluence + value migration + setup history
+- Added Trade Thesis synthesis panel with transparent component scoring.
+- Added GEX expiration windows: 0–7D, 0–30D, 8–30D, 31–90D, and ALL through 365D.
+- Added automatic confluence-zone clustering across volume-profile, STRAT, call/put wall, and gamma-flip levels.
+- Added session-to-session VAH/POC/VAL migration classification.
+- Added raw-feature setup snapshot storage and matched-setup forward performance (1D/3D/5D/10D, 10D MFE/MAE).
+- Historical setup storage defaults to /tmp on Render. On free/ephemeral Render instances it can reset after deploy/restart; set SETUP_DB_PATH to a persistent-disk path if you later add persistent storage.
+
 v22.7 — Candlestick proportion fix
 - Corrected the v22.6 misunderstanding: the RRG sizing change has been removed/restored.
 - The candlestick preview now preserves its native 1500×640 aspect ratio so candles, labels, and price numbers do not look stretched.

@@ -1,7 +1,7 @@
 
 from flask import Flask, jsonify, request, Response, session, redirect
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import io, math, time, traceback, os
+import io, math, time, traceback, os, sqlite3, json
 from urllib.parse import quote
 from datetime import datetime, timedelta
 import numpy as np
@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "22.17"
+APP_VERSION = "23.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -82,6 +82,94 @@ def apply_sector_supplements(etf, holdings):
             out.append(dict(s))
             seen.add(sym)
     return out
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+SETUP_DB_PATH = os.environ.get("SETUP_DB_PATH", "/tmp/market_rotation_setups.sqlite3")
+
+def _setup_storage_backend():
+    return "postgresql" if DATABASE_URL else "sqlite"
+
+def _setup_db():
+    """Open the historical-setup store lazily.
+
+    Production: set DATABASE_URL to a managed PostgreSQL connection string.
+    Local/dev fallback: SQLite at SETUP_DB_PATH. No database connection is made
+    during app startup, preserving the app's zero-network startup behavior.
+    """
+    if DATABASE_URL:
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as e:
+            raise RuntimeError("DATABASE_URL is set but psycopg is not installed. Run pip install -r requirements.txt.") from e
+        con=psycopg.connect(DATABASE_URL, connect_timeout=10, row_factory=dict_row)
+        con.execute("""CREATE TABLE IF NOT EXISTS setup_snapshots(
+          id BIGSERIAL PRIMARY KEY, captured_at TEXT NOT NULL, trade_date TEXT NOT NULL,
+          ticker TEXT NOT NULL, spot DOUBLE PRECISION, bias TEXT, score DOUBLE PRECISION, signature TEXT,
+          raw_json TEXT NOT NULL, UNIQUE(trade_date,ticker,signature))""")
+        con.commit()
+        return con
+
+    con=sqlite3.connect(SETUP_DB_PATH, timeout=10)
+    con.row_factory=sqlite3.Row
+    con.execute("""CREATE TABLE IF NOT EXISTS setup_snapshots(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at TEXT NOT NULL, trade_date TEXT NOT NULL,
+      ticker TEXT NOT NULL, spot REAL, bias TEXT, score REAL, signature TEXT,
+      raw_json TEXT NOT NULL, UNIQUE(trade_date,ticker,signature))""")
+    con.commit()
+    return con
+
+def save_setup_snapshot(payload):
+    ticker=str(payload.get("ticker") or "").upper().strip()
+    if not ticker: raise ValueError("ticker required")
+    raw=payload.get("raw") or {}
+    signature=str(payload.get("signature") or "unclassified")[:240]
+    now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+    trade_date=str(payload.get("trade_date") or pd.Timestamp.now().date())
+    values=(now,trade_date,ticker,_safe_float(payload.get("spot")),str(payload.get("bias") or "neutral"),_safe_float(payload.get("score")),signature,json.dumps(raw,separators=(",",":"),default=str))
+    backend=_setup_storage_backend()
+    with _setup_db() as con:
+        if backend=="postgresql":
+            con.execute("""INSERT INTO setup_snapshots(captured_at,trade_date,ticker,spot,bias,score,signature,raw_json)
+              VALUES(%s,%s,%s,%s,%s,%s,%s,%s)
+              ON CONFLICT(trade_date,ticker,signature) DO UPDATE SET
+                captured_at=EXCLUDED.captured_at, spot=EXCLUDED.spot, bias=EXCLUDED.bias,
+                score=EXCLUDED.score, raw_json=EXCLUDED.raw_json""", values)
+        else:
+            con.execute("INSERT OR REPLACE INTO setup_snapshots(captured_at,trade_date,ticker,spot,bias,score,signature,raw_json) VALUES(?,?,?,?,?,?,?,?)", values)
+        con.commit()
+    return {"ticker":ticker,"trade_date":trade_date,"signature":signature,"storage":backend}
+
+def setup_history_stats(ticker, signature=None):
+    ticker=ticker.upper().strip(); backend=_setup_storage_backend()
+    if backend=="postgresql":
+        q="SELECT * FROM setup_snapshots WHERE ticker=%s"; args=[ticker]
+        if signature: q+=" AND signature=%s"; args.append(signature)
+    else:
+        q="SELECT * FROM setup_snapshots WHERE ticker=?"; args=[ticker]
+        if signature: q+=" AND signature=?"; args.append(signature)
+    q+=" ORDER BY trade_date DESC LIMIT 250"
+    with _setup_db() as con:
+        cur=con.execute(q,args)
+        rows=[dict(x) for x in cur.fetchall()]
+    if not rows:return {"count":0,"completed":0,"returns":{},"storage":backend}
+    px=dl_ohlc(ticker,"3y")
+    stats={h:[] for h in (1,3,5,10)}; mfe=[]; mae=[]
+    if px is not None and len(px):
+      px=px.dropna(subset=["Close"]).copy(); idx=pd.DatetimeIndex(px.index).tz_localize(None) if getattr(px.index,'tz',None) is not None else pd.DatetimeIndex(px.index)
+      for r in rows:
+        d=pd.Timestamp(r["trade_date"]); pos=idx.searchsorted(d,side="right")-1
+        if pos<0 or pos>=len(px):continue
+        base=_safe_float(r.get("spot")) or float(px["Close"].iloc[pos])
+        for h in stats:
+          if pos+h<len(px): stats[h].append((float(px["Close"].iloc[pos+h])/base-1)*100)
+        end=min(len(px),pos+11)
+        if end>pos+1:
+          seg=px.iloc[pos+1:end]; mfe.append((float(seg["High"].max())/base-1)*100); mae.append((float(seg["Low"].min())/base-1)*100)
+    out={}
+    for h,v in stats.items(): out[str(h)]={"n":len(v),"win_rate":round(100*sum(x>0 for x in v)/len(v),1) if v else None,"median":round(float(np.median(v)),2) if v else None}
+    storage=("PostgreSQL (persistent)" if backend=="postgresql" else f"SQLite fallback: {SETUP_DB_PATH}")
+    return {"count":len(rows),"completed":max([len(v) for v in stats.values()] or [0]),"returns":out,"median_mfe_10d":round(float(np.median(mfe)),2) if mfe else None,"median_mae_10d":round(float(np.median(mae)),2) if mae else None,"storage":storage}
 
 CACHE = {}
 CACHE_TTL = 60 * 15
@@ -2047,7 +2135,7 @@ def flow_payload(ticker, options_payload=None):
         "note":"V21.3 Institutional Flow Engine: broad ~900-day/wide-strike chain, full candidate coverage when practical, and activity-targeted coverage (default 99.5%) for very large chains. Historical aggressor direction is intentionally not fabricated: Alpaca indicative option trades are delayed while quotes are modified/current, and Alpaca does not expose a historical option-NBBO endpoint in the documented REST API. Contract mix is calls vs puts only; use FlowMS as the directional cross-check unless OPRA live quote/trade capture is available."
     }
 
-def options_quality_payload(ticker):
+def options_quality_payload(ticker, gex_window="0-30"):
     ticker=ticker.upper().strip()
     today=pd.Timestamp.now().normalize()
     start=today.strftime("%Y-%m-%d")
@@ -2076,14 +2164,27 @@ def options_quality_payload(ticker):
     liq="Liquid" if liquid>=3 else ("Tradable" if tradable>=3 else "Thin")
     rank={"Liquid":0,"Tradable":1,"Thin":2}
     rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
+    # GEX can use a different expiration universe than the trade-selection chain.
+    gex_rows=rows
+    bucket=str(gex_window or "0-30").lower()
+    if bucket not in ("0-7","8-30","31-90","all"): bucket="0-30"
+    if bucket!="0-30":
+        ranges={"0-7":(0,7),"8-30":(8,30),"31-90":(31,90),"all":(0,365)}
+        lo,hi=ranges[bucket]; gs=(today+pd.Timedelta(days=lo)).strftime("%Y-%m-%d"); ge=(today+pd.Timedelta(days=hi)).strftime("%Y-%m-%d")
+        gcontracts=alpaca_option_contracts(ticker,gs,ge); gmeta={x.get("symbol"):x for x in gcontracts if x.get("symbol")}
+        gsnaps=alpaca_option_chain(ticker,gs,ge,spot); gex_rows=[]
+        for sym,snap in gsnaps.items():
+            if sym not in gmeta: continue
+            rr=option_contract_row(sym,snap,gmeta[sym],spot)
+            if rr.get("expiration") and rr.get("moneyness_pct") is not None and abs(rr["moneyness_pct"])<=25:gex_rows.append(rr)
     return {
-        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
         "chain_updated_at":datetime.utcnow().isoformat(timespec="seconds")+"Z",
         "rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
         "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
         "iv_state":ivstate,"liquidity":liq,"liquid_contracts":liquid,"tradable_contracts":tradable,
-        "contracts_checked":len(rows),"positioning":modeled_dealer_positioning(rows,spot),"contracts":rows[:120]
+        "contracts_checked":len(rows),"gex_contracts_checked":len(gex_rows),"positioning":modeled_dealer_positioning(gex_rows,spot),"contracts":rows[:120]
     }
 
 
@@ -2490,7 +2591,7 @@ def api_historical_rrg():
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"options-v21-2:{ticker.upper()}",lambda:options_quality_payload(ticker),force=force,ttl=600)
+        bucket=(request.args.get("gex_window") or "0-30").lower(); payload,stale,err=cached_refresh_safe(f"options-v23:{ticker.upper()}:{bucket}",lambda:options_quality_payload(ticker,bucket),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -2535,6 +2636,16 @@ def api_options_scan():
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
+
+@app.post("/api/setup-snapshot")
+def api_setup_snapshot():
+    try:return jsonify({"ok":True,**save_setup_snapshot(request.get_json(silent=True) or {})})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),400
+
+@app.get("/api/setup-history/<ticker>")
+def api_setup_history(ticker):
+    try:return jsonify({"ok":True,**setup_history_stats(ticker,request.args.get("signature"))})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
 @app.get("/api/chart-preview/<ticker>")
 def api_chart_preview(ticker):
@@ -2584,9 +2695,22 @@ def api_chart_preview(ticker):
 
         profiles=alpaca_session_volume_profiles(ticker)
         visible_profiles=alpaca_visible_profiles(ticker,period,timeframe)
+        # Value migration compares the latest two completed session profiles.
+        migration=None
+        sess=(visible_profiles or {}).get("sessions") or []
+        if len(sess)>=2:
+            a=sess[-2].get("profile") or {}; b=sess[-1].get("profile") or {}
+            dp=(_safe_float(b.get("poc")) or 0)-(_safe_float(a.get("poc")) or 0)
+            dvh=(_safe_float(b.get("vah")) or 0)-(_safe_float(a.get("vah")) or 0)
+            dvl=(_safe_float(b.get("val")) or 0)-(_safe_float(a.get("val")) or 0)
+            tol=max(.01,(float(rows[-1]["close"])*.0005 if rows else .01))
+            if dp>tol and dvh>=-tol and dvl>=-tol: state="Rising value"; direction="bullish"
+            elif dp<-tol and dvh<=tol and dvl<=tol: state="Falling value"; direction="bearish"
+            else: state="Balanced / mixed value"; direction="neutral"
+            migration={"state":state,"direction":direction,"poc_change":round(dp,4),"vah_change":round(dvh,4),"val_change":round(dvl,4),"from":sess[-2].get("date"),"to":sess[-1].get("date")}
         return jsonify({
             "ok":True,"ticker":ticker,"period":period,"timeframe":timeframe,
-            "bars":rows,"volume_profiles":profiles,
+            "bars":rows,"volume_profiles":profiles,"value_migration":migration,
             "visible_profiles":visible_profiles
         })
     except Exception as e:
@@ -3038,6 +3162,8 @@ def health():
         "alpaca_api_configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
         "finnhub_api_configured": bool(FINNHUB_API_KEY),
         "unusual_whales_api_configured": bool(UW_API_TOKEN),
+        "setup_history_storage": _setup_storage_backend(),
+        "persistent_setup_history": bool(DATABASE_URL),
     })
 
 
@@ -3050,6 +3176,11 @@ def api_diagnostics():
             "configured": bool(ALPACA_API_KEY and ALPACA_API_SECRET),
             "feed": ALPACA_OPTIONS_FEED,
             "dte": "0-30"
+        },
+        "setup_history": {
+            "backend": _setup_storage_backend(),
+            "persistent": bool(DATABASE_URL),
+            "configured": bool(DATABASE_URL)
         },
         "startup_network_calls": False
     })
@@ -3439,7 +3570,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
   <div class="panel gexPageShell">
     <div class="gexPageHeader">
       <div><div class="dashTitle" style="font-size:18px">GEX LANDSCAPE</div><div class="note">Modeled gamma / open-interest positioning for the selected ticker.</div></div>
-      <div class="gexTickerControls"><input id="gexTickerInput" type="search" placeholder="Ticker, e.g. NFLX" autocomplete="off"><button id="gexTickerLoad" class="primary">Load GEX</button></div>
+      <div class="gexTickerControls"><input id="gexTickerInput" type="search" placeholder="Ticker, e.g. NFLX" autocomplete="off"><select id="gexWindow"><option value="0-7">0–7D</option><option value="0-30" selected>0–30D</option><option value="8-30">8–30D</option><option value="31-90">31–90D</option><option value="all">ALL ≤365D</option></select><button id="gexTickerLoad" class="primary">Load GEX</button></div>
     </div>
     <div id="gexPageHint" class="gexPageHint">Select a stock anywhere in the screener or enter a ticker above. The latest loaded ticker carries into this page automatically.</div>
   </div>
@@ -3640,7 +3771,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         <div><strong>Dealer Positioning <span class="modeledTag">MODELED</span></strong><div class="note">Gamma × OI heuristic — transparent approximation, not actual dealer inventory.</div></div>
         <span id="chainFreshness" class="chainFreshness"></span>
       </div>
-      <div id="positioningSummary" class="positioningGrid gammaSummary"></div>
+      <div class="card" id="tradeThesisPanel" style="margin:10px 0 12px"><div class="row"><strong>TRADE THESIS</strong><span class="badge" id="thesisBias">AWAITING DATA</span></div><div id="thesisText" class="note" style="margin-top:8px">Load a ticker to synthesize rotation, value, STRAT and GEX.</div><div id="confluenceZone" class="tiny" style="margin-top:8px"></div><div id="historicalSetup" class="tiny" style="margin-top:8px"></div></div><div id="positioningSummary" class="positioningGrid gammaSummary"></div>
       <div class="gexWorkspace">
         <div class="gexMain">
           <div class="gexSectionHead"><div><strong>GEX LANDSCAPE</strong><span class="note"> Modeled GEX / OI positioning</span><div class="tiny gexHelpText">Click a strike to view details, open interest, and net exposure.</div></div><div class="gexViewTools"><span class="tiny">Click a strike to inspect it.</span></div></div>
@@ -4871,6 +5002,31 @@ function renderChainFreshness(ts,isStale=false,refreshError=null){
  el.title=refreshError?`Latest refresh failed: ${refreshError}`:"Alpaca chain snapshot fetch time. Options data may be cached for up to 10 minutes.";
 }
 
+function buildConfluence(ticker,spot,p){
+ const levels=[]; const va=valueAcceptanceMap[ticker]; const st=stratSignalMap[ticker];
+ if(va){levels.push({v:va.vah,n:"VAH"},{v:va.poc,n:"POC"},{v:va.val,n:"VAL"});}
+ (st?.frames||[]).forEach(f=>{if(Number.isFinite(Number(f.up_trigger)))levels.push({v:Number(f.up_trigger),n:`${f.timeframe} 2U`});if(Number.isFinite(Number(f.down_trigger)))levels.push({v:Number(f.down_trigger),n:`${f.timeframe} 2D`});});
+ if(p){if(p.call_wall!=null)levels.push({v:Number(p.call_wall),n:"Call wall"});if(p.put_wall!=null)levels.push({v:Number(p.put_wall),n:"Put wall"});if(p.modeled_flip!=null)levels.push({v:Number(p.modeled_flip),n:"Gamma flip"});}
+ const tol=Math.max(.5,(spot||100)*.006), clusters=[];
+ levels.filter(x=>Number.isFinite(x.v)).sort((a,b)=>a.v-b.v).forEach(x=>{let c=clusters.find(c=>Math.abs(c.center-x.v)<=tol);if(!c){c={center:x.v,items:[]};clusters.push(c)}c.items.push(x);c.center=c.items.reduce((s,z)=>s+z.v,0)/c.items.length;});
+ return clusters.filter(c=>c.items.length>=2).sort((a,b)=>b.items.length-a.items.length)[0]||null;
+}
+async function renderTradeThesis(ticker,spot,p){
+ if(!ticker)return; ticker=String(ticker).toUpperCase(); const x=liveStockData.find(r=>r.ticker===ticker),va=valueAcceptanceMap[ticker],vm=valueMigrationMap[ticker],st=stratSignalMap[ticker];
+ let score=5,reasons=[]; const f=x?.fast||x||{},t=x?.trend||{};
+ if(["Leading","Improving"].includes(f.quadrant)){score+=1;reasons.push(`${f.quadrant} fast RRG`)} if(f.tail_trajectory==="Rotating In"){score+=1;reasons.push("fast tail NE")}
+ if(["Leading","Improving"].includes(t.quadrant)){score+=.7;reasons.push(`${t.quadrant} trend RRG`)} if(va?.direction==="bullish"){score+=.7;reasons.push(va.state)} if(va?.direction==="bearish")score-=.7;
+ if(vm?.direction==="bullish"){score+=.6;reasons.push("value migrating higher")} if(vm?.direction==="bearish")score-=.6;
+ if(st?.continuity==="bullish"){score+=.6;reasons.push("bullish STRAT FTC")} if(st?.continuity==="bearish")score-=.6;
+ score=Math.max(0,Math.min(10,score)); const bias=score>=7?"BULLISH":score<=3.5?"BEARISH":"MIXED";
+ const cluster=buildConfluence(ticker,spot,p),zone=document.getElementById("confluenceZone");
+ if(zone)zone.innerHTML=cluster?`<b>CONFLUENCE ZONE · $${fmt(Math.min(...cluster.items.map(z=>z.v)),2)}–$${fmt(Math.max(...cluster.items.map(z=>z.v)),2)}</b> · ${cluster.items.map(z=>z.n).join(" + ")}`:"No multi-factor level cluster detected yet.";
+ const b=document.getElementById("thesisBias"),txt=document.getElementById("thesisText"); if(b)b.textContent=`${bias} · ${score.toFixed(1)}/10`; if(txt)txt.innerHTML=`<b>${ticker}</b> · ${reasons.join(" · ")||"insufficient confirmation"}${vm?` · ${vm.state}`:""}. GEX window: ${activeOptionsData?.gex_window||"0-30"}.`;
+ const signature=[f.quadrant||"na",f.tail_trajectory||"na",t.quadrant||"na",va?.direction||"na",vm?.direction||"na",st?.continuity||"na",p?.gamma_regime||"na"].join("|");
+ try{await fetch("/api/setup-snapshot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticker,spot,bias,score,signature,raw:{fast:f,trend:t,value:va,value_migration:vm,strat:st,positioning:{call_wall:p?.call_wall,put_wall:p?.put_wall,modeled_flip:p?.modeled_flip,net_gex:p?.net_gex,gamma_regime:p?.gamma_regime},gex_window:activeOptionsData?.gex_window}})}); const hr=await fetch(`/api/setup-history/${encodeURIComponent(ticker)}?signature=${encodeURIComponent(signature)}`),hj=await hr.json(); const he=document.getElementById("historicalSetup"); if(he&&hj.ok){const r5=hj.returns?.["5"];he.innerHTML=`<b>HISTORICAL SETUP</b> · ${hj.count} captured matches${r5?.n?` · 5D ${r5.win_rate}% positive · median ${r5.median>=0?"+":""}${r5.median}%`:" · collecting forward outcomes"}${hj.median_mfe_10d!=null?` · 10D MFE ${hj.median_mfe_10d>=0?"+":""}${hj.median_mfe_10d}%`:""}`;}}
+ catch(e){console.warn("setup history",e)}
+}
+
 function renderPositioning(p,spot){
  const sec=document.getElementById("positioningSection"),sum=document.getElementById("positioningSummary");
  if(!sec||!sum)return;if(!p||!p.available){sec.style.display="none";return}sec.style.display="block";
@@ -4884,7 +5040,7 @@ function renderPositioning(p,spot){
  <div class="metricCard spotCard ${regimeCls}"><div class="tiny">SPOT / REGIME</div><div class="subLabel">Current Price</div><div class="big">${spot==null?"—":"$"+fmt(spot,2)}</div><div class="tiny ${net>=0?'positive':'negative'}">${p.gamma_regime||"—"}</div></div>
  <div class="metricCard netGex ${net<0?'negative':''}"><div class="tiny">NET GEX</div><div class="subLabel">Call − Put</div><div class="big">${gexSigned(net)}</div><div class="tiny">Modeled exposure</div></div>
  <div class="metricCard exposureCard"><div class="tiny">LARGEST EXPOSURES</div><div class="subLabel">By strike · net GEX</div><div class="exposureMini">${top.map(x=>`<div><b>$${fmt(x.strike,0)}</b> <span class="${x.net_gex>=0?'pos':'neg'}">${gexSigned(x.net_gex)}</span> <em>${x.net_gex>=0?'Call':'Put'}</em></div>`).join('')||'—'}</div></div>`;
- selectedGammaStrike=null;renderGexRail(p,spot);drawGammaLandscape(p,spot);
+ selectedGammaStrike=null;renderGexRail(p,spot);drawGammaLandscape(p,spot);renderTradeThesis(activeOptionsData?.ticker,spot,p);
 }
 let activeFlowData=null;
 function renderFlow(x){
@@ -4958,7 +5114,7 @@ async function loadOptionsTicker(ticker,opts={}){
  }
  st.textContent=`Loading ${ticker} options…`;
  try{
-   const r=await fetch(safeTickerEndpoint("/api/options",ticker),{headers:{"Accept":"application/json"}}),j=await r.json();
+   const gw=document.getElementById("gexWindow")?.value||"0-30"; const r=await fetch(safeTickerEndpoint("/api/options",ticker)+`?gex_window=${encodeURIComponent(gw)}`,{headers:{"Accept":"application/json"}}),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
@@ -5003,6 +5159,7 @@ async function scanVisibleOptions(){
 
 let stratRequestSeq=0;
 const valueAcceptanceMap={};
+const valueMigrationMap={};
 const stratSignalMap={};
 
 function classifyValueAcceptance(payload){
@@ -5422,7 +5579,7 @@ async function loadChartPreview(ticker,period=previewPeriod){
    previewPayload=j;previewTimeframe=(j.timeframe||previewTimeframe).toLowerCase();
    drawPricePreview(j);
    const valueSig=classifyValueAcceptance(j);
-   if(ticker){valueAcceptanceMap[String(ticker).toUpperCase()]=valueSig;}
+   if(ticker){valueAcceptanceMap[String(ticker).toUpperCase()]=valueSig;valueMigrationMap[String(ticker).toUpperCase()]=j.value_migration||null;}
    renderValueAcceptance(valueSig);
    renderTopSetups();
    const bars=j.bars||[],last=bars[bars.length-1],first=bars[0];
@@ -6233,6 +6390,7 @@ function activateViewById(id){
  if(wanted==="gexpage")mountGexPage();else restoreGexSection();
 }
 loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
+document.getElementById("gexWindow")?.addEventListener("change",()=>{const t=activeOptionsData?.ticker||previewTicker;if(t)loadOptionsTicker(t,{scroll:false});});
 </script>
 """
 @app.errorhandler(500)
