@@ -2087,6 +2087,94 @@ def options_quality_payload(ticker):
     }
 
 
+
+def post_earnings_otm_contract(payload, direction="bullish", expected_move_pct=None):
+    """Pick a discounted OTM contract while requiring a real executable market.
+
+    Primary target: ~2-8% OTM and |delta| ~0.25-0.45. Wider spreads remain
+    eligible when OI/volume show genuine participation.
+    """
+    spot=_safe_float((payload or {}).get("spot"))
+    if not spot: return None
+    want_put=str(direction).lower().startswith("bear")
+    rows=[]
+    for r in (payload or {}).get("contracts") or []:
+        typ=str(r.get("type") or "").lower()
+        is_put=typ.startswith("p")
+        if is_put!=want_put: continue
+        strike=_safe_float(r.get("strike")); mid=_safe_float(r.get("mid"))
+        bid=_safe_float(r.get("bid")); ask=_safe_float(r.get("ask"))
+        oi=int(_safe_float(r.get("open_interest")) or 0); vol=int(_safe_float(r.get("volume")) or 0)
+        spread=_safe_float(r.get("spread_pct")); delta=abs(_safe_float(r.get("delta")) or 0)
+        if not strike or not mid or mid<=0 or bid is None or bid<=0 or ask is None or ask<=bid: continue
+        otm=((spot-strike)/spot*100) if want_put else ((strike-spot)/spot*100)
+        if otm<=0 or otm>12: continue
+
+        # Execution labels: wider spread is fine when there is actual participation.
+        if oi>=500 and vol>=100 and spread is not None and spread<=10:
+            execution="Liquid"; exec_score=18
+        elif oi>=100 and vol>=25 and spread is not None and spread<=18:
+            execution="Tradable"; exec_score=15
+        elif spread is not None and spread<=30 and (oi>=300 or vol>=75) and oi>=50:
+            execution="Wide but Active"; exec_score=11
+        elif spread is not None and spread<=35 and oi>=100 and vol>=25:
+            execution="Wide but Active"; exec_score=9
+        else:
+            continue
+
+        # Deliberately favor discounted OTM premium without drifting to lottery tickets.
+        otm_score=20 if 2<=otm<=8 else (15 if 1<=otm<2 else 10)
+        delta_score=18 if .25<=delta<=.45 else (12 if .18<=delta<.25 or .45<delta<=.55 else 4)
+        activity=min(12, 4*np.log10(max(1,oi))) + min(8, 3*np.log10(max(1,vol)))
+        premium_score=8 if mid<=3 else (6 if mid<=5 else (3 if mid<=8 else 0))
+        coverage=None
+        if expected_move_pct is not None and expected_move_pct>0:
+            coverage=otm/expected_move_pct
+            coverage_score=12 if coverage<=.75 else (7 if coverage<=1.0 else 1)
+        else:
+            coverage_score=5
+        score=otm_score+delta_score+exec_score+activity+premium_score+coverage_score
+        rr=dict(r)
+        rr.update({
+            "otm_pct":round(otm,2),"execution_quality":execution,
+            "post_earnings_contract_score":round(float(score),1),
+            "expected_move_coverage":round(float(coverage),2) if coverage is not None else None,
+        })
+        rows.append(rr)
+    if not rows:return None
+    rows.sort(key=lambda r:(-r["post_earnings_contract_score"],r["mid"]))
+    return rows[0]
+
+
+def post_earnings_current_move(ticker,event_date):
+    try:
+        df=dl_ohlc(ticker,"3mo")
+        if df is None or len(df)<2:return {}
+        pos=event_session_index(df,pd.Timestamp(event_date))
+        if pos is None or pos<=0:return {}
+        base=float(df["Close"].iloc[pos-1])
+        seg=df.iloc[pos:]
+        if not len(seg):return {}
+        last=float(seg["Close"].iloc[-1])
+        return {
+            "current_move_pct":round((last/base-1)*100,2),
+            "sessions_since":int(len(seg)),
+            "holding_gap":bool((last/base-1)>=0) if last>=base else False,
+        }
+    except Exception:
+        return {}
+
+
+def historical_continuation_score(profile):
+    if not profile:return 0.0
+    behavior=profile.get("behavior")
+    s=float(profile.get("score") or 0)*4.0
+    if behavior=="CONTINUATION":s+=20
+    elif behavior=="FAST REACTION":s-=8
+    s+=min(20,float(profile.get("pct_gt5_10d") or 0)*.20)
+    s+=min(12,float(profile.get("pct_gt10_14d") or 0)*.12)
+    return max(0.0,min(100.0,s))
+
 def market_payload():
     tickers=["SPY","RSP","IWM","QQQ","HYG","LQD","^VIX","^TNX"]+list(RRG_UNIVERSE)
     prices=dl_prices(tickers,"18mo")
@@ -2775,6 +2863,106 @@ def api_postearnings(etf):
         return jsonify({"ok":False,"error":str(e)}),500
 
 
+
+@app.get("/api/postearnings-opportunities")
+def api_postearnings_opportunities():
+    """Market-wide recent-earnings continuation scanner.
+
+    Scans the union of all sector/theme holdings, then performs expensive
+    historical/options work only on recent reporters.
+    """
+    try:
+        recent_days=max(3,min(10,int(request.args.get("days","5"))))
+        all_holdings={}
+        parent_map={}
+        sources=set()
+        for etf in RRG_UNIVERSE:
+            try:
+                bundle=cached(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+                holdings,source=bundle
+                holdings=apply_sector_supplements(etf,holdings)
+                sources.add(source)
+                for h in holdings:
+                    sym=str(h.get("ticker") or "").upper().strip()
+                    if not sym:continue
+                    all_holdings.setdefault(sym,h)
+                    parent_map.setdefault(sym,[]).append(etf)
+            except Exception:
+                continue
+        tickers=list(all_holdings)
+        recent_map,diag=discover_recent_earnings(tickers,recent_days)
+        reporters=[s for s in tickers if s in recent_map]
+        now=pd.Timestamp.now().normalize()
+        if not reporters:
+            return jsonify({"ok":True,"results":[],"universe":len(tickers),"diagnostics":diag})
+
+        # Stock rotation vs SPY for a consistent cross-universe rank.
+        prices=dl_prices(["SPY"]+reporters,"18mo")
+        rrg={r["ticker"]:r for r in dual_rrg_rows(prices,"SPY",reporters,8,8)}
+
+        def build_one(sym):
+            meta=recent_map[sym]; d=pd.Timestamp(meta["date"]).normalize()
+            dates=merged_historical_earnings_dates(sym,d.strftime("%Y-%m-%d"))
+            profile=earnings_profile(sym,dates)
+            if not profile:return None
+            hist_score=historical_continuation_score(profile)
+            current=post_earnings_current_move(sym,d)
+            rot=rrg.get(sym,{})
+            f=rot.get("fast") or {}; tr=rot.get("trend") or {}
+            f_in=f.get("tail_trajectory")=="Rotating In" or (f.get("rs_up") is True and f.get("mom_up") is True)
+            t_in=tr.get("tail_trajectory")=="Rotating In" or (tr.get("rs_up") is True and tr.get("mom_up") is True)
+            rot_score=(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
+            move=float(current.get("current_move_pct") or 0)
+            direction="bullish" if move>=0 else "bearish"
+
+            # Historical expected continuation uses typical 10/14D excursion.
+            expected=max(float(profile.get("median_exc10") or 0),float(profile.get("median_exc14") or 0))
+            opt=None; best=None
+            try:
+                opt,_,_=cached_refresh_safe(f"options-v21-2:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                best=post_earnings_otm_contract(opt,direction,expected)
+            except Exception:
+                pass
+
+            # Stock thesis dominates; options are execution quality, not a veto
+            # unless no executable OTM contract exists.
+            current_score=min(25,abs(move)*2.2)
+            if profile.get("behavior")=="CONTINUATION":current_score+=4
+            option_score=0
+            if best:
+                option_score={"Liquid":10,"Tradable":9,"Wide but Active":7}.get(best.get("execution_quality"),0)
+            total=.40*hist_score + current_score + rot_score + option_score
+            return {
+                "ticker":sym,"name":all_holdings[sym].get("name"),"earnings_date":d.strftime("%Y-%m-%d"),
+                "calendar_days_ago":max(0,(now-d).days),"parents":parent_map.get(sym,[]),
+                "profile":profile,"historical_score":round(hist_score,1),
+                "current":current,"rotation":rot,"best_contract":best,
+                "options_execution":best.get("execution_quality") if best else "No executable OTM contract",
+                "expected_continuation_pct":round(expected,2),"direction":direction,
+                "opportunity_score":round(float(total),1),
+            }
+
+        rows=[]
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            futs=[ex.submit(build_one,s) for s in reporters[:80]]
+            for f in as_completed(futs):
+                try:
+                    x=f.result()
+                    if x:rows.append(x)
+                except Exception:
+                    pass
+        # Keep the list curated. No executable contract can still appear lower
+        # for stock research, but top opportunities favor actual OTM execution.
+        rows.sort(key=lambda x:(x.get("best_contract") is None,-x.get("opportunity_score",0)))
+        return jsonify({
+            "ok":True,"results":rows[:12],"top":rows[:3],"universe":len(tickers),
+            "recent_reporters":len(reporters),"recent_days":recent_days,
+            "diagnostics":diag,"holdings_sources":sorted(sources)
+        })
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
 @app.get("/api/earnings-history/<ticker>")
 def api_earnings_history(ticker):
     """
@@ -2928,6 +3116,9 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .optBadge{display:inline-block;border:1px solid #334155;border-radius:999px;padding:2px 7px;font-size:11px;white-space:nowrap}
 .optGood{color:#86efac}.optWarn{color:#fde68a}.optBad{color:#fca5a5}
 .optionsBtn{padding:5px 8px;font-size:11px}
+.peScore{font-size:17px;font-weight:900;color:#75e7ad}.peContract{min-width:190px}.peContract b{color:#dbeafe}
+.execWide{color:#fde68a}.execGood{color:#86efac}.histRunner{display:inline-block;margin-top:4px;border:1px solid #7c3aed;color:#c4b5fd;border-radius:999px;padding:2px 6px;font-size:9px;font-weight:800}
+
 
 .setupBtn{display:inline-block;background:#1d4ed8;color:#fff;text-decoration:none;border:1px solid #2563eb;border-radius:8px;padding:9px 12px;font-weight:700}
 .setupBtn:hover{filter:brightness(1.08)}
@@ -3103,7 +3294,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.33 candlestick proportion fix */
+/* v22.34 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3116,7 +3307,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.33 layout + STRAT confluence */
+/* v22.34 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3159,7 +3350,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.33 sector-summary containment */
+/* v22.34 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3182,7 +3373,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.33 session volume profile */
+/* v22.34 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3198,7 +3389,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.33</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.34</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -3495,19 +3686,17 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 <div id="earnings" class="view">
   <div class="panel">
-    <div class="row"><strong>Post-Earnings Screen</strong>
-      <label class="note">Sector</label>
-      <select id="earnSector">""" + "".join([f'<option value="{k}">{k} · {v}</option>' for k,v in RRG_UNIVERSE.items()]) + r"""</select>
-      <label class="note">Reported within</label><select id="earnDays"><option>5</option><option selected>10</option><option>14</option><option>20</option></select><span class="note">trading days (approx.)</span>
-      <span class="note">All ETF holdings are scanned automatically</span>
+    <div class="row"><strong>🔥 Post-Earnings Opportunities</strong>
+      <label class="note">Reported within</label><select id="earnDays"><option selected>5</option><option>7</option><option>10</option></select><span class="note">trading days (approx.)</span>
+      <span class="note">Automatically scans all sectors + industries/themes</span>
       <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
       <label class="note">Search</label><input id="earnTickerSearch" type="search" placeholder="Ticker / name…" autocomplete="off" style="width:120px">
-      <button class="primary" id="runEarnings">Scan earnings</button><span id="estatus" class="status"></span>
+      <button class="primary" id="runEarnings">Scan all earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Earnings source priority: Finnhub → Nasdaq public calendar → Yahoo calendar → limited ticker-history fallback. Recent earnings discovery uses a calendar-level check plus ticker history. Historical mover profiles are loaded on demand when you tap Earnings history. If a free source cannot provide enough completed prior events, the row will now say so explicitly instead of appearing stuck.</div>
+    <div class="note" style="margin-top:9px">Ranks recent reporters by historical 5–14D continuation, current post-earnings move and trajectory-first RRG. Options favor discounted OTM contracts (~2–8% OTM, roughly 0.25–0.45 delta) with real OI/volume. Liquid, Tradable, and Wide but Active can qualify; poor/no-market contracts are rejected.</div>
   </div>
   <div class="panel">
-    <table><thead><tr><th>#</th><th>Ticker</th><th>Recent earnings</th><th>Historical mover</th><th>Rotation vs sector</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
+    <table><thead><tr><th>#</th><th>Opportunity</th><th>Recent earnings</th><th>Historical continuation</th><th>Current / RRG</th><th>Best OTM contract</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
   </div>
 </div>
 
@@ -5688,25 +5877,24 @@ function compactRRG(r){
 }
 function moverHTML(p){if(!p)return'<span class="mover">LOAD DETAILS</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
 function renderEarnings(){
- let f=document.getElementById("moverFilter").value;
+ const f=document.getElementById("moverFilter").value;
  const search=(document.getElementById("earnTickerSearch")?.value||"").trim().toUpperCase();
  let arr=earnResults.filter(x=>{
-   let l=(x.profile||{}).label||"UNKNOWN";
+   const l=(x.profile||{}).label||"UNKNOWN";
    const moverOk=f==="all"||(f==="hm"&&(l==="HIGH"||l==="MODERATE"))||(f==="high"&&l==="HIGH");
-   const searchOk=!search||String(x.ticker||"").toUpperCase().includes(search)||String(x.name||"").toUpperCase().includes(search);
-   return moverOk&&searchOk;
+   return moverOk&&(!search||String(x.ticker||"").includes(search)||String(x.name||"").toUpperCase().includes(search));
  });
- document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{let p=x.profile,r=x.rotation||{},id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;return `<tr><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div></td><td>${x.earnings_date}<div class="tiny">${x.earnings_time||""}${x.earnings_time?" · ":""}${x.calendar_days_ago} calendar days ago</div><div class="tiny">${x.earnings_source||""}</div></td><td>${moverHTML(p)}</td><td>${compactRRG(r.fast)}<div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div><div class="tiny">${alignBadge(r.alignment)}</div></td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">Earnings history ▾</button></td></tr><tr id="${id}" class="details"><td colspan="6">${detailHTML(x)}</td></tr>`}).join("");
- document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",()=>{
-   const id=b.dataset.id;
-   const row=document.getElementById(id);
-   const ticker=b.dataset.ticker;
-   const eventDate=b.dataset.event;
-   const item=earnResults.find(x=>x.ticker===ticker);
-   if(row)row.classList.toggle("open");
-   if(item && !item.profile && !item.historyLoading && !item.historyError){
-      loadHistory(ticker,eventDate,id);
-   }
+ document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{
+   const p=x.profile||{},r=x.rotation||{},c=x.best_contract,id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
+   const exec=c?.execution_quality||"No executable OTM";
+   const execClass=exec==="Wide but Active"?"execWide":(c?"execGood":"optBad");
+   const contract=c?`<div class="peContract"><b>${c.expiration} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">No executable OTM contract</span>`;
+   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${Number(x.opportunity_score||0).toFixed(0)}/100</div>${p.behavior==="CONTINUATION"?'<span class="histRunner">HISTORICAL RUNNER</span>':""}</td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div></td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div></td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
+ }).join("");
+ document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();document.getElementById(b.dataset.id)?.classList.toggle("open")}));
+ document.querySelectorAll("[data-pe-open]").forEach(row=>row.addEventListener("click",e=>{
+   if(e.target.closest(".detailBtn"))return;
+   openTopSetupDeepDive(row.dataset.peOpen,null,"chart");
  }));
 }
 function detailHTML(x){
@@ -5767,26 +5955,18 @@ async function loadHistory(ticker,eventDate,rowId){
 }
 
 async function runEarnings(){
- let st=document.getElementById("estatus");
- st.textContent="Finding recent reporters and calculating current rotation…";
+ const st=document.getElementById("estatus");
+ st.textContent="Scanning all sectors/themes for recent earnings opportunities…";
  try{
-   const s=document.getElementById("earnSector").value;
-   const days=document.getElementById("earnDays").value;
-   const params=new URLSearchParams({days:String(days)});
-   const response=await fetch(`/api/postearnings/${encodeURIComponent(s)}?${params.toString()}`);
-   const raw=await response.text();
-   let j;
-   try{j=JSON.parse(raw)}catch(parseErr){throw Error(`Server returned an unreadable response (${response.status}). Please retry.`)}
-   if(!response.ok || !j.ok)throw Error(j.error||`Scan failed (${response.status})`);
+   const days=document.getElementById("earnDays").value||"5";
+   const response=await fetch(`/api/postearnings-opportunities?days=${encodeURIComponent(days)}`,{headers:{"Accept":"application/json"}});
+   const raw=await response.text();let j;
+   try{j=JSON.parse(raw)}catch(e){throw Error(`Unreadable earnings response (${response.status})`)}
+   if(!response.ok||!j.ok)throw Error(j.error||`Scan failed (${response.status})`);
    earnResults=j.results||[];
-   const diag=j.earnings_diagnostics||{};
-   st.textContent=(earnResults.length?`${earnResults.length} recent earnings names found`:(j.message||"No recent earnings names found"))+
-     ` · ${j.holdings_total_loaded||"?"} holdings scanned · ${j.holdings_source||""}`+
-     ` · Finnhub ${diag.finnhub||0}, Nasdaq ${diag.nasdaq||0}, Yahoo ${diag.yahoo||0}, targeted ${diag.ticker_history||0}`;
+   st.textContent=`${j.recent_reporters||0} recent reporters · ${j.universe||0} unique holdings scanned · showing ${earnResults.length} curated opportunities`;
    renderEarnings();
- }catch(e){
-   st.innerHTML=`<span class="error">${e.message}</span>`;
- }
+ }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
 }
 
 let historicalData=[];
