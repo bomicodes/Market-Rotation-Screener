@@ -2866,101 +2866,125 @@ def api_postearnings(etf):
 
 @app.get("/api/postearnings-opportunities")
 def api_postearnings_opportunities():
-    """Market-wide recent-earnings continuation scanner.
+    """Fast market-wide post-earnings scanner.
 
-    Scans the union of all sector/theme holdings, then performs expensive
-    historical/options work only on recent reporters.
+    Important: options are intentionally NOT loaded in this request. Render can
+    terminate long synchronous requests with a 502. This endpoint discovers and
+    ranks stock candidates first; the browser then hydrates options per row.
     """
     try:
         recent_days=max(3,min(10,int(request.args.get("days","5"))))
-        all_holdings={}
-        parent_map={}
-        sources=set()
+        all_holdings={}; parent_map={}; sources=set()
         for etf in RRG_UNIVERSE:
             try:
-                bundle=cached(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
-                holdings,source=bundle
-                holdings=apply_sector_supplements(etf,holdings)
-                sources.add(source)
+                holdings,source=cached(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+                holdings=apply_sector_supplements(etf,holdings); sources.add(source)
                 for h in holdings:
                     sym=str(h.get("ticker") or "").upper().strip()
-                    if not sym:continue
-                    all_holdings.setdefault(sym,h)
-                    parent_map.setdefault(sym,[]).append(etf)
+                    if not sym: continue
+                    all_holdings.setdefault(sym,h); parent_map.setdefault(sym,[]).append(etf)
             except Exception:
                 continue
         tickers=list(all_holdings)
+
+        # Reuse the calendar discovery cache. Keep this request stock-focused.
         recent_map,diag=discover_recent_earnings(tickers,recent_days)
         reporters=[s for s in tickers if s in recent_map]
         now=pd.Timestamp.now().normalize()
         if not reporters:
-            return jsonify({"ok":True,"results":[],"universe":len(tickers),"diagnostics":diag})
+            return jsonify({"ok":True,"results":[],"universe":len(tickers),
+                            "recent_reporters":0,"diagnostics":diag})
 
-        # Stock rotation vs SPY for a consistent cross-universe rank.
+        # One batch price request supplies both RRG and current post-earnings move.
         prices=dl_prices(["SPY"]+reporters,"18mo")
         rrg={r["ticker"]:r for r in dual_rrg_rows(prices,"SPY",reporters,8,8)}
 
-        def build_one(sym):
+        def current_from_frame(sym,event_date):
+            try:
+                if sym not in prices.columns:return {}
+                s=prices[sym].dropna()
+                if len(s)<2:return {}
+                d=pd.Timestamp(event_date).normalize()
+                before=s[s.index.normalize()<d]
+                after=s[s.index.normalize()>=d]
+                if before.empty or after.empty:return {}
+                base=float(before.iloc[-1]); last=float(after.iloc[-1])
+                return {"current_move_pct":round((last/base-1)*100,2),
+                        "sessions_since":int(len(after))}
+            except Exception:return {}
+
+        # Cheap pre-rank first. This prevents dozens of per-ticker history calls.
+        prelim=[]
+        for sym in reporters:
             meta=recent_map[sym]; d=pd.Timestamp(meta["date"]).normalize()
+            rot=rrg.get(sym,{})
+            f=rot.get("fast") or {}; tr=rot.get("trend") or {}
+            cur=current_from_frame(sym,d)
+            move=abs(float(cur.get("current_move_pct") or 0))
+            f_in=(f.get("tail_trajectory")=="Rotating In") or (f.get("rs_up") is True and f.get("mom_up") is True)
+            t_in=(tr.get("tail_trajectory")=="Rotating In") or (tr.get("rs_up") is True and tr.get("mom_up") is True)
+            pre=move*2.2+(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
+            prelim.append((pre,sym,d,rot,cur))
+        prelim.sort(reverse=True,key=lambda x:x[0])
+
+        # Historical work only for the strongest 10 stock candidates.
+        def enrich(item):
+            pre,sym,d,rot,cur=item
             dates=merged_historical_earnings_dates(sym,d.strftime("%Y-%m-%d"))
             profile=earnings_profile(sym,dates)
             if not profile:return None
             hist_score=historical_continuation_score(profile)
-            current=post_earnings_current_move(sym,d)
-            rot=rrg.get(sym,{})
             f=rot.get("fast") or {}; tr=rot.get("trend") or {}
-            f_in=f.get("tail_trajectory")=="Rotating In" or (f.get("rs_up") is True and f.get("mom_up") is True)
-            t_in=tr.get("tail_trajectory")=="Rotating In" or (tr.get("rs_up") is True and tr.get("mom_up") is True)
+            f_in=(f.get("tail_trajectory")=="Rotating In") or (f.get("rs_up") is True and f.get("mom_up") is True)
+            t_in=(tr.get("tail_trajectory")=="Rotating In") or (tr.get("rs_up") is True and tr.get("mom_up") is True)
             rot_score=(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
-            move=float(current.get("current_move_pct") or 0)
-            direction="bullish" if move>=0 else "bearish"
-
-            # Historical expected continuation uses typical 10/14D excursion.
+            move=float(cur.get("current_move_pct") or 0)
+            current_score=min(25,abs(move)*2.2)+(4 if profile.get("behavior")=="CONTINUATION" else 0)
             expected=max(float(profile.get("median_exc10") or 0),float(profile.get("median_exc14") or 0))
-            opt=None; best=None
-            try:
-                opt,_,_=cached_refresh_safe(f"options-v21-2:{sym}",lambda:options_quality_payload(sym),ttl=600)
-                best=post_earnings_otm_contract(opt,direction,expected)
-            except Exception:
-                pass
-
-            # Stock thesis dominates; options are execution quality, not a veto
-            # unless no executable OTM contract exists.
-            current_score=min(25,abs(move)*2.2)
-            if profile.get("behavior")=="CONTINUATION":current_score+=4
-            option_score=0
-            if best:
-                option_score={"Liquid":10,"Tradable":9,"Wide but Active":7}.get(best.get("execution_quality"),0)
-            total=.40*hist_score + current_score + rot_score + option_score
+            total=.48*hist_score+current_score+rot_score
             return {
-                "ticker":sym,"name":all_holdings[sym].get("name"),"earnings_date":d.strftime("%Y-%m-%d"),
+                "ticker":sym,"name":all_holdings[sym].get("name"),
+                "earnings_date":d.strftime("%Y-%m-%d"),
                 "calendar_days_ago":max(0,(now-d).days),"parents":parent_map.get(sym,[]),
                 "profile":profile,"historical_score":round(hist_score,1),
-                "current":current,"rotation":rot,"best_contract":best,
-                "options_execution":best.get("execution_quality") if best else "No executable OTM contract",
-                "expected_continuation_pct":round(expected,2),"direction":direction,
+                "current":cur,"rotation":rot,"best_contract":None,
+                "options_execution":"Loading…","options_loading":True,
+                "expected_continuation_pct":round(expected,2),
+                "direction":"bullish" if move>=0 else "bearish",
                 "opportunity_score":round(float(total),1),
             }
 
         rows=[]
         with ThreadPoolExecutor(max_workers=4) as ex:
-            futs=[ex.submit(build_one,s) for s in reporters[:80]]
+            futs=[ex.submit(enrich,x) for x in prelim[:10]]
             for f in as_completed(futs):
                 try:
                     x=f.result()
                     if x:rows.append(x)
-                except Exception:
-                    pass
-        # Keep the list curated. No executable contract can still appear lower
-        # for stock research, but top opportunities favor actual OTM execution.
-        rows.sort(key=lambda x:(x.get("best_contract") is None,-x.get("opportunity_score",0)))
-        return jsonify({
-            "ok":True,"results":rows[:12],"top":rows[:3],"universe":len(tickers),
-            "recent_reporters":len(reporters),"recent_days":recent_days,
-            "diagnostics":diag,"holdings_sources":sorted(sources)
-        })
+                except Exception:pass
+        rows.sort(key=lambda x:-x.get("opportunity_score",0))
+        return jsonify({"ok":True,"results":rows[:8],"universe":len(tickers),
+                        "recent_reporters":len(reporters),"recent_days":recent_days,
+                        "diagnostics":diag,"holdings_sources":sorted(sources),
+                        "options_deferred":True})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
+
+
+@app.get("/api/postearnings-option/<ticker>")
+def api_postearnings_option(ticker):
+    ticker=ticker.upper().strip()
+    try:
+        direction=request.args.get("direction","bullish")
+        expected=_safe_float(request.args.get("expected"))
+        payload,stale,err=cached_refresh_safe(
+            f"options-v21-2:{ticker}",lambda:options_quality_payload(ticker),ttl=600)
+        best=post_earnings_otm_contract(payload,direction,expected)
+        return jsonify({"ok":True,"ticker":ticker,"best_contract":best,
+                        "options_execution":best.get("execution_quality") if best else "No executable OTM contract",
+                        "stale":stale,"refresh_error":err})
+    except Exception as e:
+        return jsonify({"ok":False,"ticker":ticker,"error":str(e)}),500
 
 
 @app.get("/api/earnings-history/<ticker>")
@@ -3294,7 +3318,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 /* v22.5 layout cleanup */
-/* v22.34 candlestick proportion fix */
+/* v22.35 candlestick proportion fix */
 .rrgShell{min-width:0}
 /* Keep the RRG at its established dashboard sizing. The prior aspect-ratio override was removed. */
 #sectorChart{height:500px}
@@ -3307,7 +3331,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel{margin-top:0!important}.dashRight .sectorSummaryPanel .scroll{max-height:390px}.dashRight .sectorSummaryPanel table{font-size:9px}.dashRight .sectorSummaryPanel th,.dashRight .sectorSummaryPanel td{padding:6px 4px}.dashRight .sectorSummaryPanel th:nth-child(n+5),.dashRight .sectorSummaryPanel td:nth-child(n+5){display:none}
 .gexViewTools{justify-content:flex-end}.gexViewBtn{display:none!important}
 
-/* v22.34 layout + STRAT confluence */
+/* v22.35 layout + STRAT confluence */
 .dashboardGrid{align-items:stretch}
 .dashCenter>.panel,.dashRight,.dashRight .sectorSummaryPanel{height:100%;box-sizing:border-box}
 #sectorChart{height:650px}
@@ -3350,7 +3374,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 
 
-/* v22.34 sector-summary containment */
+/* v22.35 sector-summary containment */
 .dashRight{min-height:0!important;overflow:hidden}
 .dashRight .sectorSummaryPanel{
   height:100%!important;
@@ -3373,7 +3397,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 .dashRight .sectorSummaryPanel .scroll::-webkit-scrollbar-thumb:hover{background:#3a5870}
 
 
-/* v22.34 session volume profile */
+/* v22.35 session volume profile */
 #previewVPStatus{color:#8ea2b5}
 
 </style>
@@ -3389,7 +3413,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.34</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.35</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -5888,7 +5912,7 @@ function renderEarnings(){
    const p=x.profile||{},r=x.rotation||{},c=x.best_contract,id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
    const exec=c?.execution_quality||"No executable OTM";
    const execClass=exec==="Wide but Active"?"execWide":(c?"execGood":"optBad");
-   const contract=c?`<div class="peContract"><b>${c.expiration} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">No executable OTM contract</span>`;
+   const contract=x.options_loading?`<span class="note">Loading OTM contracts…</span>`:(c?`<div class="peContract"><b>${c.expiration} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">${x.options_execution||"No executable OTM contract"}</span>`);
    return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${Number(x.opportunity_score||0).toFixed(0)}/100</div>${p.behavior==="CONTINUATION"?'<span class="histRunner">HISTORICAL RUNNER</span>':""}</td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div></td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div></td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
  }).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();document.getElementById(b.dataset.id)?.classList.toggle("open")}));
@@ -5954,6 +5978,30 @@ async function loadHistory(ticker,eventDate,rowId){
  }
 }
 
+async function hydratePostEarningsOptions(){
+ const queue=earnResults.filter(x=>x.options_loading);
+ let idx=0;
+ async function worker(){
+   while(idx<queue.length){
+     const x=queue[idx++];
+     try{
+       const q=new URLSearchParams({direction:x.direction||"bullish",expected:String(x.expected_continuation_pct||0)});
+       const r=await fetch(`/api/postearnings-option/${encodeURIComponent(x.ticker)}?${q.toString()}`);
+       const raw=await r.text();let j;
+       try{j=JSON.parse(raw)}catch(e){throw Error(`Options response ${r.status}`)}
+       if(!r.ok||!j.ok)throw Error(j.error||"Options unavailable");
+       x.best_contract=j.best_contract||null;
+       x.options_execution=j.options_execution||"No executable OTM contract";
+       x.options_loading=false;
+     }catch(e){
+       x.options_loading=false;x.options_execution="Options unavailable";
+     }
+     renderEarnings();
+   }
+ }
+ await Promise.all([worker(),worker(),worker()]);
+}
+
 async function runEarnings(){
  const st=document.getElementById("estatus");
  st.textContent="Scanning all sectors/themes for recent earnings opportunities…";
@@ -5966,6 +6014,7 @@ async function runEarnings(){
    earnResults=j.results||[];
    st.textContent=`${j.recent_reporters||0} recent reporters · ${j.universe||0} unique holdings scanned · showing ${earnResults.length} curated opportunities`;
    renderEarnings();
+   if(j.options_deferred) hydratePostEarningsOptions();
  }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
 }
 
