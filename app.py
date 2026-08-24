@@ -4102,9 +4102,9 @@ function isSafeStockTicker(raw){
 function safeTickerEndpoint(path,ticker,query=""){
  const sym=normalizeStockTicker(ticker);
  if(!isSafeStockTicker(sym))throw new Error(`Invalid ticker symbol: ${sym||ticker}`);
- const base=String(window.location.origin||"").replace(/\/+$/,"");
  const p=String(path||"").startsWith("/")?String(path):`/${String(path||"")}`;
- return `${base}${p}/${encodeURIComponent(sym)}${query||""}`;
+ // Keep same-origin API calls relative for Safari compatibility.
+ return `${p}/${encodeURIComponent(sym)}${query||""}`;
 }
 async function openSectorStockTicker(rawTicker,{scroll=true}={}){
  const ticker=normalizeStockTicker(rawTicker);
