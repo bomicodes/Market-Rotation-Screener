@@ -1,3 +1,10 @@
+v23.2 — DIRECTIONAL PEAD SCORING + DRIFT-WINDOW DTE + GEX CONFLUENCE
+- Post-earnings continuation is now classified by directional close-return persistence (does the day-1 move still hold by day 10/14) instead of magnitude-only excursion ratios; added a REVERSION behavior class for names that reliably give back the initial move.
+- historical_continuation_score() reweighted around the new persistence stats, with a real penalty for REVERSION.
+- Post-earnings scanner now surfaces drift-window progress (% of the typical continuation window already elapsed), a round-trip/give-back check against the day-1 move, and folds current-event EPS surprise magnitude into the opportunity score when it agrees with the price reaction's direction.
+- post_earnings_otm_contract()/options_quality_payload() now accept min_dte/ideal_dte/dte_max so contract selection clears a ticker's own historical drift horizon instead of reusing whatever 0-30D chain window happens to be loaded; /api/postearnings-option derives these automatically per ticker.
+- Top Setups scoring (topSetupEvaluation) now folds in GEX confluence: gamma regime tailwind/caution and room to the nearest wall in the trade direction, using the dealer-positioning data already computed for the options panel.
+
 v23.1 — PERSISTENT HISTORICAL SETUP STORAGE
 - Historical setup snapshots now use PostgreSQL whenever DATABASE_URL is configured.
 - SQLite remains a local-development fallback only.
