@@ -1,0 +1,48 @@
+name: Patch Safari ticker endpoints
+
+on:
+  push:
+    paths:
+      - '.github/workflows/patch-relative-ticker-endpoints.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch helper
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('app.py')
+          text = p.read_text()
+          old = '''function safeTickerEndpoint(path,ticker,query=""){
+           const sym=normalizeStockTicker(ticker);
+           if(!isSafeStockTicker(sym))throw new Error(`Invalid ticker symbol: ${sym||ticker}`);
+           const base=String(window.location.origin||"").replace(/\\/+$/,""");
+           const p=String(path||"").startsWith("/")?String(path):`/${String(path||"")}`;
+           return `${base}${p}/${encodeURIComponent(sym)}${query||""}`;
+          }'''
+          new = '''function safeTickerEndpoint(path,ticker,query=""){
+           const sym=normalizeStockTicker(ticker);
+           if(!isSafeStockTicker(sym))throw new Error(`Invalid ticker symbol: ${sym||ticker}`);
+           const p=String(path||"").startsWith("/")?String(path):`/${String(path||"")}`;
+           // Keep same-origin API calls relative for Safari compatibility.
+           return `${p}/${encodeURIComponent(sym)}${query||""}`;
+          }'''
+          if old not in text:
+              raise SystemExit('Expected safeTickerEndpoint block not found')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          python -m py_compile app.py
+      - name: Commit patch and remove workflow
+        run: |
+          rm .github/workflows/patch-relative-ticker-endpoints.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py .github/workflows/patch-relative-ticker-endpoints.yml
+          git commit -m "Fix Safari ticker API endpoint construction"
+          git push origin HEAD:main
