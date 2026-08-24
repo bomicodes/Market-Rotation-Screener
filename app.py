@@ -1,7 +1,7 @@
 
 from flask import Flask, jsonify, request, Response, session, redirect
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import io, math, time, traceback, os, sqlite3, json
+import io, math, time, traceback, os, sqlite3, json, hmac
 from urllib.parse import quote
 from datetime import datetime, timedelta
 import numpy as np
@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "23.4"
+APP_VERSION = "23.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2446,7 +2446,7 @@ def login():
     error = ""
     if request.method == "POST":
         supplied = request.form.get("password","")
-        if supplied == SCREENER_PASSWORD:
+        if hmac.compare_digest(supplied, SCREENER_PASSWORD):
             session["authenticated"] = True
             return redirect("/")
         error = "Incorrect password."
@@ -2819,7 +2819,14 @@ def _strat_frame(df, label):
             pattern=f"2-2 Reversal {'Up' if c=='2U' else 'Down'}"
     if not pattern:
         pattern={"1":"Inside bar / compression","2U":"Directional 2 Up","2D":"Directional 2 Down","3":"Outside bar"}.get(cur,cur)
-    ftc="bullish" if float(last["Close"])>float(last["Open"]) else ("bearish" if float(last["Close"])<float(last["Open"]) else "neutral")
+    # FTC ("full timeframe continuity") should reflect the STRAT scenario
+    # direction already computed as `direction` above, not raw candle color.
+    # Candle color (close vs open) is a materially different, weaker signal:
+    # a bar can close green during an inside-bar (scenario 1) compression with
+    # no actual directional trigger, and that was previously still counted as
+    # "bullish FTC" — feeding the cross-timeframe continuity score that other
+    # parts of the app (Top Setups, confluence direction) treat as confirmed.
+    ftc=direction
     return {
         "timeframe":label,
         "scenario":cur,
@@ -3109,8 +3116,8 @@ def api_postearnings_opportunities():
             f=rot.get("fast") or {}; tr=rot.get("trend") or {}
             cur=current_from_frame(sym,d)
             move=abs(float(cur.get("current_move_pct") or 0))
-            f_in=(f.get("tail_trajectory")=="Rotating In") or (f.get("rs_up") is True and f.get("mom_up") is True)
-            t_in=(tr.get("tail_trajectory")=="Rotating In") or (tr.get("rs_up") is True and tr.get("mom_up") is True)
+            f_in=((f.get("tail_trajectory")=="Rotating In") if f.get("tail_trajectory") else (f.get("rs_up") is True and f.get("mom_up") is True))
+            t_in=((tr.get("tail_trajectory")=="Rotating In") if tr.get("tail_trajectory") else (tr.get("rs_up") is True and tr.get("mom_up") is True))
             pre=move*2.2+(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
             prelim.append((pre,sym,d,rot,cur))
         prelim.sort(reverse=True,key=lambda x:x[0])
@@ -3123,8 +3130,8 @@ def api_postearnings_opportunities():
             if not profile:return None
             hist_score=historical_continuation_score(profile)
             f=rot.get("fast") or {}; tr=rot.get("trend") or {}
-            f_in=(f.get("tail_trajectory")=="Rotating In") or (f.get("rs_up") is True and f.get("mom_up") is True)
-            t_in=(tr.get("tail_trajectory")=="Rotating In") or (tr.get("rs_up") is True and tr.get("mom_up") is True)
+            f_in=((f.get("tail_trajectory")=="Rotating In") if f.get("tail_trajectory") else (f.get("rs_up") is True and f.get("mom_up") is True))
+            t_in=((tr.get("tail_trajectory")=="Rotating In") if tr.get("tail_trajectory") else (tr.get("rs_up") is True and tr.get("mom_up") is True))
             rot_score=(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
             move=float(cur.get("current_move_pct") or 0)
             current_score=min(25,abs(move)*2.2)+(4 if profile.get("behavior")=="CONTINUATION" else 0)
@@ -5850,18 +5857,18 @@ function topSetupEvaluation(x){
  const parent=x._parentGroup||null;
  if(parent){
    const pf=parent.fast||parent,pt=parent.trend||{};
-   const pFastIn=pf?.tail_trajectory==="Rotating In"||(pf?.rs_up===true&&pf?.mom_up===true);
-   const pTrendIn=pt?.tail_trajectory==="Rotating In"||(pt?.rs_up===true&&pt?.mom_up===true);
+   const pFastIn=(pf?.tail_trajectory ? pf.tail_trajectory==="Rotating In" : (pf?.rs_up===true&&pf?.mom_up===true));
+   const pTrendIn=(pt?.tail_trajectory ? pt.tail_trajectory==="Rotating In" : (pt?.rs_up===true&&pt?.mom_up===true));
    const pGood=["Leading","Improving"].includes(pf?.quadrant)&&(["Leading","Improving"].includes(pt?.quadrant)||pTrendIn);
    if(pGood||pFastIn){raw+=10;reasons.push([`${x._parentTicker||"Group"} supportive`,"good"]);}
    else {raw-=6;reasons.push([`${x._parentTicker||"Group"} mixed`,"warn"]);}
  }
 
  const fq=String(f?.quadrant||""),tq=String(t?.quadrant||"");
- const fIn=f?.tail_trajectory==="Rotating In" || (f?.rs_up===true&&f?.mom_up===true);
- const tIn=t?.tail_trajectory==="Rotating In" || (t?.rs_up===true&&t?.mom_up===true);
- const fOut=f?.tail_trajectory==="Rotating Out" || (f?.rs_up===false&&f?.mom_up===false);
- const tOut=t?.tail_trajectory==="Rotating Out" || (t?.rs_up===false&&t?.mom_up===false);
+ const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
+ const tIn=(t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up===true&&t?.mom_up===true));
+ const fOut=(f?.tail_trajectory ? f.tail_trajectory==="Rotating Out" : (f?.rs_up===false&&f?.mom_up===false));
+ const tOut=(t?.tail_trajectory ? t.tail_trajectory==="Rotating Out" : (t?.rs_up===false&&t?.mom_up===false));
  const fGood=["Improving","Leading"].includes(fq);
  const tGood=["Improving","Leading"].includes(tq);
 
@@ -5952,19 +5959,19 @@ function topSetupEvaluation(x){
 }
 function groupTrajectoryPass(g){
  const f=g?.fast||g||{},t=g?.trend||{};
- const fIn=f?.tail_trajectory==="Rotating In"||(f?.rs_up===true&&f?.mom_up===true);
- const tIn=t?.tail_trajectory==="Rotating In"||(t?.rs_up===true&&t?.mom_up===true);
- const fOut=f?.tail_trajectory==="Rotating Out"||(f?.rs_up===false&&f?.mom_up===false);
- const tOut=t?.tail_trajectory==="Rotating Out"||(t?.rs_up===false&&t?.mom_up===false);
+ const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
+ const tIn=(t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up===true&&t?.mom_up===true));
+ const fOut=(f?.tail_trajectory ? f.tail_trajectory==="Rotating Out" : (f?.rs_up===false&&f?.mom_up===false));
+ const tOut=(t?.tail_trajectory ? t.tail_trajectory==="Rotating Out" : (t?.rs_up===false&&t?.mom_up===false));
  const fGood=["Leading","Improving"].includes(f?.quadrant),tGood=["Leading","Improving"].includes(t?.quadrant);
  return !fOut&&!tOut && ((fGood&&tGood)||(fIn&&tIn)||(fGood&&tIn));
 }
 function stockTrajectoryPrefilter(x){
  const f=x?.fast||x||{},t=x?.trend||{};
- const fIn=f?.tail_trajectory==="Rotating In"||(f?.rs_up===true&&f?.mom_up===true);
- const tIn=t?.tail_trajectory==="Rotating In"||(t?.rs_up===true&&t?.mom_up===true);
- const fOut=f?.tail_trajectory==="Rotating Out"||(f?.rs_up===false&&f?.mom_up===false);
- const tOut=t?.tail_trajectory==="Rotating Out"||(t?.rs_up===false&&t?.mom_up===false);
+ const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
+ const tIn=(t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up===true&&t?.mom_up===true));
+ const fOut=(f?.tail_trajectory ? f.tail_trajectory==="Rotating Out" : (f?.rs_up===false&&f?.mom_up===false));
+ const tOut=(t?.tail_trajectory ? t.tail_trajectory==="Rotating Out" : (t?.rs_up===false&&t?.mom_up===false));
  const fGood=["Leading","Improving"].includes(f?.quadrant),tGood=["Leading","Improving"].includes(t?.quadrant);
  return !fOut&&!tOut && ((fGood&&tGood)||(fIn&&tIn)||(fGood&&tIn)||(fIn&&tGood));
 }
@@ -5972,8 +5979,8 @@ function preliminaryRRGScore(x){
  const f=x.fast||x,t=x.trend||{};let s=0;
  if(["Leading","Improving"].includes(f?.quadrant))s+=4;
  if(["Leading","Improving"].includes(t?.quadrant))s+=3;
- if(f?.tail_trajectory==="Rotating In"||(f?.rs_up&&f?.mom_up))s+=3;
- if(t?.tail_trajectory==="Rotating In"||(t?.rs_up&&t?.mom_up))s+=3;
+ if((f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up&&f?.mom_up)))s+=3;
+ if((t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up&&t?.mom_up)))s+=3;
  s+=Math.max(0,Math.min(4,Number(x._parentHeat||0)/2.5));
  return s;
 }
