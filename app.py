@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "23.2"
+APP_VERSION = "23.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2002,8 +2002,12 @@ def _cluster_institutional_events(raw, meta):
     """Cluster fragmented prints into contract-level institutional flow events.
 
     This is intentionally *not* directional classification. It groups nearby prints
-    in the same contract when they occur within 90 seconds and at similar prices,
-    which helps keep split/block executions from appearing as dozens of unrelated prints.
+    in the same contract into one event when the WHOLE group fits within a 90-second
+    window of its first print and within a 7.5% price band of its own range — bounded
+    against the cluster's origin, not a shifting consecutive-gap/running-vwap
+    reference. The latter can let a chain of individually-small steps stretch a
+    single reported "event" across many minutes or a wide price range while never
+    tripping either check on any one step.
     """
     seed=[]
     for sym,t in raw:
@@ -2015,22 +2019,25 @@ def _cluster_institutional_events(raw, meta):
     seed.sort(key=lambda z:((z[0] or ""), z[1] or datetime.min))
     clusters=[]; cur=None
     for sym,ts,p,sz,prem,t in seed:
-        if cur is not None and cur["symbol"]==sym and ts is not None and cur["end_dt"] is not None:
-            gap=(ts-cur["end_dt"]).total_seconds()
-            ref=max(cur["vwap"],.01)
-            similar=abs(p-ref)/ref<=0.075
-            if gap<=90 and similar:
+        if cur is not None and cur["symbol"]==sym and ts is not None and cur["start_dt"] is not None:
+            elapsed=(ts-cur["start_dt"]).total_seconds()
+            lo=min(cur["min_price"],p); hi=max(cur["max_price"],p)
+            ref=max(lo,.01)
+            spread_ok=(hi-lo)/ref<=0.075
+            if elapsed<=90 and spread_ok:
                 oldprem=cur["premium"]
                 cur["premium"]+=prem; cur["size"]+=sz; cur["prints"]+=1
                 cur["vwap"]=(cur["vwap"]*oldprem+p*prem)/max(cur["premium"],1)
                 cur["end_dt"]=ts; cur["end_timestamp"]=t.get("t",t.get("timestamp"))
                 cur["max_print"]=max(cur["max_print"],prem)
+                cur["min_price"]=lo; cur["max_price"]=hi
                 continue
         if cur is not None: clusters.append(cur)
         r=meta.get(sym,{})
         cur={"symbol":sym,"type":r.get("type"),"expiration":r.get("expiration"),"strike":r.get("strike"),
              "start_dt":ts,"end_dt":ts,"start_timestamp":t.get("t",t.get("timestamp")),"end_timestamp":t.get("t",t.get("timestamp")),
              "vwap":p,"size":sz,"premium":prem,"prints":1,"max_print":prem,
+             "min_price":p,"max_price":p,
              "volume":int(r.get("volume") or 0),"open_interest":int(r.get("open_interest") or 0)}
     if cur is not None: clusters.append(cur)
 
@@ -5125,12 +5132,38 @@ function renderChainFreshness(ts,isStale=false,refreshError=null){
 
 function buildConfluence(ticker,spot,p){
  const levels=[]; const va=valueAcceptanceMap[ticker]; const st=stratSignalMap[ticker];
- if(va){levels.push({v:va.vah,n:"VAH"},{v:va.poc,n:"POC"},{v:va.val,n:"VAL"});}
- (st?.frames||[]).forEach(f=>{if(Number.isFinite(Number(f.up_trigger)))levels.push({v:Number(f.up_trigger),n:`${f.timeframe} 2U`});if(Number.isFinite(Number(f.down_trigger)))levels.push({v:Number(f.down_trigger),n:`${f.timeframe} 2D`});});
- if(p){if(p.call_wall!=null)levels.push({v:Number(p.call_wall),n:"Call wall"});if(p.put_wall!=null)levels.push({v:Number(p.put_wall),n:"Put wall"});if(p.modeled_flip!=null)levels.push({v:Number(p.modeled_flip),n:"Gamma flip"});}
- const tol=Math.max(.5,(spot||100)*.006), clusters=[];
- levels.filter(x=>Number.isFinite(x.v)).sort((a,b)=>a.v-b.v).forEach(x=>{let c=clusters.find(c=>Math.abs(c.center-x.v)<=tol);if(!c){c={center:x.v,items:[]};clusters.push(c)}c.items.push(x);c.center=c.items.reduce((s,z)=>s+z.v,0)/c.items.length;});
- return clusters.filter(c=>c.items.length>=2).sort((a,b)=>b.items.length-a.items.length)[0]||null;
+ if(va){levels.push({v:va.vah,n:"VAH",bias:"bullish"},{v:va.poc,n:"POC",bias:"neutral"},{v:va.val,n:"VAL",bias:"bearish"});}
+ (st?.frames||[]).forEach(f=>{if(Number.isFinite(Number(f.up_trigger)))levels.push({v:Number(f.up_trigger),n:`${f.timeframe} 2U`,bias:"bullish"});if(Number.isFinite(Number(f.down_trigger)))levels.push({v:Number(f.down_trigger),n:`${f.timeframe} 2D`,bias:"bearish"});});
+ if(p){if(p.call_wall!=null)levels.push({v:Number(p.call_wall),n:"Call wall",bias:"bullish"});if(p.put_wall!=null)levels.push({v:Number(p.put_wall),n:"Put wall",bias:"bearish"});if(p.modeled_flip!=null)levels.push({v:Number(p.modeled_flip),n:"Gamma flip",bias:"neutral"});}
+ const tol=Math.max(.5,(spot||100)*.006);
+
+ // Bounded clustering: a level only joins an existing cluster if doing so keeps
+ // the cluster's TOTAL SPAN within tolerance, checked against the cluster's
+ // actual min/max — not a shifting running average. The prior running-average
+ // approach let a chain of sequentially-spaced levels drift to several multiples
+ // of tol before splitting, which quietly widened what "confluence" meant.
+ function clusterLevels(subset){
+   const sorted=subset.filter(x=>Number.isFinite(x.v)).sort((a,b)=>a.v-b.v);
+   const clusters=[];
+   sorted.forEach(x=>{
+     let target=null;
+     for(const c of clusters){
+       if(Math.max(c.max,x.v)-Math.min(c.min,x.v)<=tol){target=c;break;}
+     }
+     if(target){target.items.push(x);target.min=Math.min(target.min,x.v);target.max=Math.max(target.max,x.v);}
+     else clusters.push({min:x.v,max:x.v,items:[x]});
+   });
+   return clusters.filter(c=>c.items.length>=2).sort((a,b)=>b.items.length-a.items.length)[0]||null;
+ }
+
+ // Cluster bullish-side and bearish-side levels separately. A call wall and a
+ // down-trigger sitting near each other isn't real confluence — it's a
+ // resistance marker and a support marker overlapping, which is closer to a
+ // chop/indecision signal than a confident directional zone. Neutral levels
+ // (POC, gamma flip) can support either side since they aren't directional.
+ const bullish=clusterLevels(levels.filter(x=>x.bias==="bullish"||x.bias==="neutral"));
+ const bearish=clusterLevels(levels.filter(x=>x.bias==="bearish"||x.bias==="neutral"));
+ return {bullish,bearish};
 }
 async function renderTradeThesis(ticker,spot,p){
  if(!ticker)return; ticker=String(ticker).toUpperCase(); const x=liveStockData.find(r=>r.ticker===ticker),va=valueAcceptanceMap[ticker],vm=valueMigrationMap[ticker],st=stratSignalMap[ticker];
@@ -5140,8 +5173,12 @@ async function renderTradeThesis(ticker,spot,p){
  if(vm?.direction==="bullish"){score+=.6;reasons.push("value migrating higher")} if(vm?.direction==="bearish")score-=.6;
  if(st?.continuity==="bullish"){score+=.6;reasons.push("bullish STRAT FTC")} if(st?.continuity==="bearish")score-=.6;
  score=Math.max(0,Math.min(10,score)); const bias=score>=7?"BULLISH":score<=3.5?"BEARISH":"MIXED";
- const cluster=buildConfluence(ticker,spot,p),zone=document.getElementById("confluenceZone");
- if(zone)zone.innerHTML=cluster?`<b>CONFLUENCE ZONE · $${fmt(Math.min(...cluster.items.map(z=>z.v)),2)}–$${fmt(Math.max(...cluster.items.map(z=>z.v)),2)}</b> · ${cluster.items.map(z=>z.n).join(" + ")}`:"No multi-factor level cluster detected yet.";
+ const zones=buildConfluence(ticker,spot,p),zone=document.getElementById("confluenceZone");
+ if(zone){
+   const fmtZone=(c,label,cls)=>c?`<div class="confluenceRow ${cls}"><b>${label} CONFLUENCE · $${fmt(Math.min(...c.items.map(z=>z.v)),2)}–$${fmt(Math.max(...c.items.map(z=>z.v)),2)}</b> · ${c.items.map(z=>z.n).join(" + ")}</div>`:"";
+   const html=fmtZone(zones.bullish,"BULLISH","bullish")+fmtZone(zones.bearish,"BEARISH","bearish");
+   zone.innerHTML=html||"No multi-factor level cluster detected yet.";
+ }
  const b=document.getElementById("thesisBias"),txt=document.getElementById("thesisText"); if(b)b.textContent=`${bias} · ${score.toFixed(1)}/10`; if(txt)txt.innerHTML=`<b>${ticker}</b> · ${reasons.join(" · ")||"insufficient confirmation"}${vm?` · ${vm.state}`:""}. GEX window: ${activeOptionsData?.gex_window||"0-30"}.`;
  const signature=[f.quadrant||"na",f.tail_trajectory||"na",t.quadrant||"na",va?.direction||"na",vm?.direction||"na",st?.continuity||"na",p?.gamma_regime||"na"].join("|");
  try{await fetch("/api/setup-snapshot",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticker,spot,bias,score,signature,raw:{fast:f,trend:t,value:va,value_migration:vm,strat:st,positioning:{call_wall:p?.call_wall,put_wall:p?.put_wall,modeled_flip:p?.modeled_flip,net_gex:p?.net_gex,gamma_regime:p?.gamma_regime},gex_window:activeOptionsData?.gex_window}})}); const hr=await fetch(`/api/setup-history/${encodeURIComponent(ticker)}?signature=${encodeURIComponent(signature)}`),hj=await hr.json(); const he=document.getElementById("historicalSetup"); if(he&&hj.ok){const r5=hj.returns?.["5"];he.innerHTML=`<b>HISTORICAL SETUP</b> · ${hj.count} captured matches${r5?.n?` · 5D ${r5.win_rate}% positive · median ${r5.median>=0?"+":""}${r5.median}%`:" · collecting forward outcomes"}${hj.median_mfe_10d!=null?` · 10D MFE ${hj.median_mfe_10d>=0?"+":""}${hj.median_mfe_10d}%`:""}`;}}
@@ -5327,24 +5364,45 @@ function classifyValueAcceptance(payload){
  const prevClose=prev?Number(prev.close):NaN;
  if(!Number.isFinite(close))return null;
 
+ // Volume confirmation: a quiet-volume close outside value is weaker evidence
+ // of real acceptance than an expansion-volume close. Compare this bar's volume
+ // against the trailing 20-bar average (excluding this bar). When volume data
+ // isn't available, treat confirmation as unknown rather than blocking CONFIRMED
+ // outright — this only ever downgrades a result when we positively know volume
+ // was light, never when we simply lack the data.
+ const priorVols=bars.slice(0,-1).slice(-20).map(x=>Number(x.volume)).filter(Number.isFinite);
+ const avgVol=priorVols.length?priorVols.reduce((s,x)=>s+x,0)/priorVols.length:null;
+ const curVol=Number(last.volume);
+ const volKnown=avgVol!=null&&avgVol>0&&Number.isFinite(curVol);
+ const volConfirmed=volKnown?(curVol>=avgVol*1.2):null;
+ const volNote=volKnown?(volConfirmed?" on above-average volume":" on below-average volume"):"";
+
  let state="Inside value",kind="neutral",strength="NEUTRAL",direction="neutral",score=0,detail=`Price remains inside ${referenceLabel.toLowerCase()} value.`;
  const priorAbove=Number.isFinite(prevClose)&&prevClose>vah;
  const priorBelow=Number.isFinite(prevClose)&&prevClose<val;
 
  if(close>vah){
    direction="bullish";
-   if(priorAbove || low>=vah){
+   const structural=priorAbove || low>=vah;
+   if(structural && volConfirmed!==false){
      state="Accepted above VAH";kind="bullish";strength="CONFIRMED";score=1;
-     detail=`Break above ${referenceLabel.toLowerCase()} VAH is holding outside value — bullish acceptance.`;
+     detail=`Break above ${referenceLabel.toLowerCase()} VAH is holding outside value — bullish acceptance${volNote}.`;
+   }else if(structural){
+     state="Accepted above VAH (light volume)";kind="developing";strength="DEVELOPING";score=.75;
+     detail=`Price is holding outside ${referenceLabel.toLowerCase()} value, but on below-average volume — acceptance is less convincing without real participation.`;
    }else{
      state="Breaking above VAH";kind="developing";strength="DEVELOPING";score=.5;
      detail=`Closed above VAH, but acceptance still needs another hold/close outside value.`;
    }
  }else if(close<val){
    direction="bearish";
-   if(priorBelow || high<=val){
+   const structural=priorBelow || high<=val;
+   if(structural && volConfirmed!==false){
      state="Accepted below VAL";kind="bearish";strength="CONFIRMED";score=1;
-     detail=`Break below ${referenceLabel.toLowerCase()} VAL is holding outside value — bearish acceptance.`;
+     detail=`Break below ${referenceLabel.toLowerCase()} VAL is holding outside value — bearish acceptance${volNote}.`;
+   }else if(structural){
+     state="Accepted below VAL (light volume)";kind="developing";strength="DEVELOPING";score=.75;
+     detail=`Price is holding outside ${referenceLabel.toLowerCase()} value, but on below-average volume — acceptance is less convincing without real participation.`;
    }else{
      state="Breaking below VAL";kind="developing";strength="DEVELOPING";score=.5;
      detail=`Closed below VAL, but acceptance still needs another hold/close outside value.`;
@@ -5357,7 +5415,7 @@ function classifyValueAcceptance(payload){
    detail=`Price auctioned below VAL but closed back inside value — failed downside auction.`;
  }
 
- return {state,kind,strength,direction,score,vah,poc,val,close,referenceLabel};
+ return {state,kind,strength,direction,score,vah,poc,val,close,referenceLabel,vol_confirmed:volConfirmed};
 }
 
 function renderValueAcceptance(sig){

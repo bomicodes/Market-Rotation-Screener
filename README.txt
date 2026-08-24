@@ -1,3 +1,16 @@
+v23.4 — BOUNDED CLUSTERING + VOLUME-CONFIRMED VALUE ACCEPTANCE
+- classifyValueAcceptance() now checks the breakout bar's volume against its trailing 20-bar average. A structurally-valid VAH/VAL breakout on below-average volume is now labeled DEVELOPING (not CONFIRMED) — a quiet-volume close outside value is weaker evidence of real acceptance. Behavior is unchanged when volume data isn't available.
+- buildConfluence() clustering is now bounded by actual span (a level only joins a cluster if the cluster's real min-max range stays within tolerance), replacing a shifting running-average comparison that could let a chain of levels drift to several multiples of the stated tolerance before splitting.
+- buildConfluence() now clusters bullish-side levels (VAH, call wall, up-triggers) and bearish-side levels (VAL, put wall, down-triggers) separately, so a resistance marker and a support marker sitting near each other are no longer reported as one confident directional "confluence zone." Neutral levels (POC, gamma flip) can support either side. The Trade Thesis panel now shows both zones when present.
+- _cluster_institutional_events() flow clustering is bounded the same way: a print group is one event only if the WHOLE group fits within 90 seconds of its first print and a 7.5% price band of its own range, replacing a consecutive-gap/running-vwap check that could let a chain of small steps stretch a single reported event across many minutes or a wide price range.
+
+v23.3 — OPPORTUNITY SCORE + GEX CONFLUENCE FIXES
+- opportunity_score in the post-earnings scanner is now clamped 0-100 to match the "/100" label the UI already shows; it could previously exceed 100 or go negative.
+- Fixed a latent bug where a genuinely-quiet mover (median 14D excursion rounding to 0.0) was silently treated as having no 14-day data and defaulted to the shorter 10-day drift window; added an explicit has_exc14_data flag instead of checking the rounded value's truthiness.
+- Round-trip/give-back detection now only fires when the day-1 reaction was a meaningful size (>=1%); dividing by a near-flat day-1 move was producing noisy, meaningless retained-move percentages.
+- EPS-surprise alignment now checks the day-1 reaction, not the current (possibly already-faded) cumulative move — a beat that popped on day 1 and later gave it back is still counted as an aligned reaction.
+- Top Setups GEX confluence (topSetupEvaluation) no longer falls back to bare RRG tail rotation for trade direction; it only applies the gamma-regime/wall-room adjustment when a confirmed direction exists from value acceptance or STRAT.
+
 v23.2 — DIRECTIONAL PEAD SCORING + DRIFT-WINDOW DTE + GEX CONFLUENCE
 - Post-earnings continuation is now classified by directional close-return persistence (does the day-1 move still hold by day 10/14) instead of magnitude-only excursion ratios; added a REVERSION behavior class for names that reliably give back the initial move.
 - historical_continuation_score() reweighted around the new persistence stats, with a real penalty for REVERSION.
