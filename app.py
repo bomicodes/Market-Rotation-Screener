@@ -1646,11 +1646,31 @@ def earnings_profile(ticker, dates):
     pct10 = 100*sum(v>=10 for v in ex14)/len(ex14) if ex14 else None
 
     # continuation tendency: compare 10d excursion to 1d excursion
+    # (magnitude only — doesn't distinguish real drift from round-trip volatility)
     ratios=[]
     for e in hist:
         if e["exc1"] and e["exc10"] is not None and e["exc1"]>0:
             ratios.append(e["exc10"]/e["exc1"])
     cont_ratio=float(np.median(ratios)) if ratios else 1.0
+
+    # Directional persistence: did the day-1 close-return direction still hold
+    # (and retain real magnitude) by day 10/14, or did the stock round-trip?
+    # This is the actual PEAD proxy — abs_excursion() alone can't tell a stock
+    # that kept grinding in one direction apart from one that gapped and faded.
+    persisted=0; reverted=0; persist_n=0
+    for e in hist:
+        c1=e.get("close1")
+        c_end=e.get("close10") if e.get("close10") is not None else e.get("close14")
+        if c1 is None or c_end is None or c1==0: continue
+        persist_n+=1
+        same_dir=(c_end*c1)>0
+        retained=abs(c_end)/abs(c1)
+        if same_dir and retained>=0.5:
+            persisted+=1
+        elif (not same_dir) or retained<=0.2:
+            reverted+=1
+    pct_persist=persisted/persist_n if persist_n else None
+    pct_revert=reverted/persist_n if persist_n else None
 
     # Simple mover score driven by typical excursion + frequency.
     m1=med("exc1") or 0
@@ -1659,13 +1679,22 @@ def earnings_profile(ticker, dates):
     if score>=7.0: label="HIGH"
     elif score>=4.5: label="MODERATE"
     else: label="LOW"
-    behavior="CONTINUATION" if cont_ratio>=1.45 else ("FAST REACTION" if cont_ratio<1.15 else "MIXED")
+    if pct_revert is not None and pct_revert>=0.45:
+        behavior="REVERSION"
+    elif pct_persist is not None and pct_persist>=0.60:
+        behavior="CONTINUATION"
+    elif cont_ratio<1.15:
+        behavior="FAST REACTION"
+    else:
+        behavior="MIXED"
     return {
         "label":label,"score":round(score,1),"n":len(hist),
         "median_exc1":round(m1,2),"median_exc3":round(med("exc3") or 0,2),
         "median_exc5":round(med("exc5") or 0,2),"median_exc10":round(m10,2),
         "median_exc14":round(med("exc14") or 0,2),
         "pct_gt5_10d":round(pct5 or 0,1),"pct_gt10_14d":round(pct10 or 0,1),
+        "pct_directional_persist":round((pct_persist or 0)*100,1),
+        "pct_directional_revert":round((pct_revert or 0)*100,1),
         "behavior":behavior,"events":list(reversed(display_events))
     }
 
@@ -1777,6 +1806,13 @@ def option_contract_row(symbol,snap,meta,spot):
         mid=(bid+ask)/2
         if mid>0: spread=(ask-bid)/mid*100
     moneyness=(strike/spot-1)*100 if strike and spot else None
+    dte=None
+    exp_str=(meta or {}).get("expiration_date")
+    if exp_str:
+        try:
+            dte=(datetime.strptime(str(exp_str)[:10],"%Y-%m-%d").date()-datetime.now().date()).days
+        except Exception:
+            dte=None
     if oi>=500 and vol>=100 and spread is not None and spread<=10:
         liq="Liquid"; execution_label="Liquid"
     elif oi>=100 and vol>=25 and spread is not None and spread<=15:
@@ -1792,7 +1828,7 @@ def option_contract_row(symbol,snap,meta,spot):
         else:
             execution_label="Low Activity"
     return {
-        "symbol":symbol,"type":(meta or {}).get("type"),"expiration":(meta or {}).get("expiration_date"),
+        "symbol":symbol,"type":(meta or {}).get("type"),"expiration":(meta or {}).get("expiration_date"),"dte":dte,
         "strike":strike,"bid":bid,"ask":ask,"mid":mid,"last":last,"last_size":int(last_size),"trade_ts":t.get("t",t.get("timestamp")),"quote_ts":q.get("t",q.get("timestamp")),"volume":int(vol),"open_interest":int(oi),
         "iv":(iv*100 if iv is not None and iv<=5 else iv),"delta":_safe_float(g.get("delta")),
         "gamma":_safe_float(g.get("gamma")),"theta":_safe_float(g.get("theta")),"vega":_safe_float(g.get("vega")),
@@ -2135,11 +2171,12 @@ def flow_payload(ticker, options_payload=None):
         "note":"V21.3 Institutional Flow Engine: broad ~900-day/wide-strike chain, full candidate coverage when practical, and activity-targeted coverage (default 99.5%) for very large chains. Historical aggressor direction is intentionally not fabricated: Alpaca indicative option trades are delayed while quotes are modified/current, and Alpaca does not expose a historical option-NBBO endpoint in the documented REST API. Contract mix is calls vs puts only; use FlowMS as the directional cross-check unless OPRA live quote/trade capture is available."
     }
 
-def options_quality_payload(ticker, gex_window="0-30"):
+def options_quality_payload(ticker, gex_window="0-30", dte_max=30):
     ticker=ticker.upper().strip()
+    dte_max=max(7,min(90,int(dte_max or 30)))
     today=pd.Timestamp.now().normalize()
     start=today.strftime("%Y-%m-%d")
-    end=(today+pd.Timedelta(days=30)).strftime("%Y-%m-%d")
+    end=(today+pd.Timedelta(days=dte_max)).strftime("%Y-%m-%d")
     rv20,spot=realized_vol_20d(ticker)
     if spot is None: raise RuntimeError(f"Could not determine current price for {ticker}.")
     contracts=alpaca_option_contracts(ticker,start,end)
@@ -2178,7 +2215,7 @@ def options_quality_payload(ticker, gex_window="0-30"):
             rr=option_contract_row(sym,snap,gmeta[sym],spot)
             if rr.get("expiration") and rr.get("moneyness_pct") is not None and abs(rr["moneyness_pct"])<=25:gex_rows.append(rr)
     return {
-        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":30,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":dte_max,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
         "chain_updated_at":datetime.utcnow().isoformat(timespec="seconds")+"Z",
         "rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
@@ -2189,15 +2226,21 @@ def options_quality_payload(ticker, gex_window="0-30"):
 
 
 
-def post_earnings_otm_contract(payload, direction="bullish", expected_move_pct=None):
+def post_earnings_otm_contract(payload, direction="bullish", expected_move_pct=None, min_dte=None, ideal_dte=None):
     """Pick a discounted OTM contract while requiring a real executable market.
 
     Primary target: ~2-8% OTM and |delta| ~0.25-0.45. Wider spreads remain
     eligible when OI/volume show genuine participation.
+
+    min_dte/ideal_dte let a caller anchor the pick to a ticker's own expected
+    drift horizon instead of just grabbing whatever's cheapest in the loaded
+    chain — a contract that expires before a typical continuation move even
+    finishes isn't actually a post-earnings-drift trade.
     """
     spot=_safe_float((payload or {}).get("spot"))
     if not spot: return None
     want_put=str(direction).lower().startswith("bear")
+    min_dte=int(min_dte) if min_dte is not None else 0
     rows=[]
     for r in (payload or {}).get("contracts") or []:
         typ=str(r.get("type") or "").lower()
@@ -2207,6 +2250,8 @@ def post_earnings_otm_contract(payload, direction="bullish", expected_move_pct=N
         bid=_safe_float(r.get("bid")); ask=_safe_float(r.get("ask"))
         oi=int(_safe_float(r.get("open_interest")) or 0); vol=int(_safe_float(r.get("volume")) or 0)
         spread=_safe_float(r.get("spread_pct")); delta=abs(_safe_float(r.get("delta")) or 0)
+        dte=r.get("dte")
+        if dte is not None and dte<min_dte: continue
         if not strike or not mid or mid<=0 or bid is None or bid<=0 or ask is None or ask<=bid: continue
         otm=((spot-strike)/spot*100) if want_put else ((strike-spot)/spot*100)
         if otm<=0 or otm>12: continue
@@ -2234,7 +2279,13 @@ def post_earnings_otm_contract(payload, direction="bullish", expected_move_pct=N
             coverage_score=12 if coverage<=.75 else (7 if coverage<=1.0 else 1)
         else:
             coverage_score=5
-        score=otm_score+delta_score+exec_score+activity+premium_score+coverage_score
+        # Favor expirations near the ticker's own expected drift horizon so the
+        # contract doesn't lapse before a typical continuation move finishes.
+        if ideal_dte is not None and dte is not None:
+            duration_score=max(0.0,8.0-abs(dte-ideal_dte)/5.0)
+        else:
+            duration_score=4.0
+        score=otm_score+delta_score+exec_score+activity+premium_score+coverage_score+duration_score
         rr=dict(r)
         rr.update({
             "otm_pct":round(otm,2),"execution_quality":execution,
@@ -2271,9 +2322,14 @@ def historical_continuation_score(profile):
     behavior=profile.get("behavior")
     s=float(profile.get("score") or 0)*4.0
     if behavior=="CONTINUATION":s+=20
+    elif behavior=="REVERSION":s-=18
     elif behavior=="FAST REACTION":s-=8
-    s+=min(20,float(profile.get("pct_gt5_10d") or 0)*.20)
-    s+=min(12,float(profile.get("pct_gt10_14d") or 0)*.12)
+    # Directional persistence carries more weight than raw excursion frequency —
+    # a stock can post a big excursion and still give it all back.
+    s+=min(18,float(profile.get("pct_directional_persist") or 0)*.22)
+    s-=min(18,float(profile.get("pct_directional_revert") or 0)*.22)
+    s+=min(12,float(profile.get("pct_gt5_10d") or 0)*.12)
+    s+=min(8,float(profile.get("pct_gt10_14d") or 0)*.08)
     return max(0.0,min(100.0,s))
 
 def market_payload():
@@ -3032,8 +3088,9 @@ def api_postearnings_opportunities():
                 before=s[s.index.normalize()<d]
                 after=s[s.index.normalize()>=d]
                 if before.empty or after.empty:return {}
-                base=float(before.iloc[-1]); last=float(after.iloc[-1])
+                base=float(before.iloc[-1]); last=float(after.iloc[-1]); day1=float(after.iloc[0])
                 return {"current_move_pct":round((last/base-1)*100,2),
+                        "day1_move_pct":round((day1/base-1)*100,2),
                         "sessions_since":int(len(after))}
             except Exception:return {}
 
@@ -3065,6 +3122,39 @@ def api_postearnings_opportunities():
             move=float(cur.get("current_move_pct") or 0)
             current_score=min(25,abs(move)*2.2)+(4 if profile.get("behavior")=="CONTINUATION" else 0)
             expected=max(float(profile.get("median_exc10") or 0),float(profile.get("median_exc14") or 0))
+
+            # How much runway is left in the expected drift window. A stock on
+            # day 9 of a ~14-session historical drift isn't a fresh setup anymore.
+            expected_window=14 if profile.get("median_exc14") else 10
+            sessions_since=cur.get("sessions_since")
+            window_progress_pct=round(min(150.0,100.0*sessions_since/expected_window),1) if sessions_since else None
+            if window_progress_pct is not None and window_progress_pct>=100:
+                current_score-=6  # tail of the move, not the start of it
+
+            # Round-trip / give-back check: if the move has already faded back
+            # toward (or through) the pre-earnings base, the initial reaction failed
+            # regardless of how big the raw excursion looked.
+            day1_move=cur.get("day1_move_pct")
+            round_trip=False
+            retained_pct=None
+            if day1_move not in (None,0) and sessions_since and sessions_since>1:
+                retained_pct=round(100.0*move/day1_move,1)
+                if (move*day1_move)<0 or retained_pct<=15:
+                    round_trip=True
+                    current_score-=15
+
+            # Standardized earnings-surprise magnitude. Only rewarded when it
+            # actually agrees with the direction of the price reaction — a beat
+            # that the market shrugged off isn't evidence of a real move.
+            meta=recent_map.get(sym) or {}
+            surprise_pct=None
+            est=_safe_float(meta.get("eps_estimate")); act=_safe_float(meta.get("eps_actual"))
+            if est not in (None,0) and act is not None:
+                surprise_pct=round((act-est)/abs(est)*100,1)
+                aligned=(surprise_pct>0 and move>=0) or (surprise_pct<0 and move<0)
+                if aligned:
+                    current_score+=min(8.0,abs(surprise_pct)*0.15)
+
             total=.48*hist_score+current_score+rot_score
             return {
                 "ticker":sym,"name":all_holdings[sym].get("name"),
@@ -3076,6 +3166,11 @@ def api_postearnings_opportunities():
                 "expected_continuation_pct":round(expected,2),
                 "direction":"bullish" if move>=0 else "bearish",
                 "opportunity_score":round(float(total),1),
+                "eps_surprise_pct":surprise_pct,
+                "drift_window_sessions":expected_window,
+                "drift_window_progress_pct":window_progress_pct,
+                "retained_pct_of_day1_move":retained_pct,
+                "round_trip":round_trip,
             }
 
         rows=[]
@@ -3101,11 +3196,28 @@ def api_postearnings_option(ticker):
     try:
         direction=request.args.get("direction","bullish")
         expected=_safe_float(request.args.get("expected"))
+
+        # Anchor DTE selection to this ticker's own historical drift window rather
+        # than reusing whatever chain window happens to be loaded elsewhere. A
+        # CONTINUATION name needs enough duration for the drift to actually play
+        # out; a REVERSION name shouldn't be biased toward extra duration at all.
+        profile=cached(f"peprofile-v1:{ticker}",
+                        lambda:earnings_profile(ticker,merged_historical_earnings_dates(ticker)),ttl=3600)
+        behavior=(profile or {}).get("behavior")
+        if behavior=="CONTINUATION":
+            min_dte,ideal_dte=21,30
+        elif behavior=="REVERSION":
+            min_dte,ideal_dte=0,14
+        else:
+            min_dte,ideal_dte=10,21
+        dte_max=max(30,min(90,ideal_dte+21))
+
         payload,stale,err=cached_refresh_safe(
-            f"options-v21-2:{ticker}",lambda:options_quality_payload(ticker),ttl=600)
-        best=post_earnings_otm_contract(payload,direction,expected)
+            f"options-v22:{ticker}:{dte_max}",lambda:options_quality_payload(ticker,dte_max=dte_max),ttl=600)
+        best=post_earnings_otm_contract(payload,direction,expected,min_dte=min_dte,ideal_dte=ideal_dte)
         return jsonify({"ok":True,"ticker":ticker,"best_contract":best,
                         "options_execution":best.get("execution_quality") if best else "No executable OTM contract",
+                        "min_dte":min_dte,"ideal_dte":ideal_dte,
                         "stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"ticker":ticker,"error":str(e)}),500
@@ -3273,6 +3385,8 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1p
 .optionsBtn{padding:5px 8px;font-size:11px}
 .peScore{font-size:17px;font-weight:900;color:#75e7ad}.peContract{min-width:190px}.peContract b{color:#dbeafe}
 .execWide{color:#fde68a}.execGood{color:#86efac}.histRunner{display:inline-block;margin-top:4px;border:1px solid #7c3aed;color:#c4b5fd;border-radius:999px;padding:2px 6px;font-size:9px;font-weight:800}
+.reversionFlag{display:inline-block;margin-top:4px;border:1px solid #b45309;color:#fbbf24;border-radius:999px;padding:2px 6px;font-size:9px;font-weight:800}
+.givebackFlag{display:inline-block;margin-top:4px;border:1px solid #b91c1c;color:#fca5a5;border-radius:999px;padding:2px 6px;font-size:9px;font-weight:800}
 
 
 .setupBtn{display:inline-block;background:#1d4ed8;color:#fff;text-decoration:none;border:1px solid #2563eb;border-radius:8px;padding:9px 12px;font-weight:700}
@@ -5736,6 +5850,23 @@ function topSetupEvaluation(x){
    else {raw-=15;reasons.push(["STRAT/value conflict","warn"]);}
  }
 
+ // GEX confluence: is dealer positioning reinforcing or fighting this setup's
+ // direction? Negative/amplifying gamma tends to extend moves; positive/dampening
+ // gamma tends to pin them. Room to the nearest wall in the trade direction matters
+ // too — a wall sitting right in the path of the expected move caps the upside.
+ const pos=opt?.positioning;
+ const tradeDir=(va?.direction&&va.direction!=="neutral")?va.direction:(stratPass?strat.continuity:(fIn?"bullish":(fOut?"bearish":null)));
+ if(pos?.available&&tradeDir){
+   if(pos.gamma_regime==="Negative / amplifying"){raw+=6;reasons.push(["Negative gamma (amplifying)","good"]);}
+   else if(pos.gamma_regime==="Positive / dampening"){raw-=4;reasons.push(["Positive gamma (dampening)","warn"]);}
+   const spot=Number(opt.spot),wall=tradeDir==="bullish"?Number(pos.call_wall):Number(pos.put_wall);
+   if(Number.isFinite(spot)&&spot>0&&Number.isFinite(wall)){
+     const roomPct=tradeDir==="bullish"?((wall-spot)/spot*100):((spot-wall)/spot*100);
+     if(roomPct>3){raw+=6;reasons.push(["Room to next wall","good"]);}
+     else if(roomPct<=1){raw-=6;reasons.push(["Near gamma wall","warn"]);}
+   }
+ }
+
  // Extension penalty: favor the setup before the obvious move.
  const mom=Number(f.rs_momentum??f.momentum);
  if(Number.isFinite(mom)&&mom>105){raw-=7;reasons.push(["Extended","warn"]);}
@@ -6069,8 +6200,11 @@ function renderEarnings(){
    const p=x.profile||{},r=x.rotation||{},c=x.best_contract,id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
    const exec=c?.execution_quality||"No executable OTM";
    const execClass=exec==="Wide but Active"?"execWide":(c?"execGood":"optBad");
-   const contract=x.options_loading?`<span class="note">Loading OTM contracts…</span>`:(c?`<div class="peContract"><b>${c.expiration} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">${x.options_execution||"No executable OTM contract"}</span>`);
-   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${Number(x.opportunity_score||0).toFixed(0)}/100</div>${p.behavior==="CONTINUATION"?'<span class="histRunner">HISTORICAL RUNNER</span>':""}</td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div></td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div></td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
+   const contract=x.options_loading?`<span class="note">Loading OTM contracts…</span>`:(c?`<div class="peContract"><b>${c.expiration}${c.dte==null?"":` (${c.dte}D)`} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">${x.options_execution||"No executable OTM contract"}</span>`);
+   const flags=`${p.behavior==="CONTINUATION"?'<span class="histRunner">HISTORICAL RUNNER</span>':""}${p.behavior==="REVERSION"?'<span class="reversionFlag">TENDS TO FADE</span>':""}${x.round_trip?'<span class="givebackFlag">GAVE BACK MOVE</span>':""}`;
+   const windowNote=x.drift_window_progress_pct==null?"":`<div class="tiny">Drift window: ${x.drift_window_progress_pct}% of ~${x.drift_window_sessions}D ${x.drift_window_progress_pct>=100?"(tail of move)":"elapsed"}</div>`;
+   const surpriseNote=x.eps_surprise_pct==null?"":`<div class="tiny">EPS surprise: ${x.eps_surprise_pct>0?"+":""}${x.eps_surprise_pct}%</div>`;
+   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${Number(x.opportunity_score||0).toFixed(0)}/100</div>${flags}</td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div>${surpriseNote}</td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div>${windowNote}</td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
  }).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();document.getElementById(b.dataset.id)?.classList.toggle("open")}));
  document.querySelectorAll("[data-pe-open]").forEach(row=>row.addEventListener("click",e=>{
