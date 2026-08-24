@@ -1691,7 +1691,7 @@ def earnings_profile(ticker, dates):
         "label":label,"score":round(score,1),"n":len(hist),
         "median_exc1":round(m1,2),"median_exc3":round(med("exc3") or 0,2),
         "median_exc5":round(med("exc5") or 0,2),"median_exc10":round(m10,2),
-        "median_exc14":round(med("exc14") or 0,2),
+        "median_exc14":round(med("exc14") or 0,2),"has_exc14_data":bool(ex14),
         "pct_gt5_10d":round(pct5 or 0,1),"pct_gt10_14d":round(pct10 or 0,1),
         "pct_directional_persist":round((pct_persist or 0)*100,1),
         "pct_directional_revert":round((pct_revert or 0)*100,1),
@@ -3125,7 +3125,7 @@ def api_postearnings_opportunities():
 
             # How much runway is left in the expected drift window. A stock on
             # day 9 of a ~14-session historical drift isn't a fresh setup anymore.
-            expected_window=14 if profile.get("median_exc14") else 10
+            expected_window=14 if profile.get("has_exc14_data") else 10
             sessions_since=cur.get("sessions_since")
             window_progress_pct=round(min(150.0,100.0*sessions_since/expected_window),1) if sessions_since else None
             if window_progress_pct is not None and window_progress_pct>=100:
@@ -3137,7 +3137,10 @@ def api_postearnings_opportunities():
             day1_move=cur.get("day1_move_pct")
             round_trip=False
             retained_pct=None
-            if day1_move not in (None,0) and sessions_since and sessions_since>1:
+            # Only trust the retained/round-trip check when day 1 actually moved
+            # a meaningful amount. Dividing by a near-flat first-day reaction
+            # (e.g. 0.2%) blows the ratio up into noisy, meaningless numbers.
+            if day1_move is not None and abs(day1_move)>=1.0 and sessions_since and sessions_since>1:
                 retained_pct=round(100.0*move/day1_move,1)
                 if (move*day1_move)<0 or retained_pct<=15:
                     round_trip=True
@@ -3151,11 +3154,15 @@ def api_postearnings_opportunities():
             est=_safe_float(meta.get("eps_estimate")); act=_safe_float(meta.get("eps_actual"))
             if est not in (None,0) and act is not None:
                 surprise_pct=round((act-est)/abs(est)*100,1)
-                aligned=(surprise_pct>0 and move>=0) or (surprise_pct<0 and move<0)
+                # Compare against the day-1 reaction (the market's direct response
+                # to the surprise), not the cumulative "current" move — a beat that
+                # popped on day 1 and later faded was still an aligned reaction.
+                react_move=day1_move if day1_move is not None else move
+                aligned=(surprise_pct>0 and react_move>=0) or (surprise_pct<0 and react_move<0)
                 if aligned:
                     current_score+=min(8.0,abs(surprise_pct)*0.15)
 
-            total=.48*hist_score+current_score+rot_score
+            total=max(0.0,min(100.0,.48*hist_score+current_score+rot_score))
             return {
                 "ticker":sym,"name":all_holdings[sym].get("name"),
                 "earnings_date":d.strftime("%Y-%m-%d"),
@@ -5855,7 +5862,10 @@ function topSetupEvaluation(x){
  // gamma tends to pin them. Room to the nearest wall in the trade direction matters
  // too — a wall sitting right in the path of the expected move caps the upside.
  const pos=opt?.positioning;
- const tradeDir=(va?.direction&&va.direction!=="neutral")?va.direction:(stratPass?strat.continuity:(fIn?"bullish":(fOut?"bearish":null)));
+ // Only feed a confirmed direction (value acceptance or STRAT) into GEX
+ // confluence scoring — bare RRG tail rotation is the weakest directional
+ // signal in this function and shouldn't drive a wall/gamma adjustment.
+ const tradeDir=(va?.direction&&va.direction!=="neutral")?va.direction:(stratPass?strat.continuity:null);
  if(pos?.available&&tradeDir){
    if(pos.gamma_regime==="Negative / amplifying"){raw+=6;reasons.push(["Negative gamma (amplifying)","good"]);}
    else if(pos.gamma_regime==="Positive / dampening"){raw-=4;reasons.push(["Positive gamma (dampening)","warn"]);}
