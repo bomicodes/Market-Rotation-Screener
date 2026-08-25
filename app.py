@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "23.6"
+APP_VERSION = "24.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -107,6 +107,8 @@ def _setup_db():
           id BIGSERIAL PRIMARY KEY, captured_at TEXT NOT NULL, trade_date TEXT NOT NULL,
           ticker TEXT NOT NULL, spot DOUBLE PRECISION, bias TEXT, score DOUBLE PRECISION, signature TEXT,
           raw_json TEXT NOT NULL, UNIQUE(trade_date,ticker,signature))""")
+        con.execute("""CREATE TABLE IF NOT EXISTS watchlist_items(
+          ticker TEXT PRIMARY KEY, added_at TEXT NOT NULL, added_price DOUBLE PRECISION)""")
         con.commit()
         return con
 
@@ -116,6 +118,8 @@ def _setup_db():
       id INTEGER PRIMARY KEY AUTOINCREMENT, captured_at TEXT NOT NULL, trade_date TEXT NOT NULL,
       ticker TEXT NOT NULL, spot REAL, bias TEXT, score REAL, signature TEXT,
       raw_json TEXT NOT NULL, UNIQUE(trade_date,ticker,signature))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS watchlist_items(
+      ticker TEXT PRIMARY KEY, added_at TEXT NOT NULL, added_price REAL)""")
     con.commit()
     return con
 
@@ -182,6 +186,35 @@ def setup_history_stats(ticker, signature=None):
     storage=("PostgreSQL (persistent)" if backend=="postgresql" else f"SQLite fallback: {SETUP_DB_PATH}")
     return {"count":len(rows),"completed":max([len(v) for v in stats.values()] or [0]),"returns":out,"median_mfe_10d":round(float(np.median(mfe)),2) if mfe else None,"median_mae_10d":round(float(np.median(mae)),2) if mae else None,"storage":storage}
 
+def list_watchlist_items():
+    backend=_setup_storage_backend()
+    with _setup_db() as con:
+        cur=con.execute("SELECT ticker,added_at,added_price FROM watchlist_items ORDER BY added_at DESC")
+        rows=[dict(x) for x in cur.fetchall()]
+    return rows
+
+def add_watchlist_item(ticker, added_price=None):
+    ticker=str(ticker or "").upper().strip()
+    if not ticker: raise ValueError("ticker required")
+    now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+    backend=_setup_storage_backend()
+    with _setup_db() as con:
+        if backend=="postgresql":
+            con.execute("""INSERT INTO watchlist_items(ticker,added_at,added_price) VALUES(%s,%s,%s)
+              ON CONFLICT(ticker) DO NOTHING""",(ticker,now,_safe_float(added_price)))
+        else:
+            con.execute("INSERT OR IGNORE INTO watchlist_items(ticker,added_at,added_price) VALUES(?,?,?)",(ticker,now,_safe_float(added_price)))
+        con.commit()
+    return {"ticker":ticker,"added_at":now}
+
+def remove_watchlist_item(ticker):
+    ticker=str(ticker or "").upper().strip(); backend=_setup_storage_backend()
+    with _setup_db() as con:
+        if backend=="postgresql": con.execute("DELETE FROM watchlist_items WHERE ticker=%s",(ticker,))
+        else: con.execute("DELETE FROM watchlist_items WHERE ticker=?",(ticker,))
+        con.commit()
+    return {"ticker":ticker,"removed":True}
+
 CACHE = {}
 CACHE_TTL = 60 * 15
 _CACHE_LOCKS = {}
@@ -195,6 +228,42 @@ def _cache_lock(key):
             lock = threading.Lock()
             _CACHE_LOCKS[key] = lock
         return lock
+
+_SOURCE_HEALTH = {}
+_SOURCE_HEALTH_GUARD = threading.Lock()
+_SOURCE_NAMES = ("yfinance","alpaca_stocks","alpaca_options","finnhub","unusual_whales","nasdaq_yahoo_calendar")
+def _mark_source(name,ok,detail=None):
+    now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+    with _SOURCE_HEALTH_GUARD:
+        row=_SOURCE_HEALTH.setdefault(name,{"last_success":None,"last_error":None,"last_error_detail":None,"last_was_success":None})
+        if ok: row["last_success"]=now
+        else:
+            row["last_error"]=now; row["last_error_detail"]=str(detail)[:300] if detail else None
+        row["last_was_success"]=ok
+
+def source_health_snapshot():
+    with _SOURCE_HEALTH_GUARD: rows={k:dict(v) for k,v in _SOURCE_HEALTH.items()}
+    out=[]
+    for name in _SOURCE_NAMES:
+        row=rows.get(name,{"last_success":None,"last_error":None,"last_error_detail":None,"last_was_success":None})
+        status="ok" if row["last_was_success"] is True else "degraded" if row["last_was_success"] is False else "unknown"
+        out.append({"name":name,"status":status,**row})
+    return out
+
+MACRO_CALENDAR=[
+ {"date":"2026-09-04","type":"NFP","label":"Employment Situation (August)"},
+ {"date":"2026-09-11","type":"CPI","label":"CPI (August)"},
+ {"date":"2026-09-16","type":"FOMC","label":"FOMC Rate Decision"},
+ {"date":"2026-10-27","type":"FOMC","label":"FOMC meeting begins"},
+ {"date":"2026-10-28","type":"FOMC","label":"FOMC Rate Decision"},
+ {"date":"2026-12-08","type":"FOMC","label":"FOMC meeting begins"},
+ {"date":"2026-12-09","type":"FOMC","label":"FOMC Rate Decision"}]
+def upcoming_macro_events(within_days=60):
+    today=pd.Timestamp.now().normalize(); cutoff=today+pd.Timedelta(days=within_days); out=[]
+    for ev in MACRO_CALENDAR:
+        d=pd.Timestamp(ev["date"])
+        if today<=d<=cutoff: out.append({**ev,"days_away":int((d-today).days)})
+    return sorted(out,key=lambda x:x["date"])
 
 def cached(key, fn, ttl=CACHE_TTL):
     now = time.time()
@@ -329,8 +398,10 @@ def dl_prices(tickers, period="3y"):
                 close[c] = repair_df[c]
 
     if close.empty or close.dropna(how="all").empty:
+        _mark_source("yfinance", False, last_err)
         raise RuntimeError("Price provider returned no usable data" + (f": {last_err}" if last_err else "."))
 
+    _mark_source("yfinance", True)
     return close.sort_index().dropna(how="all")
 
 def _yf_download_retry(ticker, period, interval="1d", timeout=12, attempts=2, prepost=False):
@@ -564,6 +635,7 @@ def alpaca_visible_profiles(ticker, period, chart_timeframe):
             if r.status_code in (401,403):
                 try: detail=(r.json() or {}).get("message") or r.text
                 except Exception: detail=r.text
+                _mark_source("alpaca_stocks", False, detail or r.status_code)
                 return {"sessions":[],"weeks":[],"source":source_tf,
                         "error":f"Alpaca stock-bar access rejected: {detail or r.status_code}"}
             r.raise_for_status()
@@ -616,8 +688,10 @@ def alpaca_visible_profiles(ticker, period, chart_timeframe):
                 p["source"]=f"Alpaca {ALPACA_STOCK_FEED.upper()} {source_tf} weekly composite"
                 week_items.append({"week":label,"profile":p})
 
+        _mark_source("alpaca_stocks", True)
         return {"sessions":session_items,"weeks":week_items,"source":source_tf,"error":None}
     except Exception as e:
+        _mark_source("alpaca_stocks", False, e)
         return {"sessions":[],"weeks":[],"source":None,"error":str(e)}
 
 def _period_start_et(period):
@@ -1294,8 +1368,10 @@ def finnhub_earnings_calendar(start_date, end_date):
                 "revenue_estimate": r.get("revenueEstimate"),
                 "revenue_actual": r.get("revenueActual"),
             }
+        _mark_source("finnhub", True)
         return out
-    except Exception:
+    except Exception as e:
+        _mark_source("finnhub", False, e)
         return {}
 
 def uw_api_get(path, params=None):
@@ -1307,10 +1383,15 @@ def uw_api_get(path, params=None):
         "Accept": "application/json",
         "User-Agent": "MarketRotationScreener/1.0"
     }
-    resp = requests.get(url, params=params or {}, headers=headers, timeout=25)
-    resp.raise_for_status()
-    payload = resp.json()
-    return payload.get("data", payload)
+    try:
+        resp = requests.get(url, params=params or {}, headers=headers, timeout=25)
+        resp.raise_for_status()
+        payload = resp.json()
+        _mark_source("unusual_whales", True)
+        return payload.get("data", payload)
+    except Exception as e:
+        _mark_source("unusual_whales", False, e)
+        raise
 
 def unusual_whales_day(date):
     """Return recent earnings for one date from official UW premarket/afterhours APIs."""
@@ -1413,8 +1494,10 @@ def nasdaq_calendar_for_day(day):
                 "time": report_time,
                 "source": "Nasdaq earnings calendar",
             }
+        _mark_source("nasdaq_yahoo_calendar", True)
         return out
-    except Exception:
+    except Exception as e:
+        _mark_source("nasdaq_yahoo_calendar", False, e)
         return {}
 
 def yahoo_calendar_for_day(day):
@@ -1442,8 +1525,10 @@ def yahoo_calendar_for_day(day):
                 t = sym.strip().upper().replace(".","-")
                 if t and t not in ("NAN","SYMBOL"):
                     out[t] = pd.Timestamp(ds)
+        _mark_source("nasdaq_yahoo_calendar", True)
         return out
-    except Exception:
+    except Exception as e:
+        _mark_source("nasdaq_yahoo_calendar", False, e)
         return {}
 
 def discover_recent_earnings(tickers, recent_trading_days=10):
@@ -1805,18 +1890,24 @@ def alpaca_option_chain(ticker,start_date,end_date,spot):
         "strike_price_gte":round(max(.01,spot*.75),2),"strike_price_lte":round(spot*1.25,2),"limit":1000
     }
     out={}; token=None
-    for _ in range(4):
-        if token: params["page_token"]=token
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
-        if r.status_code in (401,403):
-            raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} option-chain access was rejected. Check API credentials/feed permissions.")
-        if r.status_code==429: raise RuntimeError("Alpaca rate limit reached. Try again shortly.")
-        r.raise_for_status()
-        j=r.json() or {}
-        part=j.get("snapshots") or {}
-        if isinstance(part,dict): out.update(part)
-        token=j.get("next_page_token")
-        if not token: break
+    try:
+        for _ in range(4):
+            if token: params["page_token"]=token
+            r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+            if r.status_code in (401,403):
+                _mark_source("alpaca_options", False, f"{r.status_code} rejected")
+                raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} option-chain access was rejected. Check API credentials/feed permissions.")
+            if r.status_code==429:
+                _mark_source("alpaca_options", False, "rate limited")
+                raise RuntimeError("Alpaca rate limit reached. Try again shortly.")
+            r.raise_for_status(); j=r.json() or {}; part=j.get("snapshots") or {}
+            if isinstance(part,dict): out.update(part)
+            token=j.get("next_page_token")
+            if not token: break
+    except requests.RequestException as e:
+        _mark_source("alpaca_options", False, e)
+        raise
+    _mark_source("alpaca_options", True)
     return out
 
 def alpaca_option_chain_broad(ticker,start_date,end_date,spot):
@@ -2563,6 +2654,30 @@ def institutional_context_payload(ticker,parent=None):
 def api_institutional_context(ticker):
     try:
         parent=(request.args.get("parent") or "").upper().strip() or None;key=f"institutional-v24:{ticker.upper()}:{parent or 'NONE'}";payload=cached(key,lambda:institutional_context_payload(ticker,parent),ttl=900);return jsonify({"ok":True,**payload})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+@app.get("/api/watchlist")
+def api_watchlist_list():
+    try:return jsonify({"ok":True,"items":list_watchlist_items()})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+@app.post("/api/watchlist")
+def api_watchlist_add():
+    try:
+        body=request.get_json(force=True,silent=True) or {}; ticker=body.get("ticker")
+        if not ticker:return jsonify({"ok":False,"error":"ticker required"}),400
+        return jsonify({"ok":True,**add_watchlist_item(ticker,body.get("added_price"))})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+@app.delete("/api/watchlist/<ticker>")
+def api_watchlist_remove(ticker):
+    try:return jsonify({"ok":True,**remove_watchlist_item(ticker)})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+@app.get("/api/source-health")
+def api_source_health():
+    try:return jsonify({"ok":True,"sources":source_health_snapshot()})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+@app.get("/api/macro-calendar")
+def api_macro_calendar():
+    try:return jsonify({"ok":True,"events":upcoming_macro_events(int(request.args.get("within_days",60)))})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
 def auth_required():
@@ -3694,6 +3809,16 @@ body{background:radial-gradient(circle at 48% -15%,rgba(22,53,75,.40) 0,rgba(6,1
 .brandText b{font-size:16px;letter-spacing:.2px}.brandText span{color:#27db75;font-size:9px;letter-spacing:1.55px;font-weight:800}
 .appNav{display:flex;align-items:stretch;gap:3px;overflow:auto}.appNav .tab,.navJump{border:0;background:transparent;color:#aab7c5;border-radius:8px;padding:7px 11px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:72px;font-size:10px;cursor:pointer;white-space:nowrap;transition:.16s}
 .appNav .tab:hover,.navJump:hover{background:#0d1822;color:#f3f7fb}.appNav .tab.active{background:linear-gradient(180deg,#123024,#0e211a);color:#67ec92;box-shadow:inset 0 -2px #2edb71}.navIcon{font-size:15px;line-height:1}.versionPill{border-radius:8px;background:#092217;border-color:#176d3b;box-shadow:0 0 0 1px rgba(34,197,94,.05)}
+.glossTerm{border-bottom:1px dotted #5b7a8f;cursor:help}
+.glossTooltip{position:fixed;z-index:9999;max-width:280px;background:#0f1a24;border:1px solid #2a4a5f;border-radius:8px;padding:10px 12px;font-size:12px;line-height:1.45;color:#d7e6ef;box-shadow:0 8px 24px rgba(0,0,0,.45);display:none}
+.glossTooltip.show{display:block}
+.glossTooltip b{color:#7fd8ff;display:block;margin-bottom:3px;font-size:11px;letter-spacing:.02em}
+.sourceHealthStrip{display:flex;flex-wrap:wrap;gap:6px 10px;padding:6px 20px 0;font-size:10px;color:#7f97a8}
+.sourceHealthStrip .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;vertical-align:middle}
+.sourceHealthStrip .dot.ok{background:#2edb71}
+.sourceHealthStrip .dot.degraded{background:#f59e0b}
+.sourceHealthStrip .dot.unknown{background:#3a4a58}
+.sourceHealthStrip .src{cursor:default}
 .panel,.sideSection,.gexRailCard{background:linear-gradient(180deg,rgba(13,22,31,.98),rgba(8,15,22,.98));border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.14),inset 0 1px rgba(255,255,255,.018)}
 .panel{border-radius:13px;padding:14px}.dashCol .panel{margin-bottom:13px}.dashTitle,.gexRailTitle{color:#edf3f8;letter-spacing:.42px}.note,.tiny{color:var(--muted)}
 .dashboardGrid{grid-template-columns:minmax(285px,.82fr) minmax(620px,1.82fr) minmax(270px,.78fr);gap:14px}
@@ -3830,7 +3955,8 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
   </nav>
   <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">{{APP_VERSION_PLACEHOLDER}}</span></div>
 </header>
-<div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
+<div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast <span class="glossTerm" data-gloss="RRG">RRG</span> (10/5) finds change; Trend <span class="glossTerm" data-gloss="RRG">RRG</span> (25/12) confirms persistence.</div></div>
+<div id="sourceHealthStrip" class="sourceHealthStrip"></div>
 
 <div id="heatmap" class="view">
   <div class="panel">
@@ -3881,6 +4007,10 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
       <div class="panel">
         <div class="dashTopline"><span class="dashTitle">BREADTH & RISK</span><span id="regimeSummary" class="note">Loading…</span></div>
         <div id="dashboardBreadth" class="breadthList"></div>
+      </div>
+      <div class="panel">
+        <div class="dashTopline"><span class="dashTitle">MACRO CALENDAR</span><span class="note">FOMC · CPI · Jobs</span></div>
+        <div id="dashboardMacro" class="breadthList"></div>
       </div>
     </aside>
 
@@ -4004,9 +4134,9 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
         </div>
       </div>
       <div class="vpLevelStrip" id="vpLevelStrip">
-        <div class="vpLevelItem"><span class="vpSwatch vah"></span><span>VAH</span><strong id="vpVahTop">—</strong></div>
-        <div class="vpLevelItem"><span class="vpSwatch poc"></span><span>POC</span><strong id="vpPocTop">—</strong></div>
-        <div class="vpLevelItem"><span class="vpSwatch val"></span><span>VAL</span><strong id="vpValTop">—</strong></div>
+        <div class="vpLevelItem"><span class="vpSwatch vah"></span><span class="glossTerm" data-gloss="VAH">VAH</span><strong id="vpVahTop">—</strong></div>
+        <div class="vpLevelItem"><span class="vpSwatch poc"></span><span class="glossTerm" data-gloss="POC">POC</span><strong id="vpPocTop">—</strong></div>
+        <div class="vpLevelItem"><span class="vpSwatch val"></span><span class="glossTerm" data-gloss="VAL">VAL</span><strong id="vpValTop">—</strong></div>
       </div>
       <div id="stockDeepDiveAnchor"></div><div class="priceChartCanvasWrap"><canvas id="pricePreviewChart" width="1180" height="680"></canvas></div>
       <div class="chartStatsStrip">
@@ -4018,7 +4148,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
       <div class="priceChartFooter"><span id="previewStatus" class="status">Select a ticker to preview price.</span><span class="tiny" id="previewVPStatus">Per-session SVP · cleaner profile separation · 68% value area · price badge moved to axis gutter.</span></div>
     </div>
     <aside class="panel stratPanel" id="stratPanel">
-      <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · STRAT</div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
+      <div class="stratHead"><div><div class="dashTitle">PRICE ACTION · <span class="glossTerm" data-gloss="STRAT">STRAT</span></div><div class="note">1H · 4H · 1D · 1W trigger confluence</div></div><span id="stratContinuity" class="stratContinuity">—</span></div>
       <div id="stratStatus" class="tiny">Select a ticker to load STRAT scenarios.</div>
       <div class="valueAcceptanceCard neutral" id="valueAcceptanceCard">
         <div class="valueAcceptanceTop">
@@ -4203,7 +4333,28 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 </div>
 
 </div>
+<div id="glossTooltip" class="glossTooltip"></div>
 <script>
+const GLOSSARY={
+ RRG:"Relative Rotation Graph — plots a stock or sector's relative strength (RS-Ratio) against the momentum of that strength (RS-Momentum) to show whether it's leading, weakening, lagging, or improving versus a benchmark.",
+ GEX:"Gamma Exposure — a model of how options dealers are positioned. Positive/dampening gamma tends to pin price near current levels; negative/amplifying gamma tends to accelerate moves.",
+ VAH:"Value Area High — the top of the price range where roughly 68% of a session's volume traded. A close above VAH suggests buyers are willing to pay outside the prior 'fair value' zone.",
+ POC:"Point of Control — the single price level with the most traded volume in a session; often acts as a magnet or pivot.",
+ VAL:"Value Area Low — the bottom of the price range where roughly 68% of a session's volume traded. A close below VAL suggests sellers are pushing outside the prior 'fair value' zone.",
+ STRAT:"A price-action framework classifying each bar as Inside (1), Directional (2U/2D), or Outside (3) relative to the prior bar, used here across 1H/4H/1D/1W to gauge multi-timeframe agreement.",
+ FTC:"Full Timeframe Continuity — how many of the 1H/4H/1D/1W timeframes are currently in an aligned directional STRAT scenario (not just a green/red candle).",
+ IV:"Implied Volatility — the options market's forward-looking estimate of how much a stock will move, baked into an option's price.",
+ DTE:"Days To Expiration — how many calendar days remain until an option contract expires.",
+};
+function glossTerm(label,key){const k=key||label;if(!GLOSSARY[k])return label;return `<span class="glossTerm" data-gloss="${k}">${label}</span>`;}
+document.addEventListener("click",function(e){const el=e.target.closest(".glossTerm"),tip=document.getElementById("glossTooltip");if(!tip)return;if(!el){tip.classList.remove("show");return;}const def=GLOSSARY[el.dataset.gloss];if(!def){tip.classList.remove("show");return;}tip.innerHTML=`<b>${el.dataset.gloss}</b>${def}`;const r=el.getBoundingClientRect();tip.style.top=Math.min(window.innerHeight-20,r.bottom+8)+"px";tip.style.left=Math.max(8,Math.min(window.innerWidth-296,r.left))+"px";tip.classList.add("show");e.stopPropagation();});
+const SOURCE_LABELS={yfinance:"Yahoo (prices)",alpaca_stocks:"Alpaca (stocks)",alpaca_options:"Alpaca (options)",finnhub:"Finnhub",unusual_whales:"Unusual Whales",nasdaq_yahoo_calendar:"Earnings calendar"};
+function timeAgo(iso){if(!iso)return null;const x=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);if(x<60)return "just now";if(x<3600)return Math.round(x/60)+"m ago";if(x<86400)return Math.round(x/3600)+"h ago";return Math.round(x/86400)+"d ago";}
+async function refreshSourceHealth(){const el=document.getElementById("sourceHealthStrip");if(!el)return;try{const r=await fetch("/api/source-health"),j=await r.json();if(!j?.ok||!Array.isArray(j.sources))return;el.innerHTML=j.sources.map(x=>{const label=SOURCE_LABELS[x.name]||x.name;const detail=x.status==="ok"?`Last success ${timeAgo(x.last_success)||"—"}`:x.status==="degraded"?`Falling back — last success ${timeAgo(x.last_success)||"never this session"}, last error ${timeAgo(x.last_error)}`:"Not called yet this session";return `<span class="src" title="${detail.replace(/"/g,'&quot;')}"><span class="dot ${x.status}"></span>${label}</span>`;}).join("");}catch(e){}}
+document.addEventListener("DOMContentLoaded",refreshSourceHealth);setInterval(refreshSourceHealth,5*60*1000);
+async function refreshMacroCalendar(){const el=document.getElementById("dashboardMacro");if(!el)return;try{const r=await fetch("/api/macro-calendar?within_days=90"),j=await r.json();if(!j?.ok||!Array.isArray(j.events))return;if(!j.events.length){el.innerHTML=`<div class="note">No confirmed FOMC/CPI/jobs dates in the next 90 days.</div>`;return;}el.innerHTML=j.events.map(x=>`<div class="breadthRow"><div class="name">${x.label}</div><div class="val ${x.days_away<=3?"neg":""}">${x.date}</div><div class="move">${x.days_away}d</div></div>`).join("");}catch(e){}}
+document.addEventListener("DOMContentLoaded",refreshMacroCalendar);setInterval(refreshMacroCalendar,60*60*1000);
+
 function fmtCompact(n){
  const x=Number(n); if(!Number.isFinite(x)) return "—";
  const a=Math.abs(x);
@@ -4231,6 +4382,17 @@ function loadLiveWatchlist(){
    liveWatchlist=raw?JSON.parse(raw):[];
    if(!Array.isArray(liveWatchlist))liveWatchlist=[];
  }catch(e){liveWatchlist=[]}
+ syncWatchlistFromServer();
+}
+
+async function syncWatchlistFromServer(){
+ try{
+   const r=await fetch("/api/watchlist"),j=await r.json();
+   if(!j?.ok||!Array.isArray(j.items))return;
+   const known=new Set(liveWatchlist.map(x=>liveWatchKey(x.ticker)));let changed=false;
+   j.items.forEach(row=>{const key=liveWatchKey(row.ticker);if(!known.has(key)){liveWatchlist.push({ticker:row.ticker,added_price:row.added_price});known.add(key);changed=true;}});
+   if(changed){try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){} renderLiveWatchlist();refreshLiveBookmarkButtons();}
+ }catch(e){}
 }
 
 function saveLiveWatchlist(){
@@ -4333,8 +4495,8 @@ function toggleLiveWatch(item){
  if(!item||!item.ticker)return;
  const key=liveWatchKey(item.ticker);
  const i=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===key);
- if(i>=0)liveWatchlist.splice(i,1);
- else liveWatchlist.unshift(item);
+ if(i>=0){liveWatchlist.splice(i,1);fetch(`/api/watchlist/${encodeURIComponent(item.ticker)}`,{method:"DELETE"}).catch(()=>{});}
+ else{liveWatchlist.unshift(item);fetch("/api/watchlist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticker:item.ticker,added_price:item.added_price??null})}).catch(()=>{});}
  saveLiveWatchlist();
 }
 
@@ -5605,7 +5767,7 @@ function renderStrat(data){
  if(!box||!status||!cont)return;
  const frames=data?.frames||[];
  cont.className=`stratContinuity ${data?.continuity||"mixed"}`;
- cont.textContent=data?.continuity==="bullish"?`${data.bullish_count}/4 BULLISH FTC`:data?.continuity==="bearish"?`${data.bearish_count}/4 BEARISH FTC`:`${data?.bullish_count||0}↑ / ${data?.bearish_count||0}↓ MIXED`;
+ cont.innerHTML=data?.continuity==="bullish"?`${data.bullish_count}/4 BULLISH ${glossTerm("FTC")}`:data?.continuity==="bearish"?`${data.bearish_count}/4 BEARISH ${glossTerm("FTC")}`:`${data?.bullish_count||0}↑ / ${data?.bearish_count||0}↓ MIXED`;
  status.textContent=`${data.ticker} · multi-timeframe price-action confirmation`;
  box.innerHTML=frames.map(f=>{
    const cls=stratScenarioClass(f),arrow=cls==="bullish"?"↑":cls==="bearish"?"↓":"↔";
