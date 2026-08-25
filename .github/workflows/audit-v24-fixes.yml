@@ -1,0 +1,114 @@
+name: Audit and fix v24 institutional layer
+
+on:
+  push:
+    paths:
+      - '.github/workflows/audit-v24-fixes.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply audit fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          p=Path('app.py')
+          t=p.read_text()
+          t=t.replace('APP_VERSION = "24.0"','APP_VERSION = "24.0.1"',1)
+
+          old='''        base=_safe_float(r.get("spot")) or float(px["Close"].iloc[pos])
+        for h in stats:
+          if pos+h<len(px): stats[h].append((float(px["Close"].iloc[pos+h])/base-1)*100)
+        end=min(len(px),pos+11)
+        if end>pos+1:
+          seg=px.iloc[pos+1:end]; mfe.append((float(seg["High"].max())/base-1)*100); mae.append((float(seg["Low"].min())/base-1)*100)'''
+          new='''        base=_safe_float(r.get("spot")) or float(px["Close"].iloc[pos])
+        bias=str(r.get("bias") or "neutral").lower()
+        direction_sign=-1.0 if bias.startswith("bear") else 1.0
+        for h in stats:
+          if pos+h<len(px):
+            raw_ret=(float(px["Close"].iloc[pos+h])/base-1)*100
+            stats[h].append(raw_ret*direction_sign)
+        end=min(len(px),pos+11)
+        if end>pos+1:
+          seg=px.iloc[pos+1:end]
+          if direction_sign>0:
+            favorable=(float(seg["High"].max())/base-1)*100
+            adverse=(float(seg["Low"].min())/base-1)*100
+          else:
+            favorable=-(float(seg["Low"].min())/base-1)*100
+            adverse=-(float(seg["High"].max())/base-1)*100
+          mfe.append(favorable); mae.append(adverse)'''
+          if old not in t: raise SystemExit('history block not found')
+          t=t.replace(old,new,1)
+
+          pattern=r'function gexImplicationFor\(ticker,ctx\)\{.*?\}\nfunction histExpectancyLabel'
+          repl='''function gexImplicationFor(ticker,ctx){const o=(activeOptionsData?.ticker===ticker)?activeOptionsData:optionScanMap[ticker],p=o?.positioning;if(!p?.available)return {label:"Pending",detail:"Load GEX/options positioning"};const dir=ctx?.structure?.direction||"neutral",reg=String(p.gamma_regime||"");let label=reg.includes("Negative")?"Amplifying regime":reg.includes("Positive")?"Dampening regime":"Mixed gamma";if(!["bullish","bearish"].includes(dir))return {label,detail:`${reg||"Dealer gamma available"} · no directional structure confirmed`,room:null};const spot=Number(o?.spot||ctx?.structure?.spot),wall=dir==="bearish"?Number(p.put_wall):Number(p.call_wall);let room=null;if(Number.isFinite(spot)&&spot>0&&Number.isFinite(wall))room=dir==="bearish"?(spot-wall)/spot*100:(wall-spot)/spot*100;let detail=reg||"Dealer gamma unavailable";if(room!=null)detail+=` · ${room.toFixed(1)}% room to ${dir==="bearish"?"put":"call"} wall`;if(reg.includes("Positive")&&room!=null&&room>=0&&room<=1.5)detail+=" · breakout headwind";else if(reg.includes("Negative")&&room!=null&&room>2)detail+=" · continuation can accelerate";return {label,detail,room}}
+function histExpectancyLabel'''
+          t,n=re.subn(pattern,repl,t,count=1,flags=re.S)
+          if n!=1: raise SystemExit('gex function not found')
+
+          old='''if(Number(c.rotation_persistence)>=80)score+=4;else if(Number(c.rotation_persistence)<50)score-=4;'''
+          new='''if(c.rotation_persistence!=null&&Number(c.rotation_persistence)>=80)score+=4;else if(c.rotation_persistence!=null&&Number(c.rotation_persistence)<50)score-=4;'''
+          if old not in t: raise SystemExit('persistence scoring not found')
+          t=t.replace(old,new,1)
+
+          old='''["Catalyst",cat.days_to_earnings!=null&&cat.days_to_earnings<=3?1:cat.days_to_earnings!=null&&cat.days_to_earnings<=10?5:9]'''
+          new='''["Catalyst",cat.days_to_earnings==null?5:cat.days_to_earnings<=3?1:cat.days_to_earnings<=10?5:9]'''
+          if old not in t: raise SystemExit('catalyst factor not found')
+          t=t.replace(old,new,1)
+          t=t.replace("'No confirmed upcoming earnings'","'No confirmed earnings date available'",1)
+
+          p.write_text(t)
+          PY
+      - name: Validate Python and rendered JavaScript
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          import re, pathlib, app
+          with app.app.test_client() as c:
+              r=c.get('/')
+              assert r.status_code in (200,302), r.status_code
+              if r.status_code==200:
+                  html=r.get_data(as_text=True)
+                  scripts=re.findall(r'<script[^>]*>(.*?)</script>',html,re.S)
+                  pathlib.Path('/tmp/app.js').write_text('\n'.join(scripts))
+          PY
+          node --check /tmp/app.js
+      - name: Validate institutional endpoint with stubbed market data
+        run: |
+          python - <<'PY'
+          import numpy as np, pandas as pd, app
+          idx=pd.date_range('2026-01-01',periods=120,freq='B')
+          def prices(tickers,period='1y'):
+              d={}
+              for i,t in enumerate(tickers): d[t]=100+np.arange(len(idx))*(0.15+0.03*i)
+              return pd.DataFrame(d,index=idx)
+          def ohlc(ticker,period='1y'):
+              c=100+np.arange(len(idx))*0.2
+              return pd.DataFrame({'Open':c-.1,'High':c+.5,'Low':c-.5,'Close':c,'Volume':1000000},index=idx)
+          app.dl_prices=prices; app.dl_ohlc=ohlc
+          app.get_earnings_dates=lambda t,limit=16: []
+          app.save_setup_snapshot=lambda payload: {'ok':True}
+          app.setup_history_stats=lambda ticker,signature=None: {'count':0,'completed':0,'returns':{}}
+          app.CACHE.clear()
+          with app.app.test_client() as c:
+              r=c.get('/api/institutional-context/TEST?parent=XLK')
+              assert r.status_code==200, r.get_data(as_text=True)
+              j=r.get_json(); assert j['ok'] and j['ticker']=='TEST' and j['parent']=='XLK'
+              assert j['structure']['available'] is True
+              assert '5' in j['relative_strength'] and '20' in j['relative_strength']
+          PY
+      - name: Commit fixes
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app.py
+          git commit -m "Fix v24 institutional scoring and expectancy audit issues" || exit 0
+          git push
