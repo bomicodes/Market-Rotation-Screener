@@ -1,0 +1,43 @@
+name: Apply v24.0 patch v2
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-v24-v2:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply embedded v24 patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q 'APP_VERSION = "24.0"' app.py; then
+            echo "v24.0 already applied"
+            exit 0
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('.github/workflows/apply-v24.yml').read_text()
+          start = text.index("cat > /tmp/v24.patch <<'PATCH'\n") + len("cat > /tmp/v24.patch <<'PATCH'\n")
+          end = text.index("\n          PATCH", start)
+          block = text[start:end]
+          lines = []
+          for line in block.splitlines():
+              if line.startswith('          '):
+                  line = line[10:]
+              lines.append(line)
+          Path('/tmp/v24.patch').write_text('\n'.join(lines) + '\n')
+          PY
+          patch --batch --forward -p1 < /tmp/v24.patch
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git commit -m "Apply v24.0 watchlist health glossary macro patch"
+          git push
