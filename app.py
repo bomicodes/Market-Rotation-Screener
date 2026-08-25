@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "23.5"
+APP_VERSION = "23.6"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -301,17 +301,43 @@ def dl_prices(tickers, period="3y"):
 
     return close.sort_index().dropna(how="all")
 
+def _yf_download_retry(ticker, period, interval="1d", timeout=12, attempts=2, prepost=False):
+    """Small fail-safe wrapper for Yahoo requests used by the deep-dive modules.
+
+    Yahoo occasionally stalls or returns an empty frame even for liquid symbols.
+    Keep retries bounded so one bad provider call cannot leave the chart/STRAT UI
+    spinning for a minute.
+    """
+    last=pd.DataFrame()
+    for attempt in range(max(1, attempts)):
+        try:
+            df=yf.download(
+                ticker, period=period, interval=interval, auto_adjust=True,
+                progress=False, threads=False, prepost=prepost, timeout=timeout
+            )
+            if df is not None and len(df):
+                if isinstance(df.columns,pd.MultiIndex):
+                    df.columns=[c[0] for c in df.columns]
+                df.index=pd.to_datetime(df.index).tz_localize(None)
+                return df.sort_index()
+            last=df if df is not None else pd.DataFrame()
+        except Exception:
+            pass
+        if attempt+1 < attempts:
+            time.sleep(0.6*(attempt+1))
+    return last if last is not None else pd.DataFrame()
+
 def dl_ohlc(ticker, period="3y"):
-    df = yf.download(
-        ticker, period=period, interval="1d", auto_adjust=True,
-        progress=False, threads=False, timeout=20
-    )
-    if df is None or len(df) == 0:
-        return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [c[0] for c in df.columns]
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    return df.sort_index()
+    # Cache successful daily history briefly because chart review and setup
+    # analytics frequently request the same symbol within seconds of each other.
+    key=f"ohlc-v23-6:{ticker.upper()}:{period}"
+    hit=CACHE.get(key)
+    if hit and time.time()-hit[0] < 300:
+        return hit[1].copy()
+    df=_yf_download_retry(ticker,period,"1d",timeout=12,attempts=2)
+    if df is not None and len(df):
+        CACHE[key]=(time.time(),df.copy())
+    return df if df is not None else pd.DataFrame()
 
 
 
@@ -599,13 +625,8 @@ def alpaca_chart_bars(ticker,timeframe,period):
         try:
             days={"1m":35,"3m":100,"6m":200}.get(period,35)
             yperiod="1mo" if days<=35 else "3mo" if days<=100 else "6mo"
-            df=yf.download(
-                ticker,period=yperiod,interval="60m",auto_adjust=True,
-                progress=False,threads=False,prepost=False,timeout=25
-            )
+            df=_yf_download_retry(ticker,yperiod,"60m",timeout=12,attempts=2,prepost=False)
             if df is not None and len(df):
-                if isinstance(df.columns,pd.MultiIndex):
-                    df.columns=[c[0] for c in df.columns]
                 for idx,row in df.dropna(subset=["Close"]).iterrows():
                     try:
                         dt=pd.Timestamp(idx)
@@ -2663,8 +2684,11 @@ def api_options(ticker):
 def api_flow(ticker):
     try:
         force=request.args.get("refresh") in ("1","true","yes")
-        base,_,_=cached_refresh_safe(f"options-v21-2:{ticker.upper()}",lambda:options_quality_payload(ticker),ttl=600)
-        payload,stale,err=cached_refresh_safe(f"flow-v21-2:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=180)
+        # Reuse the exact options payload already loaded by the deep-dive panel.
+        # Previously Flow used an old cache namespace, forcing a second full chain
+        # download immediately after /api/options and making the panel appear stuck.
+        base,_,_=cached_refresh_safe(f"options-v23:{ticker.upper()}:0-30",lambda:options_quality_payload(ticker,"0-30"),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"flow-v23-6:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=600)
         return jsonify({"ok":True,"stale":stale,"refresh_error":err,**payload})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -2869,11 +2893,8 @@ def _four_hour_from_hourly(hourly):
 def api_strat(ticker):
     ticker=ticker.upper().strip()
     try:
-        intraday=yf.download(ticker,period="60d",interval="60m",auto_adjust=True,progress=False,threads=False,prepost=False,timeout=20)
-        daily=yf.download(ticker,period="2y",interval="1d",auto_adjust=True,progress=False,threads=False,timeout=20)
-        for name,df in (("intraday",intraday),("daily",daily)):
-            if df is not None and len(df) and isinstance(df.columns,pd.MultiIndex):
-                df.columns=[c[0] for c in df.columns]
+        intraday=_yf_download_retry(ticker,"60d","60m",timeout=12,attempts=2,prepost=False)
+        daily=dl_ohlc(ticker,"2y")
         if intraday is None:intraday=pd.DataFrame()
         if daily is None:daily=pd.DataFrame()
         if len(intraday):intraday=intraday.sort_index()
@@ -5227,7 +5248,7 @@ function renderFlow(x){
 async function loadFlowTicker(ticker,force=false){
  const st=document.getElementById("flowStatus"),sec=document.getElementById("flowSection");if(sec)sec.style.display="block";if(st)st.textContent=`Loading ${ticker} flow…`;
  try{
-   const r=await fetch(`/api/flow/${encodeURIComponent(ticker)}${force?"?refresh=1":""}`),j=await r.json();
+   const r=await fetch(safeTickerEndpoint("/api/flow",ticker,force?"?refresh=1":""),{headers:{"Accept":"application/json"}}),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");
    activeFlowData=j;renderFlow(j);renderHeatMap()
  }catch(e){
