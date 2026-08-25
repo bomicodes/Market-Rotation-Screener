@@ -1,0 +1,34 @@
+name: Apply v24.0 final
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply v24 transforms
+        run: |
+          set -e
+          python scripts/v24_backend.py
+          python scripts/v24_sources.py
+          python scripts/v24_frontend.py
+          python scripts/v24_frontend_js.py
+          python scripts/v24_readme.py
+          python -m py_compile app.py
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          if git diff --cached --quiet; then
+            echo "No v24 changes needed"
+            exit 0
+          fi
+          git commit -m "Apply v24.0 server watchlist, health, glossary, macro calendar"
+          git push
