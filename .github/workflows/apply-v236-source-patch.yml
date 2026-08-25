@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'tools/apply_v236_patch.py'
+      - 'tools/apply_version_pill_patch.py'
       - '.github/workflows/apply-v236-source-patch.yml'
 
 permissions:
@@ -22,9 +23,11 @@ jobs:
           python-version: '3.12'
       - name: Apply source patch
         run: python tools/apply_v236_patch.py
+      - name: Apply version pill source-of-truth patch
+        run: python tools/apply_version_pill_patch.py
       - name: Compile app
         run: python -m py_compile app.py
-      - name: Verify v23.6 invariants
+      - name: Verify v23.6 invariants and version pill
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -35,6 +38,8 @@ jobs:
             'alpaca_pagination':'next_page_token' in t and 'raw.extend(j.get("bars") or [])' in t,
             'finnhub_pagination':'for _ in range(30)' in t and 'skip += 100' in t,
             'backtest_caveat':'Holdings reflect TODAY\'s fund composition' in t and 'histCaveat' in t,
+            'version_placeholder':'<span class="versionPill">{{APP_VERSION_PLACEHOLDER}}</span>' in t,
+            'version_substitution':'page = str(HTML).replace("{{APP_VERSION_PLACEHOLDER}}", f"v{APP_VERSION}")' in t,
           }
           print(checks)
           assert all(checks.values()), checks
@@ -49,6 +54,6 @@ jobs:
           if git diff --cached --quiet; then
             echo 'No changes to commit.'
           else
-            git commit -m 'Apply v23.6 cache pagination and backtest disclosure fixes'
+            git commit -m 'Apply version pill source-of-truth patch'
             git push origin main
           fi
