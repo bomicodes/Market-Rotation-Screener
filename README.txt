@@ -1,3 +1,9 @@
+v23.6 — CACHE STAMPEDE, PAGINATION TRUNCATION, AND BACKTEST DISCLOSURE FIXES
+- Added per-key locking with double-checked cache re-validation so concurrent requests for the same uncached expensive resource do not stampede the upstream provider.
+- alpaca_visible_profiles() now paginates 5Min/1Min bar requests instead of silently truncating at Alpaca's 10,000-bar page limit.
+- finnhub_etf_holdings() now paginates until the true end of the holdings list, with a 3,000-holding safety ceiling instead of a fixed 500-holding cap.
+- Historical RRG stocks mode now explicitly discloses that current ETF holdings are applied retroactively, so forward-return stats are illustrative and not survivorship-free backtests. Groups mode is unaffected.
+
 v23.5 — STRAT CONTINUITY FIX + NOISE-RESISTANT ROTATION SIGNAL + LOGIN HARDENING
 - Fixed STRAT "FTC" (full timeframe continuity) and the cross-timeframe continuity aggregate it feeds: they were computed from raw candle color (close vs open) instead of the actual STRAT scenario direction already computed in the same function. A timeframe sitting in an inside-bar (scenario 1) compression with no real breakout could still close green and count as "bullish continuity" — feeding Top Setups' STRAT pass, the confluence-zone direction fallback, and the Trade Thesis bias score. FTC now reuses the scenario-based direction signal.
 - Fixed 20 places across Top Setups, group/stock trajectory prefilters, and the post-earnings scanner where a single noisy one-bar rs_up/mom_up flip was treated as equivalent to the deliberately-smoother 3-bar tail_trajectory check. A stock whose 3-bar trend explicitly reads Neutral or Rotating Out could still be scored as "Rotating In" purely from one up day. The single-bar signal now only applies as a fallback when tail_trajectory data is genuinely unavailable, never to override an explicit trend reading.

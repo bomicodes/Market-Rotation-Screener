@@ -1,7 +1,7 @@
 
 from flask import Flask, jsonify, request, Response, session, redirect
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import io, math, time, traceback, os, sqlite3, json, hmac
+import io, math, time, traceback, os, sqlite3, json, hmac, threading
 from urllib.parse import quote
 from datetime import datetime, timedelta
 import numpy as np
@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.0.1"
+APP_VERSION = "23.6"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -184,15 +184,31 @@ def setup_history_stats(ticker, signature=None):
 
 CACHE = {}
 CACHE_TTL = 60 * 15
+_CACHE_LOCKS = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+def _cache_lock(key):
+    # One lock per cache key so unrelated keys never block each other.
+    with _CACHE_LOCKS_GUARD:
+        lock = _CACHE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _CACHE_LOCKS[key] = lock
+        return lock
 
 def cached(key, fn, ttl=CACHE_TTL):
     now = time.time()
     hit = CACHE.get(key)
     if hit and now - hit[0] < ttl:
         return hit[1]
-    val = fn()
-    CACHE[key] = (now, val)
-    return val
+    with _cache_lock(key):
+        now = time.time()
+        hit = CACHE.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        CACHE[key] = (now, val)
+        return val
 
 
 def cached_refresh_safe(key, fn, force=False, ttl=CACHE_TTL):
@@ -201,14 +217,19 @@ def cached_refresh_safe(key, fn, force=False, ttl=CACHE_TTL):
     hit = CACHE.get(key)
     if hit and not force and now - hit[0] < ttl:
         return hit[1], False, None
-    try:
-        val = fn()
-        CACHE[key] = (now, val)
-        return val, False, None
-    except Exception as e:
-        if hit:
-            return hit[1], True, str(e)
-        raise
+    with _cache_lock(key):
+        now = time.time()
+        hit = CACHE.get(key)
+        if hit and not force and now - hit[0] < ttl:
+            return hit[1], False, None
+        try:
+            val = fn()
+            CACHE[key] = (now, val)
+            return val, False, None
+        except Exception as e:
+            if hit:
+                return hit[1], True, str(e)
+            raise
 
 def dl_prices(tickers, period="3y"):
     """Download daily closes with a per-symbol repair pass.
@@ -536,14 +557,20 @@ def alpaca_visible_profiles(ticker, period, chart_timeframe):
             "sort":"asc",
             "limit":10000
         }
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=30)
-        if r.status_code in (401,403):
-            try: detail=(r.json() or {}).get("message") or r.text
-            except Exception: detail=r.text
-            return {"sessions":[],"weeks":[],"source":source_tf,
-                    "error":f"Alpaca stock-bar access rejected: {detail or r.status_code}"}
-        r.raise_for_status()
-        raw=(r.json() or {}).get("bars") or []
+        raw=[]; token=None
+        for _ in range(6):
+            if token: params["page_token"]=token
+            r=requests.get(url,params=params,headers=alpaca_headers(),timeout=30)
+            if r.status_code in (401,403):
+                try: detail=(r.json() or {}).get("message") or r.text
+                except Exception: detail=r.text
+                return {"sessions":[],"weeks":[],"source":source_tf,
+                        "error":f"Alpaca stock-bar access rejected: {detail or r.status_code}"}
+            r.raise_for_status()
+            j=r.json() or {}
+            raw.extend(j.get("bars") or [])
+            token=j.get("next_page_token") or j.get("page_token")
+            if not token: break
 
         sessions={}
         weeks={}
@@ -1104,8 +1131,11 @@ def finnhub_etf_holdings(etf):
     all_rows = []
     seen_assets = set()
 
-    # Finnhub documents skip pagination and up to 100 holdings per call.
-    for skip in (0, 100, 200, 300, 400):
+    # Finnhub returns up to 100 holdings per call with skip-based pagination.
+    # Continue until the provider signals the true end of the fund, bounded by a
+    # generous safety ceiling so malformed pagination cannot loop forever.
+    skip = 0
+    for _ in range(30):  # safety ceiling: up to 3,000 holdings
         params = {"symbol":etf, "skip":skip, "token":FINNHUB_API_KEY}
         resp = requests.get(url, params=params, timeout=25, headers={"User-Agent":"MarketRotationScreener/1.0"})
         resp.raise_for_status()
@@ -1154,6 +1184,7 @@ def finnhub_etf_holdings(etf):
 
         if new_count == 0 or len(rows) < 100:
             break
+        skip += 100
 
     all_rows = clean_equity_holdings(all_rows)
     if len(all_rows) < 10:
@@ -2752,7 +2783,14 @@ def api_historical_rrg():
             "source":source,
             "holdings_total":holdings_total,
             "holdings_as_screened":holdings_as_screened,
-            "results":rows
+            "results":rows,
+            "caveat":(
+                "Holdings reflect TODAY's fund composition applied retroactively to this "
+                "historical date, not the fund's actual holdings as of that date. This "
+                "biases the sample toward names that performed well enough to remain (or "
+                "become) top holdings today — treat forward-return stats here as "
+                "illustrative, not a rigorous backtest."
+            ) if mode=="stocks" else None
         })
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -4148,6 +4186,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <div class="note" style="margin-top:9px">
       The RRG is calculated only with price data available on or before the selected date. Historical stock mode defaults to top 20 holdings. Search/filters are instant; previously loaded Group/Stock, ETF, date and holdings-limit combinations repopulate from browser-session cache.
     </div>
+    <div id="histCaveat" class="note" style="margin-top:6px;color:#f59e0b"></div>
   </div>
   <div class="grid2">
     <div class="panel">
@@ -6547,6 +6586,8 @@ function applyHistoricalPayload(j,fromCache=false){
    ?`${j.holdings_as_screened} of ${j.holdings_total} holdings · benchmark ${j.benchmark}`
    :`${historicalData.length} groups · benchmark ${j.benchmark}`;
  st.textContent=(fromCache?"Cached · ":"")+detail;
+ const caveatEl=document.getElementById("histCaveat");
+ if(caveatEl)caveatEl.textContent=j.caveat||"";
  renderHistorical();
 }
 
