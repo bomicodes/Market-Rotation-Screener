@@ -1,0 +1,54 @@
+name: Apply v23.6 source patch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/apply_v236_patch.py'
+      - '.github/workflows/apply-v236-source-patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply source patch
+        run: python tools/apply_v236_patch.py
+      - name: Compile app
+        run: python -m py_compile app.py
+      - name: Verify v23.6 invariants
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          t=Path('app.py').read_text()
+          checks={
+            'version':'APP_VERSION = "23.6"' in t,
+            'cache_lock':'_CACHE_LOCKS_GUARD = threading.Lock()' in t and 'with _cache_lock(key):' in t,
+            'alpaca_pagination':'next_page_token' in t and 'raw.extend(j.get("bars") or [])' in t,
+            'finnhub_pagination':'for _ in range(30)' in t and 'skip += 100' in t,
+            'backtest_caveat':'Holdings reflect TODAY\'s fund composition' in t and 'histCaveat' in t,
+          }
+          print(checks)
+          assert all(checks.values()), checks
+          assert Path('README.txt').read_text().startswith('v23.6 —')
+          assert 'runtime_v2402:app' not in Path('render.yaml').read_text()
+          PY
+      - name: Commit patched source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No changes to commit.'
+          else
+            git commit -m 'Apply v23.6 cache pagination and backtest disclosure fixes'
+            git push origin main
+          fi
