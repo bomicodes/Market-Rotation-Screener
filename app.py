@@ -3828,7 +3828,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <button class="navJump" id="navWatch"><span class="navIcon">☆</span><span>Watchlist</span></button>
     <button class="tab" data-view="heatmap"><span class="navIcon">▦</span><span>Heat Map</span></button>
   </nav>
-  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">v22.35</span></div>
+  <div class="headerMeta"><button class="headerRefresh" id="dashRefreshMarket">↻ Refresh</button><span class="versionPill">{{APP_VERSION_PLACEHOLDER}}</span></div>
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast RRG (10/5) finds change; Trend RRG (25/12) confirms persistence.</div></div>
 
@@ -6777,7 +6777,12 @@ def internal_error(err):
 @app.get("/")
 def home():
     # Important: rendering the shell performs no external network requests.
-    shell = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#0b0e11'><meta name='apple-mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><title>Market Rotation Screener</title></head><body>" + str(HTML) + "</body></html>"
+    # The version pill is substituted from APP_VERSION (the single source of
+    # truth already used by /health and /api/diagnostics) rather than being a
+    # second, manually-typed copy — a hand-edited literal here had drifted out
+    # of sync with the real deployed version, showing a stale badge in the UI.
+    page = str(HTML).replace("{{APP_VERSION_PLACEHOLDER}}", f"v{APP_VERSION}")
+    shell = "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1,viewport-fit=cover'><meta name='theme-color' content='#0b0e11'><meta name='apple-mobile-web-app-capable' content='yes'><meta name='apple-mobile-web-app-status-bar-style' content='black-translucent'><title>Market Rotation Screener</title></head><body>" + page + "</body></html>"
     return Response(shell, mimetype="text/html")
 
 if __name__=="__main__":
