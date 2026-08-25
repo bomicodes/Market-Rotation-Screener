@@ -1,0 +1,332 @@
+name: Build v24 institutional decision layer
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-v24-institutional-layer.yml'
+      - '.build-v24-institutional-layer'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch v24 institutional decision layer
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app.py')
+          text=p.read_text()
+          text=text.replace('APP_VERSION = "23.6"','APP_VERSION = "24.0"',1)
+
+          backend=r'''
+
+def _ctx_return(series, sessions):
+    try:
+        s=series.dropna()
+        if len(s)<=sessions:return None
+        return float((s.iloc[-1]/s.iloc[-1-sessions]-1)*100)
+    except Exception:
+        return None
+
+
+def _context_earnings_catalyst(ticker):
+    today=pd.Timestamp.now().normalize()
+    try:
+        dates=get_earnings_dates(ticker, 16)
+    except Exception:
+        dates=[]
+    future=[]
+    for d in dates:
+        try:
+            x=pd.Timestamp(d).normalize()
+            if x>=today: future.append(x)
+        except Exception:
+            pass
+    if not future:
+        return {"next_earnings":None,"days_to_earnings":None,"risk":"Unknown"}
+    nxt=min(future)
+    days=int((nxt-today).days)
+    risk="Binary / imminent" if days<=3 else ("Near-term" if days<=10 else "Clear")
+    return {"next_earnings":nxt.strftime("%Y-%m-%d"),"days_to_earnings":days,"risk":risk}
+
+
+def _context_structure(ticker):
+    df=dl_ohlc(ticker,"1y")
+    if df is None or len(df)<55:
+        return {"available":False}
+    df=df.dropna(subset=["Open","High","Low","Close"]).copy()
+    c=df["Close"].astype(float); h=df["High"].astype(float); l=df["Low"].astype(float)
+    spot=float(c.iloc[-1])
+    prev=c.shift(1)
+    tr=pd.concat([(h-l).abs(),(h-prev).abs(),(l-prev).abs()],axis=1).max(axis=1)
+    atr=float(tr.rolling(14).mean().iloc[-1]) if len(tr)>=14 else float((h-l).tail(14).mean())
+    sma20=float(c.rolling(20).mean().iloc[-1]); sma50=float(c.rolling(50).mean().iloc[-1])
+    hi20=float(h.iloc[-21:-1].max()); lo20=float(l.iloc[-21:-1].min())
+    hi10=float(h.iloc[-11:-1].max()); lo10=float(l.iloc[-11:-1].min())
+    bull=spot>=sma20 and sma20>=sma50
+    bear=spot<=sma20 and sma20<=sma50
+    direction="bullish" if bull else ("bearish" if bear else "neutral")
+    if direction=="bullish":
+        trigger=hi20
+        confirmation=trigger+0.15*atr
+        invalidation=max(lo10,sma20-0.35*atr)
+        hard_fail=max(lo20,sma50-0.5*atr)
+        target1=max(trigger+1.5*atr,spot+1.25*atr)
+        target2=max(trigger+3.0*atr,spot+2.5*atr)
+        risk=max(0.01,trigger-invalidation)
+        reward=max(0.0,target2-trigger)
+    elif direction=="bearish":
+        trigger=lo20
+        confirmation=trigger-0.15*atr
+        invalidation=min(hi10,sma20+0.35*atr)
+        hard_fail=min(hi20,sma50+0.5*atr)
+        target1=min(trigger-1.5*atr,spot-1.25*atr)
+        target2=min(trigger-3.0*atr,spot-2.5*atr)
+        risk=max(0.01,invalidation-trigger)
+        reward=max(0.0,trigger-target2)
+    else:
+        trigger=hi20; confirmation=hi20+0.15*atr; invalidation=lo10; hard_fail=lo20
+        target1=hi20+1.5*atr; target2=hi20+3.0*atr
+        risk=max(0.01,trigger-invalidation); reward=max(0.0,target2-trigger)
+    rr=reward/risk if risk>0 else None
+    trend_strength=0
+    if spot>sma20:trend_strength+=1
+    if sma20>sma50:trend_strength+=1
+    r20=_ctx_return(c,20); r50=_ctx_return(c,50)
+    if r20 is not None and r20>0:trend_strength+=1
+    if r50 is not None and r50>0:trend_strength+=1
+    return {
+        "available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,
+        "trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),
+        "trigger":round(trigger,2),"confirmation":round(confirmation,2),"invalidation":round(invalidation,2),
+        "hard_fail":round(hard_fail,2),"target1":round(target1,2),"target2":round(target2,2),
+        "rr_to_target2":round(rr,2) if rr is not None else None,
+        "return_20d":round(r20,2) if r20 is not None else None,
+        "return_50d":round(r50,2) if r50 is not None else None,
+    }
+
+
+def institutional_context_payload(ticker,parent=None):
+    ticker=ticker.upper().strip(); parent=(parent or "").upper().strip() or None
+    universe=[ticker,"SPY"]+([parent] if parent and parent not in (ticker,"SPY") else [])
+    px=dl_prices(universe,"1y")
+    stock=px[ticker].dropna() if ticker in px else pd.Series(dtype=float)
+    spy=px["SPY"].dropna() if "SPY" in px else pd.Series(dtype=float)
+    par=px[parent].dropna() if parent and parent in px else pd.Series(dtype=float)
+    rs={}
+    positives=0; observed=0
+    for n in (5,10,20):
+        sr=_ctx_return(stock,n); mr=_ctx_return(spy,n)
+        pr=_ctx_return(par,n) if len(par) else None
+        vs_market=(sr-mr) if sr is not None and mr is not None else None
+        vs_parent=(sr-pr) if sr is not None and pr is not None else None
+        rs[str(n)]={
+            "stock":round(sr,2) if sr is not None else None,
+            "vs_spy":round(vs_market,2) if vs_market is not None else None,
+            "vs_parent":round(vs_parent,2) if vs_parent is not None else None,
+        }
+        for v in (vs_market,vs_parent):
+            if v is not None:
+                observed+=1
+                if v>0: positives+=1
+    persistence=round(100*positives/observed) if observed else None
+    triple=bool(parent and all((rs[str(n)].get("vs_spy") or -999)>0 and (rs[str(n)].get("vs_parent") or -999)>0 for n in (5,10,20)))
+    structure=_context_structure(ticker)
+    catalyst=_context_earnings_catalyst(ticker)
+    if structure.get("trend_strength",0)>=4 and persistence is not None and persistence>=67:
+        horizon="1–3 week swing"
+    elif structure.get("trend_strength",0)>=2:
+        horizon="2–5 day swing"
+    else:
+        horizon="Tactical / wait for confirmation"
+    signature=f"v24|{parent or 'NONE'}|{horizon}|{'triple' if triple else 'mixed-rs'}|{structure.get('direction','neutral')}"
+    snap={"ticker":ticker,"spot":structure.get("spot"),"bias":structure.get("direction"),"score":persistence,"signature":signature,
+          "raw":{"parent":parent,"relative_strength":rs,"structure":structure,"horizon":horizon,"catalyst":catalyst}}
+    try:
+        save_setup_snapshot(snap)
+    except Exception:
+        pass
+    try:
+        hist=setup_history_stats(ticker,signature)
+        if not hist.get("count"):
+            hist=setup_history_stats(ticker)
+            hist["fallback_all_signatures"]=True
+    except Exception as e:
+        hist={"count":0,"returns":{},"error":str(e)}
+    return {
+        "ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,
+        "triple_relative_strength":triple,"structure":structure,"horizon":horizon,"catalyst":catalyst,
+        "signature":signature,"historical_expectancy":hist,
+    }
+
+@app.get("/api/institutional-context/<ticker>")
+def api_institutional_context(ticker):
+    try:
+        parent=(request.args.get("parent") or "").upper().strip() or None
+        key=f"institutional-v24:{ticker.upper()}:{parent or 'NONE'}"
+        payload=cached(key,lambda:institutional_context_payload(ticker,parent),ttl=900)
+        return jsonify({"ok":True,**payload})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+'''
+          anchor='def auth_required():'
+          if backend not in text:
+              if anchor not in text: raise SystemExit('backend anchor missing')
+              text=text.replace(anchor,backend+anchor,1)
+
+          css=r'''
+/* v24 Institutional Decision Layer */
+.instDecisionPanel{border:1px solid #31506c;background:linear-gradient(180deg,#0d1720,#0a1118);margin:12px 0}
+.instDecisionHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}
+.instDecisionHead h3{margin:0;font-size:14px}.instDecisionHead .horizon{font-size:10px;font-weight:900;color:#7dd3fc;border:1px solid #24566e;border-radius:999px;padding:4px 8px}
+.instGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.instCard{border:1px solid #26394b;background:#0b141d;border-radius:8px;padding:9px;min-height:76px}.instCard .k{font-size:8px;letter-spacing:.6px;color:#7f93a8;font-weight:900}.instCard .v{font-size:15px;font-weight:900;margin-top:5px}.instCard .d{font-size:9px;color:#9badbf;line-height:1.45;margin-top:4px}
+.instSection{margin-top:9px;border-top:1px solid #1d2d3b;padding-top:9px}.instSectionTitle{font-size:9px;font-weight:900;letter-spacing:.7px;color:#cbd5e1;margin-bottom:6px}.instLevelGrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.instLevel{padding:7px;border:1px solid #26394b;border-radius:7px;background:#09121a}.instLevel b{display:block;font-size:12px}.instLevel span{font-size:8px;color:#8193a6}.instFactors{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;margin-top:8px}.instFactor{border:1px solid #2a3e50;border-radius:6px;padding:6px;font-size:8px}.instFactor strong{display:block;font-size:11px;margin-top:2px}.instGood{color:#69e6a6}.instWarn{color:#f6c667}.instBad{color:#fb8d96}.topSetupInstitutional{margin-top:8px;border-top:1px solid #203141;padding-top:7px}.topSetupInstGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}.topSetupInstMetric{font-size:8px;color:#8294a6}.topSetupInstMetric b{display:block;color:#dbe7f2;font-size:10px;margin-top:2px}@media(max-width:900px){.instGrid{grid-template-columns:repeat(2,1fr)}.instLevelGrid{grid-template-columns:repeat(3,1fr)}.instFactors{grid-template-columns:repeat(2,1fr)}.topSetupInstGrid{grid-template-columns:repeat(2,1fr)}}
+'''
+          si=text.rfind('</style>')
+          if si<0: raise SystemExit('style close missing')
+          if 'v24 Institutional Decision Layer' not in text:
+              text=text[:si]+css+text[si:]
+
+          js=r'''
+// -------------------- v24 Institutional Decision Layer --------------------
+const institutionalContextMap={};
+let activeInstitutionalTicker=null;
+function instFmt(v,d=1){const n=Number(v);return Number.isFinite(n)?`${n>0?"+":""}${n.toFixed(d)}%`:"—"}
+function instMoney(v){const n=Number(v);return Number.isFinite(n)?`$${n.toFixed(2)}`:"—"}
+function ensureInstitutionalPanel(){
+ let el=document.getElementById("institutionalDecisionPanel");if(el)return el;
+ el=document.createElement("div");el.id="institutionalDecisionPanel";el.className="panel instDecisionPanel";
+ el.innerHTML='<div class="note">Institutional decision layer loads with the selected ticker.</div>';
+ const anchor=document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart");
+ if(anchor&&anchor.parentNode)anchor.parentNode.insertBefore(el,anchor);
+ return el;
+}
+function flowEvidenceFor(ticker){
+ const x=(activeFlowData?.ticker===ticker)?activeFlowData:null;if(!x)return {label:"Pending",score:null,detail:"Load options/flow"};
+ const cp=Number(x.institutional_call_pct),pp=Number(x.institutional_put_pct),cov=Number(x.activity_coverage_pct),high=Number(x.high_relevance_events||0);
+ let score=0;if(Number.isFinite(cov))score+=Math.min(45,cov*.45);score+=Math.min(35,high*7);if((x.institutional_events||0)>0)score+=20;
+ const mix=Number.isFinite(cp)&&cp>=65?"Call-heavy":Number.isFinite(pp)&&pp>=65?"Put-heavy":"Balanced";
+ const direction=x.direction_available?"direction classified":"direction unconfirmed";
+ return {label:`${mix} evidence`,score:Math.round(Math.min(100,score)),detail:`${x.coverage_confidence||"?"} coverage · ${high} high relevance · ${direction}`};
+}
+function gexImplicationFor(ticker,ctx){
+ const o=(activeOptionsData?.ticker===ticker)?activeOptionsData:optionScanMap[ticker],p=o?.positioning;if(!p?.available)return {label:"Pending",detail:"Load GEX/options positioning"};
+ const dir=ctx?.structure?.direction||"neutral",spot=Number(o?.spot||ctx?.structure?.spot),wall=dir==="bearish"?Number(p.put_wall):Number(p.call_wall),reg=String(p.gamma_regime||"");
+ let room=null;if(Number.isFinite(spot)&&spot>0&&Number.isFinite(wall))room=dir==="bearish"?(spot-wall)/spot*100:(wall-spot)/spot*100;
+ let label=reg.includes("Negative")?"Amplifying regime":reg.includes("Positive")?"Dampening regime":"Mixed gamma";
+ let detail=reg||"Dealer gamma unavailable";
+ if(room!=null)detail+=` · ${room.toFixed(1)}% room to ${dir==="bearish"?"put":"call"} wall`;
+ if(reg.includes("Positive")&&room!=null&&room<=1.5)detail+=" · breakout headwind";
+ else if(reg.includes("Negative")&&room!=null&&room>2)detail+=" · continuation can accelerate";
+ return {label,detail,room};
+}
+function histExpectancyLabel(h){
+ if(!h||!h.count)return {label:"Building sample",detail:"Snapshot database will accumulate this setup signature"};
+ const r=h.returns?.[5]||h.returns?.["5"]||{};
+ return {label:`${h.count} snapshots`,detail:`5D win ${r.win_rate==null?"—":r.win_rate+"%"} · median ${r.median==null?"—":r.median+"%"}`};
+}
+function factorBreakdownFor(x,base,ctx){
+ const rs=ctx?.relative_strength||{},p=ctx?.rotation_persistence,cat=ctx?.catalyst||{},hist=ctx?.historical_expectancy||{},flow=flowEvidenceFor(x.ticker),gex=gexImplicationFor(x.ticker,ctx);
+ const r5=rs["5"]||{},r20=rs["20"]||{};
+ return [
+  ["Rotation",base.alignment==="FULL"?10:base.alignment==="EARLY"?9:5],
+  ["Market RS",r20.vs_spy>0?10:r5.vs_spy>0?7:3],
+  ["Sector RS",r20.vs_parent>0?10:r5.vs_parent>0?7:ctx?.parent?3:5],
+  ["Persistence",p==null?5:Math.round(p/10)],
+  ["Structure",ctx?.structure?.trend_strength==null?5:Math.min(10,ctx.structure.trend_strength*2.5)],
+  ["Flow",flow.score==null?5:Math.round(flow.score/10)],
+  ["GEX",gex.detail.includes("headwind")?3:gex.detail.includes("accelerate")?9:6],
+  ["Execution",optionScanMap[x.ticker]?.liquidity==="Liquid"?10:optionScanMap[x.ticker]?.liquidity==="Tradable"?8:4],
+  ["Expectancy",hist.count?7:5],
+  ["Catalyst",cat.days_to_earnings!=null&&cat.days_to_earnings<=3?1:cat.days_to_earnings!=null&&cat.days_to_earnings<=10?5:9]
+ ];
+}
+async function loadInstitutionalContext(ticker,parent=null,quiet=false){
+ ticker=normalizeStockTicker(ticker);if(!ticker)return null;activeInstitutionalTicker=ticker;
+ const el=ensureInstitutionalPanel();if(el&&!quiet)el.innerHTML=`<div class="note">Loading ${ticker} institutional decision layer…</div>`;
+ try{
+  const q=parent?`?parent=${encodeURIComponent(parent)}`:"";const r=await fetch(`/api/institutional-context/${encodeURIComponent(ticker)}${q}`),j=await r.json();
+  if(!r.ok||!j.ok)throw Error(j.error||"Institutional context failed");institutionalContextMap[ticker]=j;
+  if(activeInstitutionalTicker===ticker)renderInstitutionalContext(ticker);renderTopSetups();return j;
+ }catch(e){if(el&&!quiet)el.innerHTML=`<span class="warn">Institutional layer: ${e.message}</span>`;return null}
+}
+function renderInstitutionalContext(ticker){
+ const c=institutionalContextMap[ticker],el=ensureInstitutionalPanel();if(!c||!el)return;
+ const rs=c.relative_strength||{},s=c.structure||{},cat=c.catalyst||{},flow=flowEvidenceFor(ticker),gex=gexImplicationFor(ticker,c),hist=histExpectancyLabel(c.historical_expectancy);
+ const rs5=rs["5"]||{},rs10=rs["10"]||{},rs20=rs["20"]||{};
+ const catalystText=cat.next_earnings?`${cat.next_earnings} · ${cat.days_to_earnings}d`:'No confirmed upcoming earnings';
+ const catCls=cat.days_to_earnings!=null&&cat.days_to_earnings<=3?'instBad':cat.days_to_earnings!=null&&cat.days_to_earnings<=10?'instWarn':'instGood';
+ el.innerHTML=`<div class="instDecisionHead"><div><h3>${ticker} · Institutional Decision Layer</h3><div class="tiny">Observe → Rank → Explain → Execute → Invalidate → Measure</div></div><span class="horizon">${c.horizon||"—"}</span></div>
+ <div class="instGrid">
+  <div class="instCard"><div class="k">ROTATION PERSISTENCE</div><div class="v ${Number(c.rotation_persistence)>=67?'instGood':''}">${c.rotation_persistence==null?'—':c.rotation_persistence+'/100'}</div><div class="d">5/10/20D relative leadership${c.triple_relative_strength?' · triple RS confirmed':''}</div></div>
+  <div class="instCard"><div class="k">RELATIVE STRENGTH</div><div class="v">${c.parent?`${instFmt(rs20.vs_parent)} vs ${c.parent}`:instFmt(rs20.vs_spy)}</div><div class="d">20D vs SPY ${instFmt(rs20.vs_spy)} · 5D ${instFmt(rs5.vs_spy)}</div></div>
+  <div class="instCard"><div class="k">FLOW EVIDENCE</div><div class="v">${flow.label}</div><div class="d">${flow.detail}</div></div>
+  <div class="instCard"><div class="k">GEX TRADE EFFECT</div><div class="v">${gex.label}</div><div class="d">${gex.detail}</div></div>
+  <div class="instCard"><div class="k">CATALYST RISK</div><div class="v ${catCls}">${cat.risk||"Unknown"}</div><div class="d">${catalystText}</div></div>
+  <div class="instCard"><div class="k">HISTORICAL EXPECTANCY</div><div class="v">${hist.label}</div><div class="d">${hist.detail}</div></div>
+  <div class="instCard"><div class="k">PRICE STRUCTURE</div><div class="v">${s.direction||"—"}</div><div class="d">Trend strength ${s.trend_strength??'—'}/4 · ATR ${instMoney(s.atr14)}</div></div>
+  <div class="instCard"><div class="k">R:R TO TARGET 2</div><div class="v">${s.rr_to_target2==null?'—':Number(s.rr_to_target2).toFixed(1)+'×'}</div><div class="d">Targets/invalidation are volatility- and structure-based heuristics</div></div>
+ </div>
+ <div class="instSection"><div class="instSectionTitle">RELATIVE LEADERSHIP</div><div class="instFactors">
+  <div class="instFactor">5D vs SPY<strong>${instFmt(rs5.vs_spy)}</strong></div><div class="instFactor">10D vs SPY<strong>${instFmt(rs10.vs_spy)}</strong></div><div class="instFactor">20D vs SPY<strong>${instFmt(rs20.vs_spy)}</strong></div><div class="instFactor">5D vs ${c.parent||'group'}<strong>${instFmt(rs5.vs_parent)}</strong></div><div class="instFactor">20D vs ${c.parent||'group'}<strong>${instFmt(rs20.vs_parent)}</strong></div>
+ </div></div>
+ <div class="instSection"><div class="instSectionTitle">STRUCTURE REVIEW · EXECUTION / INVALIDATION</div><div class="instLevelGrid">
+  <div class="instLevel"><span>TRIGGER</span><b>${instMoney(s.trigger)}</b></div><div class="instLevel"><span>CONFIRMATION</span><b>${instMoney(s.confirmation)}</b></div><div class="instLevel"><span>INVALIDATION</span><b>${instMoney(s.invalidation)}</b></div><div class="instLevel"><span>HARD FAIL</span><b>${instMoney(s.hard_fail)}</b></div><div class="instLevel"><span>TARGET 1</span><b>${instMoney(s.target1)}</b></div><div class="instLevel"><span>TARGET 2</span><b>${instMoney(s.target2)}</b></div>
+ </div><div class="tiny" style="margin-top:6px">Confirmation is trigger ± 0.15 ATR. Invalidation uses recent structure + 20D mean; hard fail uses the broader 20D/50D structure. These are decision heuristics, not stop-loss instructions.</div></div>`;
+}
+const _topSetupEvaluationV23=topSetupEvaluation;
+topSetupEvaluation=function(x){
+ const b=_topSetupEvaluationV23(x),c=institutionalContextMap[x.ticker];if(!c)return {...b,factors:factorBreakdownFor(x,b,null)};
+ let score=b.score;const rs20=c.relative_strength?.["20"]||{};
+ if(c.triple_relative_strength)score+=6;else {if(Number(rs20.vs_spy)>0)score+=3;if(Number(rs20.vs_parent)>0)score+=3;}
+ if(Number(c.rotation_persistence)>=80)score+=4;else if(Number(c.rotation_persistence)<50)score-=4;
+ if(c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=3)score-=10;
+ const gx=gexImplicationFor(x.ticker,c);if(gx.detail.includes("headwind"))score-=4;else if(gx.detail.includes("accelerate"))score+=3;
+ score=Math.max(0,Math.min(100,Math.round(score)));
+ return {...b,score,context:c,factors:factorBreakdownFor(x,b,c)};
+};
+renderTopSetups=function(){
+ const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
+ const source=(globalTopSetupData&&globalTopSetupData.length)?globalTopSetupData:[];
+ const rows=source.map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score).slice(0,2);
+ if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?'':'s'} · institutional factor model`:"No A-quality setup currently";
+ if(!rows.length){g.innerHTML=`<div class="topSetupsEmpty">${automaticTopSetupsRunning?'Scanning all supportive sectors / themes…':'No market-wide A-quality setup currently. The scanner will not force a pick.'}</div>`;return}
+ g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,c=e.context,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";const s=c?.structure||{};const trigger=s.trigger!=null?`${instMoney(s.trigger)} → confirm ${instMoney(s.confirmation)}`:va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:"Load structure";const f=(e.factors||[]).map(z=>`<div class="topSetupInstMetric">${z[0]}<b>${z[1]}/10</b></div>`).join('');return `<div class="topSetupCard ${label==="A+ SETUP"?'aPlus':''}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?'★ ':''}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:''}${c?` · ${c.horizon}`:''}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,5).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join('')}${c?.triple_relative_strength?'<span class="good">Triple relative strength</span>':''}${c?.rotation_persistence>=80?'<span class="good">Persistent leadership</span>':''}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b>${s.invalidation!=null?`<div class="tiny">Invalidation ${instMoney(s.invalidation)} · hard fail ${instMoney(s.hard_fail)} · T1 ${instMoney(s.target1)} · T2 ${instMoney(s.target2)} · R:R ${s.rr_to_target2??'—'}×</div>`:''}</div><div class="topSetupInstitutional"><div class="topSetupInstGrid">${f}</div>${c?.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=10?`<div class="tiny instWarn" style="margin-top:6px">Catalyst: earnings ${c.catalyst.next_earnings} (${c.catalyst.days_to_earnings}d)</div>`:''}</div><div class="topSetupActions"><button class="topSetupAction primaryDive" data-top-open="${x.ticker}" data-parent="${x._parentTicker||''}">Open setup</button><button class="topSetupAction gexDive" data-top-gex="${x.ticker}" data-parent="${x._parentTicker||''}">GEX</button><button class="topSetupAction optionsDive" data-top-options="${x.ticker}" data-parent="${x._parentTicker||''}">Options</button></div></div>`}).join('');
+ const open=(ticker,parent,target)=>{try{openTopSetupDeepDive(ticker,parent,target)}catch(e){if(st)st.textContent=`Open failed: ${e?.message||e}`}};
+ g.querySelectorAll('[data-top-open]').forEach(btn=>btn.onclick=e=>{e.preventDefault();e.stopPropagation();open(btn.dataset.topOpen,btn.dataset.parent||null,'chart')});g.querySelectorAll('[data-top-gex]').forEach(btn=>btn.onclick=e=>{e.preventDefault();e.stopPropagation();open(btn.dataset.topGex,btn.dataset.parent||null,'gex')});g.querySelectorAll('[data-top-options]').forEach(btn=>btn.onclick=e=>{e.preventDefault();e.stopPropagation();open(btn.dataset.topOptions,btn.dataset.parent||null,'options')});g.querySelectorAll('[data-top-setup]').forEach(card=>card.onclick=e=>{if(e.target?.closest('.topSetupAction'))return;const btn=card.querySelector('[data-top-open]');open(card.dataset.topSetup,btn?btn.dataset.parent:null,'chart')});
+};
+const _runAutomaticTopSetupsV23=runAutomaticTopSetups;
+runAutomaticTopSetups=async function(force=false){
+ await _runAutomaticTopSetupsV23(force);
+ const rows=(globalTopSetupData||[]).slice(0,10);for(let n=0;n<rows.length;n+=3){await Promise.all(rows.slice(n,n+3).map(x=>loadInstitutionalContext(x.ticker,x._parentTicker||null,true)))}renderTopSetups();
+};
+const _openSectorStockTickerV23=openSectorStockTicker;
+openSectorStockTicker=async function(rawTicker,opts={}){const ticker=normalizeStockTicker(rawTicker),parent=currentSector;const out=await _openSectorStockTickerV23(rawTicker,opts);loadInstitutionalContext(ticker,parent,false);return out};
+const _openTopSetupDeepDiveV23=openTopSetupDeepDive;
+openTopSetupDeepDive=function(ticker,parentTicker=null,target="chart"){const out=_openTopSetupDeepDiveV23(ticker,parentTicker,target);loadInstitutionalContext(ticker,parentTicker||currentSector,false);return out};
+const _renderFlowV23=renderFlow;
+renderFlow=function(x){const out=_renderFlowV23(x);if(x?.ticker&&institutionalContextMap[x.ticker])renderInstitutionalContext(x.ticker);return out};
+const _renderOptionsPanelV23=renderOptionsPanel;
+renderOptionsPanel=function(){const out=_renderOptionsPanelV23();if(activeOptionsData?.ticker&&institutionalContextMap[activeOptionsData.ticker])renderInstitutionalContext(activeOptionsData.ticker);return out};
+'''
+          sj=text.rfind('</script>')
+          if sj<0: raise SystemExit('script close missing')
+          if 'v24 Institutional Decision Layer --------------------' not in text:
+              text=text[:sj]+js+text[sj:]
+
+          p.write_text(text)
+          PY
+          python -m py_compile app.py
+      - name: Commit patch and cleanup
+        run: |
+          rm -f .github/workflows/build-v24-institutional-layer.yml .build-v24-institutional-layer
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py .github/workflows/build-v24-institutional-layer.yml .build-v24-institutional-layer || true
+          git commit -m "Build v24 institutional decision layer"
+          git push origin HEAD:main
