@@ -1,0 +1,40 @@
+name: Apply feed comparison cache patch
+on:
+  push:
+    paths:
+      - 'scripts/patch_feed_comparison_cache_v25_1.py'
+      - '.github/workflows/apply-feed-comparison-cache-v25-1.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_feed_comparison_cache_v25_1.py
+      - name: Syntax check
+        run: python -m py_compile app.py
+      - name: Verify patch
+        run: |
+          grep -q 'feed-comparison-v1:' app.py
+          grep -q 'payload=cached(key,lambda:feed_comparison_payload(ticker),ttl=90)' app.py
+      - name: Run core regression tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_core_logic.py -q
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189823+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Cache feed comparison payload for 90 seconds'
+          git push
