@@ -1,0 +1,43 @@
+name: Apply v24.5 paid feeds + Safari chart fix
+on:
+  push:
+    paths:
+      - 'scripts/patch_v24_5_paid_feeds_chart_safari.py'
+      - '.github/workflows/apply-v24-5-paid-feeds-chart.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_v24_5_paid_feeds_chart_safari.py
+      - name: Syntax check
+        run: python -m py_compile app.py
+      - name: Verify markers
+        run: |
+          grep -q 'APP_VERSION = "24.5"' app.py
+          grep -q '"opra"' app.py
+          grep -q '"sip"' app.py
+          grep -q 'function safeTickerUrl' app.py
+          grep -q 'function drawBasicPricePreview' app.py
+      - name: Run core regression tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_core_logic.py -q
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Use SIP OPRA and harden Safari chart loading'
+          git push
