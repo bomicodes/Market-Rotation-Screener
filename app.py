@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.5"
+APP_VERSION = "24.7"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -3162,8 +3162,14 @@ def api_chart_preview(ticker):
                     "volume":None if pd.isna(row.get("Volume")) else int(row.get("Volume"))
                 })
 
-        profiles=alpaca_session_volume_profiles(ticker)
-        visible_profiles=alpaca_visible_profiles(ticker,period,timeframe)
+        try:
+            profiles=alpaca_session_volume_profiles(ticker)
+        except Exception as profile_err:
+            profiles={"session":None,"previous":None,"error":str(profile_err)}
+        try:
+            visible_profiles=alpaca_visible_profiles(ticker,period,timeframe)
+        except Exception as visible_err:
+            visible_profiles={"sessions":[],"weeks":[],"source":None,"error":str(visible_err)}
         # Value migration compares the latest two completed session profiles.
         migration=None
         sess=(visible_profiles or {}).get("sessions") or []
@@ -4321,7 +4327,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
   <div class="panel" id="optionsPanel">
     <div class="row">
-      <strong>Options · 0–30 DTE</strong>
+      <strong>Options · 7–35 DTE</strong>
       <span class="note">Alpaca options data for screening. Positioning is modeled; flow is sampled and does not infer buyer/seller intent.</span>
       <a id="alpacaSignupBtn" href="https://app.alpaca.markets/signup" target="_blank" rel="noopener" class="setupBtn">Connect Alpaca / Get API Key ↗</a>
       <span id="optionsUnderlying" class="note"></span>
@@ -4613,6 +4619,21 @@ function safeTickerUrl(path,ticker,params={}){
    q.push(`${encodeURIComponent(String(k))}=${encodeURIComponent(String(v))}`);
  });
  return q.length?`${base}?${q.join("&")}`:base;
+}
+async function safeTickerFetchJson(path,ticker,params={}){
+ const url=safeTickerUrl(path,ticker,params);
+ let r;
+ try{
+   r=await window.fetch(url,{method:"GET",credentials:"same-origin",cache:"no-store",headers:{Accept:"application/json"}});
+ }catch(e){
+   console.error("Ticker request dispatch failed",{path,ticker,url,error:e});
+   throw new Error(`Request could not be dispatched: ${e?.message||e}`);
+ }
+ const raw=await r.text();
+ let j;
+ try{j=raw?JSON.parse(raw):{};}catch(e){throw new Error(`Service returned an unreadable response (${r.status})`);}
+ if(!r.ok||!j?.ok)throw new Error(j?.error||`Request failed (${r.status})`);
+ return j;
 }
 async function openSectorStockTicker(rawTicker,{scroll=true}={}){
  const ticker=normalizeStockTicker(rawTicker);
@@ -5753,8 +5774,7 @@ function renderFlow(x){
 async function loadFlowTicker(ticker,force=false){
  const st=document.getElementById("flowStatus"),sec=document.getElementById("flowSection");if(sec)sec.style.display="block";if(st)st.textContent=`Loading ${ticker} flow…`;
  try{
-   const r=await fetch(safeTickerEndpoint("/api/flow",ticker,force?"?refresh=1":""),{headers:{"Accept":"application/json"}}),j=await r.json();
-   if(!r.ok||!j.ok)throw Error(j.error||"Flow request failed");
+   const j=await safeTickerFetchJson("/api/flow",ticker,force?{refresh:1}:{});
    activeFlowData=j;renderFlow(j);renderHeatMap()
  }catch(e){
    activeFlowData=null;
@@ -5805,8 +5825,8 @@ async function loadOptionsTicker(ticker,opts={}){
  }
  st.textContent=`Loading ${ticker} options…`;
  try{
-   const gw=document.getElementById("gexWindow")?.value||"0-30"; const r=await fetch(safeTickerEndpoint("/api/options",ticker)+`?gex_window=${encodeURIComponent(gw)}&dte_min=7&dte_max=35`,{headers:{"Accept":"application/json"}}),j=await r.json();
-   if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
+   const gw=document.getElementById("gexWindow")?.value||"0-30";
+   const j=await safeTickerFetchJson("/api/options",ticker,{gex_window:gw,dte_min:7,dte_max:35});
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
    const wi=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===liveWatchKey(ticker));
@@ -5998,9 +6018,8 @@ async function loadStrat(ticker){
  if(box)box.innerHTML="";
  if(cont){cont.className="stratContinuity";cont.textContent="…";}
  try{
-   const r=await fetch(safeTickerEndpoint("/api/strat",ticker),{headers:{"Accept":"application/json"}}),j=await r.json();
+   const j=await safeTickerFetchJson("/api/strat",ticker);
    if(seq!==stratRequestSeq)return;
-   if(!r.ok||!j.ok)throw Error(j.error||"STRAT load failed");
    stratSignalMap[String(ticker).toUpperCase()]=j;
    renderStrat(j);
    renderTopSetups();
