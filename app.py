@@ -4805,14 +4805,30 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
  if(ttl>0&&cached&&now-cached.at<ttl)return cached.value;
  if(tickerRequestInflight.has(url))return tickerRequestInflight.get(url);
  const promise=(async()=>{
-   let r;
-   try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"}})}
-   catch(e){throw new Error(`Request could not be dispatched: ${e?.message||e}`)}
-   let raw="",j={};
-   try{raw=await r.text();j=raw?JSON.parse(raw):{};}catch(e){throw new Error(`Service returned an unreadable response (${r.status})`)}
-   if(!r.ok||!j?.ok)throw new Error(j?.error||`Request failed (${r.status})`);
-   if(ttl>0)tickerResponseCache.set(url,{at:Date.now(),value:j});
-   return j;
+   const waits=[0,1000,3000,7000,12000];
+   let lastErr=null;
+   for(let attempt=0;attempt<waits.length;attempt++){
+     if(waits[attempt])await new Promise(r=>setTimeout(r,waits[attempt]));
+     let r;
+     try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"}})}
+     catch(e){lastErr=new Error(`Request could not be dispatched: ${e?.message||e}`);continue;}
+     let raw="",j={};
+     try{raw=await r.text();j=raw?JSON.parse(raw):{};}
+     catch(e){
+       lastErr=new Error(`Service returned an unreadable response (${r.status})`);
+       if([429,502,503,504].includes(r.status))continue;
+       throw lastErr;
+     }
+     if(r.ok&&j?.ok){
+       if(ttl>0)tickerResponseCache.set(url,{at:Date.now(),value:j});
+       return j;
+     }
+     lastErr=new Error(j?.error||`Request failed (${r.status})`);
+     if(![429,502,503,504].includes(r.status))throw lastErr;
+   }
+   const stale=tickerResponseCache.get(url);
+   if(stale)return {...stale.value,_client_stale:true};
+   throw lastErr||new Error("Request failed");
  })();
  tickerRequestInflight.set(url,promise);
  try{return await promise}finally{tickerRequestInflight.delete(url)}
@@ -6768,6 +6784,11 @@ function preliminaryRRGScore(x){
 }
 
 async function runAutomaticTopSetups(force=false){
+ if(window.matchMedia&&window.matchMedia("(max-width: 760px)").matches){
+   const st=document.getElementById("topSetupStatus")||document.getElementById("topSetupsStatus");
+   if(st)st.textContent="Top Setups auto-scan paused on mobile to keep ticker analysis fast.";
+   return;
+ }
  const st=document.getElementById("topSetupsStatus");
  if(automaticTopSetupsRunning)return;
  if(!force && globalTopSetupData.length && Date.now()-automaticTopSetupsLastRun<5*60*1000){
