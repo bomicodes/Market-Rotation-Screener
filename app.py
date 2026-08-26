@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.0"
+APP_VERSION = "24.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -251,19 +251,35 @@ def source_health_snapshot():
     return out
 
 MACRO_CALENDAR=[
- {"date":"2026-09-04","type":"NFP","label":"Employment Situation (August)"},
- {"date":"2026-09-11","type":"CPI","label":"CPI (August)"},
- {"date":"2026-09-16","type":"FOMC","label":"FOMC Rate Decision"},
- {"date":"2026-10-27","type":"FOMC","label":"FOMC meeting begins"},
- {"date":"2026-10-28","type":"FOMC","label":"FOMC Rate Decision"},
- {"date":"2026-12-08","type":"FOMC","label":"FOMC meeting begins"},
- {"date":"2026-12-09","type":"FOMC","label":"FOMC Rate Decision"}]
+ {"date":"2026-08-26","time":"08:30 ET","type":"PCE","importance":"HIGH","label":"Personal Income & Outlays / July PCE","source":"BEA"},
+ {"date":"2026-08-26","time":"08:30 ET","type":"GDP","importance":"HIGH","label":"GDP 2nd Estimate + Corporate Profits (Q2)","source":"BEA"},
+ {"date":"2026-09-01","time":"10:00 ET","type":"JOLTS","importance":"MEDIUM","label":"JOLTS (July)","source":"BLS"},
+ {"date":"2026-09-04","time":"08:30 ET","type":"NFP","importance":"HIGH","label":"Employment Situation (August)","source":"BLS"},
+ {"date":"2026-09-10","time":"08:30 ET","type":"PPI","importance":"HIGH","label":"PPI (August)","source":"BLS"},
+ {"date":"2026-09-11","time":"08:30 ET","type":"CPI","importance":"HIGH","label":"CPI (August)","source":"BLS"},
+ {"date":"2026-09-16","time":"08:30 ET","type":"RETAIL","importance":"MEDIUM","label":"Retail Sales (August)","source":"Census"},
+ {"date":"2026-09-16","time":"14:00 ET","type":"FOMC","importance":"HIGH","label":"FOMC Rate Decision","source":"Federal Reserve"},
+ {"date":"2026-09-29","time":"10:00 ET","type":"JOLTS","importance":"MEDIUM","label":"JOLTS (August)","source":"BLS"},
+ {"date":"2026-09-30","time":"08:30 ET","type":"PCE","importance":"HIGH","label":"Personal Income & Outlays / August PCE","source":"BEA"},
+ {"date":"2026-09-30","time":"08:30 ET","type":"GDP","importance":"MEDIUM","label":"GDP 3rd Estimate + Corporate Profits (Q2)","source":"BEA"},
+ {"date":"2026-10-27","time":"","type":"FOMC","importance":"MEDIUM","label":"FOMC meeting begins","source":"Federal Reserve"},
+ {"date":"2026-10-28","time":"14:00 ET","type":"FOMC","importance":"HIGH","label":"FOMC Rate Decision","source":"Federal Reserve"},
+ {"date":"2026-12-08","time":"","type":"FOMC","importance":"MEDIUM","label":"FOMC meeting begins","source":"Federal Reserve"},
+ {"date":"2026-12-09","time":"14:00 ET","type":"FOMC","importance":"HIGH","label":"FOMC Rate Decision","source":"Federal Reserve"}]
 def upcoming_macro_events(within_days=60):
-    today=pd.Timestamp.now().normalize(); cutoff=today+pd.Timedelta(days=within_days); out=[]
+    today=pd.Timestamp.now().normalize(); cutoff=today+pd.Timedelta(days=max(0,within_days)); out=[]
     for ev in MACRO_CALENDAR:
         d=pd.Timestamp(ev["date"])
         if today<=d<=cutoff: out.append({**ev,"days_away":int((d-today).days)})
-    return sorted(out,key=lambda x:x["date"])
+    return sorted(out,key=lambda x:(x["date"],x.get("time") or ""))
+
+def macro_risk_snapshot(within_days=7):
+    events=upcoming_macro_events(within_days)
+    high=[e for e in events if e.get("importance")=="HIGH"]
+    nearest=min((e["days_away"] for e in events),default=None)
+    nearest_high=min((e["days_away"] for e in high),default=None)
+    risk="HIGH" if nearest_high is not None and nearest_high<=1 else ("ELEVATED" if nearest_high is not None and nearest_high<=3 else ("WATCH" if events else "CLEAR"))
+    return {"risk":risk,"nearest_days":nearest,"nearest_high_days":nearest_high,"events":events[:8]}
 
 def cached(key, fn, ttl=CACHE_TTL):
     now = time.time()
@@ -1715,30 +1731,37 @@ def merged_historical_earnings_dates(ticker, current_event_date=None):
 
 def get_earnings_dates(ticker, limit=12):
     try:
-        ed = yf.Ticker(ticker).get_earnings_dates(limit=limit)
-        if ed is None or len(ed)==0:
-            return []
-        idx = pd.to_datetime(ed.index)
+        ed=yf.Ticker(ticker).get_earnings_dates(limit=limit)
+        if ed is None or len(ed)==0:return []
         dates=[]
-        for d in idx:
+        for raw in pd.to_datetime(ed.index):
             try:
-                if getattr(d, "tzinfo", None) is not None:
-                    d = d.tz_convert(None)
-            except:
-                try: d=d.tz_localize(None)
-                except: pass
-            dates.append(pd.Timestamp(d).normalize())
+                d=pd.Timestamp(raw)
+                if d.tzinfo is not None:
+                    d=d.tz_convert("America/New_York").tz_localize(None)
+                dates.append(d)
+            except Exception:pass
+        # Keep time-of-day where supplied by the provider; duplicate calendar
+        # dates collapse to the first unique timestamp.
         return sorted(list(dict.fromkeys(dates)), reverse=True)
     except Exception:
         return []
 
 def event_session_index(df, earnings_date):
-    idx = df.index
-    d = pd.Timestamp(earnings_date).normalize()
-    # First session on/after earnings date. This intentionally treats BMO/AMC the same;
-    # the detail panel shows dates so a user can verify edge cases.
-    pos = idx.searchsorted(d)
-    if pos >= len(idx): return None
+    idx=pd.DatetimeIndex(df.index)
+    if idx.tz is not None: idx=idx.tz_convert(None)
+    ts=pd.Timestamp(earnings_date)
+    if ts.tzinfo is not None:
+        try: ts=ts.tz_convert("America/New_York").tz_localize(None)
+        except Exception: ts=ts.tz_localize(None)
+    d=ts.normalize()
+    pos=int(idx.searchsorted(d))
+    if pos>=len(idx):return None
+    # An after-close report belongs to the NEXT regular session. Premarket or
+    # date-only events use the first session on/after the calendar date.
+    if ts.hour>=16:
+        while pos<len(idx) and pd.Timestamp(idx[pos]).normalize()<=d: pos+=1
+    if pos>=len(idx):return None
     return int(pos)
 
 def abs_excursion(df, start_pos, days):
@@ -2332,11 +2355,11 @@ def flow_payload(ticker, options_payload=None):
         "note":"V21.3 Institutional Flow Engine: broad ~900-day/wide-strike chain, full candidate coverage when practical, and activity-targeted coverage (default 99.5%) for very large chains. Historical aggressor direction is intentionally not fabricated: Alpaca indicative option trades are delayed while quotes are modified/current, and Alpaca does not expose a historical option-NBBO endpoint in the documented REST API. Contract mix is calls vs puts only; use FlowMS as the directional cross-check unless OPRA live quote/trade capture is available."
     }
 
-def options_quality_payload(ticker, gex_window="0-30", dte_max=30):
+def options_quality_payload(ticker, gex_window="0-30", dte_max=35, dte_min=7):
     ticker=ticker.upper().strip()
-    dte_max=max(7,min(90,int(dte_max or 30)))
+    dte_min=max(0,min(30,int(dte_min or 0)));dte_max=max(dte_min+1,min(90,int(dte_max or 35)))
     today=pd.Timestamp.now().normalize()
-    start=today.strftime("%Y-%m-%d")
+    start=(today+pd.Timedelta(days=dte_min)).strftime("%Y-%m-%d")
     end=(today+pd.Timedelta(days=dte_max)).strftime("%Y-%m-%d")
     rv20,spot=realized_vol_20d(ticker)
     if spot is None: raise RuntimeError(f"Could not determine current price for {ticker}.")
@@ -2376,7 +2399,7 @@ def options_quality_payload(ticker, gex_window="0-30", dte_max=30):
             rr=option_contract_row(sym,snap,gmeta[sym],spot)
             if rr.get("expiration") and rr.get("moneyness_pct") is not None and abs(rr["moneyness_pct"])<=25:gex_rows.append(rr)
     return {
-        "ticker":ticker,"spot":round(spot,2),"dte_min":0,"dte_max":dte_max,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+        "ticker":ticker,"spot":round(spot,2),"dte_min":dte_min,"dte_max":dte_max,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
         "chain_updated_at":datetime.utcnow().isoformat(timespec="seconds")+"Z",
         "rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
@@ -2621,9 +2644,9 @@ def _context_structure(ticker):
     elif direction=="bearish":
         trigger=lo20;confirmation=trigger-.15*atr;invalidation=min(hi10,sma20+.35*atr);hard_fail=min(hi20,sma50+.5*atr);target1=min(trigger-1.5*atr,spot-1.25*atr);target2=min(trigger-3*atr,spot-2.5*atr);risk=max(.01,invalidation-trigger);reward=max(0,trigger-target2)
     else:
-        trigger=hi20;confirmation=hi20+.15*atr;invalidation=lo10;hard_fail=lo20;target1=hi20+1.5*atr;target2=hi20+3*atr;risk=max(.01,trigger-invalidation);reward=max(0,target2-trigger)
+        trigger=confirmation=invalidation=hard_fail=target1=target2=None;risk=reward=None
     r20=_ctx_return(c,20);r50=_ctx_return(c,50);trend_strength=int(spot>sma20)+int(sma20>sma50)+int(r20 is not None and r20>0)+int(r50 is not None and r50>0)
-    return {"available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,"trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),"trigger":round(trigger,2),"confirmation":round(confirmation,2),"invalidation":round(invalidation,2),"hard_fail":round(hard_fail,2),"target1":round(target1,2),"target2":round(target2,2),"rr_to_target2":round(reward/risk,2) if risk else None,"return_20d":round(r20,2) if r20 is not None else None,"return_50d":round(r50,2) if r50 is not None else None}
+    return {"available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,"trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),"trigger":round(trigger,2) if trigger is not None else None,"confirmation":round(confirmation,2) if confirmation is not None else None,"invalidation":round(invalidation,2) if invalidation is not None else None,"hard_fail":round(hard_fail,2) if hard_fail is not None else None,"target1":round(target1,2) if target1 is not None else None,"target2":round(target2,2) if target2 is not None else None,"rr_to_target2":round(reward/risk,2) if risk else None,"return_20d":round(r20,2) if r20 is not None else None,"return_50d":round(r50,2) if r50 is not None else None}
 
 
 def institutional_context_payload(ticker,parent=None):
@@ -2645,10 +2668,11 @@ def institutional_context_payload(ticker,parent=None):
     except Exception:pass
     try:
         hist=setup_history_stats(ticker,signature)
-        if not hist.get("count"):
-            hist=setup_history_stats(ticker);hist["fallback_all_signatures"]=True
-    except Exception as e:hist={"count":0,"returns":{},"error":str(e)}
-    return {"ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,"triple_relative_strength":triple,"structure":structure,"horizon":horizon,"catalyst":catalyst,"signature":signature,"historical_expectancy":hist}
+        baseline=setup_history_stats(ticker)
+    except Exception as e:
+        hist={"count":0,"returns":{},"error":str(e)};baseline={"count":0,"returns":{},"error":str(e)}
+    macro=macro_risk_snapshot(7)
+    return {"ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,"triple_relative_strength":triple,"structure":structure,"horizon":horizon,"catalyst":catalyst,"macro_risk":macro,"signature":signature,"historical_expectancy":hist,"ticker_baseline_expectancy":baseline}
 
 @app.get("/api/institutional-context/<ticker>")
 def api_institutional_context(ticker):
@@ -2915,7 +2939,7 @@ def api_historical_rrg():
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        bucket=(request.args.get("gex_window") or "0-30").lower(); payload,stale,err=cached_refresh_safe(f"options-v23:{ticker.upper()}:{bucket}",lambda:options_quality_payload(ticker,bucket),force=force,ttl=600)
+        bucket=(request.args.get("gex_window") or "0-30").lower();dmin=max(0,min(30,int(request.args.get("dte_min",7))));dmax=max(dmin+1,min(90,int(request.args.get("dte_max",35))));payload,stale,err=cached_refresh_safe(f"options-v24-1:{ticker.upper()}:{bucket}:{dmin}:{dmax}",lambda:options_quality_payload(ticker,bucket,dmax,dmin),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -2949,7 +2973,7 @@ def api_options_scan():
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
             try:
-                p,stale,err=cached_refresh_safe(f"options-v21-2:{sym}",lambda:options_quality_payload(sym),ttl=600)
+                p,stale,err=cached_refresh_safe(f"options-v24-1:{sym}:0-30:7:35",lambda:options_quality_payload(sym,"0-30",35,7),ttl=600)
                 return {"ok":True,**p,"stale":stale}
             except Exception as e:
                 return {"ok":False,"ticker":sym,"error":str(e)}
@@ -4352,7 +4376,7 @@ const SOURCE_LABELS={yfinance:"Yahoo (prices)",alpaca_stocks:"Alpaca (stocks)",a
 function timeAgo(iso){if(!iso)return null;const x=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);if(x<60)return "just now";if(x<3600)return Math.round(x/60)+"m ago";if(x<86400)return Math.round(x/3600)+"h ago";return Math.round(x/86400)+"d ago";}
 async function refreshSourceHealth(){const el=document.getElementById("sourceHealthStrip");if(!el)return;try{const r=await fetch("/api/source-health"),j=await r.json();if(!j?.ok||!Array.isArray(j.sources))return;el.innerHTML=j.sources.map(x=>{const label=SOURCE_LABELS[x.name]||x.name;const detail=x.status==="ok"?`Last success ${timeAgo(x.last_success)||"—"}`:x.status==="degraded"?`Falling back — last success ${timeAgo(x.last_success)||"never this session"}, last error ${timeAgo(x.last_error)}`:"Not called yet this session";return `<span class="src" title="${detail.replace(/"/g,'&quot;')}"><span class="dot ${x.status}"></span>${label}</span>`;}).join("");}catch(e){}}
 document.addEventListener("DOMContentLoaded",refreshSourceHealth);setInterval(refreshSourceHealth,5*60*1000);
-async function refreshMacroCalendar(){const el=document.getElementById("dashboardMacro");if(!el)return;try{const r=await fetch("/api/macro-calendar?within_days=90"),j=await r.json();if(!j?.ok||!Array.isArray(j.events))return;if(!j.events.length){el.innerHTML=`<div class="note">No confirmed FOMC/CPI/jobs dates in the next 90 days.</div>`;return;}el.innerHTML=j.events.map(x=>`<div class="breadthRow"><div class="name">${x.label}</div><div class="val ${x.days_away<=3?"neg":""}">${x.date}</div><div class="move">${x.days_away}d</div></div>`).join("");}catch(e){}}
+async function refreshMacroCalendar(){const el=document.getElementById("dashboardMacro");if(!el)return;try{const r=await fetch("/api/macro-calendar?within_days=90"),j=await r.json();if(!j?.ok||!Array.isArray(j.events))return;if(!j.events.length){el.innerHTML=`<div class="note">No confirmed major macro dates in the next 90 days.</div>`;return;}el.innerHTML=j.events.map(e=>{const high=e.importance==="HIGH",urgent=e.days_away<=1&&high,tag=high?"HIGH":(e.importance||"WATCH");return `<div class="breadthRow"><div class="name">${urgent?"⚠️ ":""}${e.label}<div class="tiny">${tag} · ${e.time||"time TBA"} · ${e.source||"official source"}</div></div><div class="val ${urgent?"neg":""}">${e.date}</div><div class="move ${urgent?"neg":""}">${e.days_away}d</div></div>`;}).join("");}catch(e){}}
 document.addEventListener("DOMContentLoaded",refreshMacroCalendar);setInterval(refreshMacroCalendar,60*60*1000);
 
 function fmtCompact(n){
@@ -4387,11 +4411,16 @@ function loadLiveWatchlist(){
 
 async function syncWatchlistFromServer(){
  try{
-   const r=await fetch("/api/watchlist"),j=await r.json();
+   let r=await fetch("/api/watchlist"),j=await r.json();
    if(!j?.ok||!Array.isArray(j.items))return;
-   const known=new Set(liveWatchlist.map(x=>liveWatchKey(x.ticker)));let changed=false;
-   j.items.forEach(row=>{const key=liveWatchKey(row.ticker);if(!known.has(key)){liveWatchlist.push({ticker:row.ticker,added_price:row.added_price});known.add(key);changed=true;}});
-   if(changed){try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){} renderLiveWatchlist();refreshLiveBookmarkButtons();}
+   if(!j.items.length&&liveWatchlist.length){
+     await Promise.all(liveWatchlist.map(x=>fetch("/api/watchlist",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ticker:x.ticker,added_price:x.added_price??null})}).catch(()=>null)));
+     r=await fetch("/api/watchlist");j=await r.json();if(!j?.ok||!Array.isArray(j.items))return;
+   }
+   const oldByTicker=new Map(liveWatchlist.map(x=>[liveWatchKey(x.ticker),x]));
+   liveWatchlist=j.items.map(row=>({...oldByTicker.get(liveWatchKey(row.ticker)),ticker:row.ticker,added_at:row.added_at,added_price:row.added_price}));
+   try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){}
+   renderLiveWatchlist();refreshLiveBookmarkButtons();
  }catch(e){}
 }
 
@@ -4538,9 +4567,10 @@ function renderLiveWatchlist(){
      if(alpacaConfigured!==false)loadOptionsTicker(t,{scroll:false});
    }));
    document.querySelectorAll("[data-live-watch-remove]").forEach(btn=>btn.addEventListener("click",()=>{
-     const key=liveWatchKey(btn.dataset.liveWatchRemove);
+     const ticker=btn.dataset.liveWatchRemove,key=liveWatchKey(ticker);
      liveWatchlist=liveWatchlist.filter(x=>liveWatchKey(x.ticker)!==key);
      saveLiveWatchlist();
+     fetch(`/api/watchlist/${encodeURIComponent(ticker)}`,{method:"DELETE"}).then(()=>syncWatchlistFromServer()).catch(()=>{});
    }));
  }
  const st=document.getElementById("liveWatchStatus");
@@ -5591,7 +5621,7 @@ async function loadOptionsTicker(ticker,opts={}){
  }
  st.textContent=`Loading ${ticker} options…`;
  try{
-   const gw=document.getElementById("gexWindow")?.value||"0-30"; const r=await fetch(safeTickerEndpoint("/api/options",ticker)+`?gex_window=${encodeURIComponent(gw)}`,{headers:{"Accept":"application/json"}}),j=await r.json();
+   const gw=document.getElementById("gexWindow")?.value||"0-30"; const r=await fetch(safeTickerEndpoint("/api/options",ticker)+`?gex_window=${encodeURIComponent(gw)}&dte_min=7&dte_max=35`,{headers:{"Accept":"application/json"}}),j=await r.json();
    if(!r.ok||!j.ok)throw Error(j.error||"Options request failed");
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
@@ -6450,6 +6480,12 @@ function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
  if(status)status.textContent=`${sym} opened`;
 }
 
+
+function setupCompleteness(x,e){
+ const c=(typeof institutionalContextMap!=="undefined")?institutionalContextMap[x.ticker]:null,opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],st=stratSignalMap[x.ticker];
+ const checks={RRG:!!(e?.alignment&&e.alignment!=="NONE"),Value:!!va,STRAT:!!st,Options:!!opt,Context:!!c,Catalyst:!!(c?.catalyst&&c.catalyst.risk!=="Unknown"),Macro:!!c?.macro_risk};
+ const missing=Object.entries(checks).filter(([,v])=>!v).map(([k])=>k);return {complete:missing.length===0,missing};
+}
 function renderTopSetups(){
  const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
  const source=(globalTopSetupData&&globalTopSetupData.length)?globalTopSetupData:[];
@@ -6459,7 +6495,7 @@ function renderTopSetups(){
    const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. The scanner will not force a pick.";
    g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>`;return
  }
- g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b></div>
+ g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,complete=setupCompleteness(x,e),label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b>${complete.complete?'':`<div class="tiny instWarn">Incomplete: ${complete.missing.join(', ')}</div>`}</div>
 <div class="topSetupActions">
   <button class="topSetupAction primaryDive" data-top-open="${x.ticker}" data-parent="${x._parentTicker||""}">Open setup</button>
   <button class="topSetupAction gexDive" data-top-gex="${x.ticker}" data-parent="${x._parentTicker||""}">GEX</button>
@@ -6894,9 +6930,10 @@ document.getElementById("optTypeFilter").addEventListener("change",renderOptions
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("refreshFlow")?.addEventListener("click",()=>{if(activeOptionsData?.ticker)loadFlowTicker(activeOptionsData.ticker,true)});
 document.getElementById("refreshLiveWatchlist").addEventListener("click",refreshLiveWatchlistData);
-document.getElementById("clearLiveWatchlist").addEventListener("click",()=>{
- liveWatchlist=[];
- saveLiveWatchlist();
+document.getElementById("clearLiveWatchlist").addEventListener("click",async()=>{
+ const tickers=liveWatchlist.map(x=>x.ticker);liveWatchlist=[];saveLiveWatchlist();
+ await Promise.all(tickers.map(t=>fetch(`/api/watchlist/${encodeURIComponent(t)}`,{method:"DELETE"}).catch(()=>null)));
+ syncWatchlistFromServer();
 });document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);document.getElementById("rrgFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
 document.getElementById("rrgTrendBtn")?.addEventListener("click",()=>setSectorRRGMode("trend"));
 document.getElementById("dashboardSectorSelect")?.addEventListener("change",async e=>{if(e.target.value){toggleRRGFocus("sectorChart",e.target.value);await selectSector(e.target.value,{source:"dashboard"})}});
@@ -6919,13 +6956,14 @@ document.getElementById("gexWindow")?.addEventListener("change",()=>{const t=act
 const institutionalContextMap={};let activeInstitutionalTicker=null;
 function instFmt(v,d=1){const n=Number(v);return Number.isFinite(n)?`${n>0?"+":""}${n.toFixed(d)}%`:"—"}function instMoney(v){const n=Number(v);return Number.isFinite(n)?`$${n.toFixed(2)}`:"—"}
 function ensureInstitutionalPanel(){let el=document.getElementById("institutionalDecisionPanel");if(el)return el;el=document.createElement("div");el.id="institutionalDecisionPanel";el.className="panel instDecisionPanel";el.innerHTML='<div class="note">Institutional decision layer loads with the selected ticker.</div>';const anchor=document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart");if(anchor&&anchor.parentNode)anchor.parentNode.insertBefore(el,anchor);return el}
-function flowEvidenceFor(ticker){const x=(activeFlowData?.ticker===ticker)?activeFlowData:null;if(!x)return {label:"Pending",score:null,detail:"Load options/flow"};const cp=Number(x.institutional_call_pct),pp=Number(x.institutional_put_pct),cov=Number(x.activity_coverage_pct),high=Number(x.high_relevance_events||0);let score=0;if(Number.isFinite(cov))score+=Math.min(45,cov*.45);score+=Math.min(35,high*7);if((x.institutional_events||0)>0)score+=20;const mix=Number.isFinite(cp)&&cp>=65?"Call-heavy":Number.isFinite(pp)&&pp>=65?"Put-heavy":"Balanced";return {label:`${mix} evidence`,score:Math.round(Math.min(100,score)),detail:`${x.coverage_confidence||"?"} coverage · ${high} high relevance · ${x.direction_available?"direction classified":"direction unconfirmed"}`}}
+function flowEvidenceFor(ticker){const x=(activeFlowData?.ticker===ticker)?activeFlowData:null;if(!x)return {label:"Pending",score:null,detail:"Load options/flow"};const cp=Number(x.institutional_call_pct),pp=Number(x.institutional_put_pct),cov=Number(x.activity_coverage_pct),high=Number(x.high_relevance_events||0);let score=0;if(Number.isFinite(cov))score+=Math.min(45,cov*.45);score+=Math.min(35,high*7);if((x.institutional_events||0)>0)score+=20;const mix=Number.isFinite(cp)&&cp>=65?"Call-contract concentration":Number.isFinite(pp)&&pp>=65?"Put-contract concentration":"Balanced contract mix";return {label:mix,score:Math.round(Math.min(100,score)),detail:`${Number.isFinite(cp)?cp.toFixed(0)+'% calls / '+pp.toFixed(0)+'% puts · ':''}${x.coverage_confidence||"?"} coverage · ${high} high relevance · ${x.direction_available?"direction classified":"direction unknown"}`}}
 function gexImplicationFor(ticker,ctx){const o=(activeOptionsData?.ticker===ticker)?activeOptionsData:optionScanMap[ticker],p=o?.positioning;if(!p?.available)return {label:"Pending",detail:"Load GEX/options positioning"};const dir=ctx?.structure?.direction||"neutral",reg=String(p.gamma_regime||"");let label=reg.includes("Negative")?"Amplifying regime":reg.includes("Positive")?"Dampening regime":"Mixed gamma";if(!["bullish","bearish"].includes(dir))return {label,detail:`${reg||"Dealer gamma available"} · no directional structure confirmed`,room:null};const spot=Number(o?.spot||ctx?.structure?.spot),wall=dir==="bearish"?Number(p.put_wall):Number(p.call_wall);let room=null;if(Number.isFinite(spot)&&spot>0&&Number.isFinite(wall))room=dir==="bearish"?(spot-wall)/spot*100:(wall-spot)/spot*100;let detail=reg||"Dealer gamma unavailable";if(room!=null)detail+=` · ${room.toFixed(1)}% room to ${dir==="bearish"?"put":"call"} wall`;if(reg.includes("Positive")&&room!=null&&room>=0&&room<=1.5)detail+=" · breakout headwind";else if(reg.includes("Negative")&&room!=null&&room>2)detail+=" · continuation can accelerate";return {label,detail,room}}
-function histExpectancyLabel(h){if(!h||!h.count)return {label:"Building sample",detail:"Snapshot database will accumulate this setup signature"};const r=h.returns?.["5"]||{};return {label:`${h.count} snapshots`,detail:`5D win ${r.win_rate==null?"—":r.win_rate+"%"} · median ${r.median==null?"—":r.median+"%"}`}}
-function factorBreakdownFor(x,b,c){const rs=c?.relative_strength||{},p=c?.rotation_persistence,cat=c?.catalyst||{},hist=c?.historical_expectancy||{},flow=flowEvidenceFor(x.ticker),gx=gexImplicationFor(x.ticker,c),r5=rs["5"]||{},r20=rs["20"]||{};return [["Rotation",b.alignment==="FULL"?10:b.alignment==="EARLY"?9:5],["Market RS",r20.vs_spy>0?10:r5.vs_spy>0?7:3],["Sector RS",r20.vs_parent>0?10:r5.vs_parent>0?7:c?.parent?3:5],["Persistence",p==null?5:Math.round(p/10)],["Structure",c?.structure?.trend_strength==null?5:Math.min(10,c.structure.trend_strength*2.5)],["Flow",flow.score==null?5:Math.round(flow.score/10)],["GEX",gx.detail.includes("headwind")?3:gx.detail.includes("accelerate")?9:6],["Execution",optionScanMap[x.ticker]?.liquidity==="Liquid"?10:optionScanMap[x.ticker]?.liquidity==="Tradable"?8:4],["Expectancy",hist.count?7:5],["Catalyst",cat.days_to_earnings==null?5:cat.days_to_earnings<=3?1:cat.days_to_earnings<=10?5:9]]}
+function histExpectancyLabel(h){if(!h||!h.count)return {label:"Exact setup N=0",detail:"Building a clean signature-specific sample"};const r=h.returns?.["5"]||{};return {label:`Exact setup N=${h.count}`,detail:`5D win ${r.win_rate==null?"—":r.win_rate+"%"} · median ${r.median==null?"—":r.median+"%"}`}}
+function expectancyFactor(h){const r=h?.returns?.["5"]||{},n=Number(r.n||0),wr=Number(r.win_rate),med=Number(r.median);if(n<5)return 5;if(wr>=65&&med>0)return 10;if(wr>=55&&med>0)return 8;if(wr>=50&&med>=0)return 6;if(wr<45||med<0)return 3;return 5}
+function factorBreakdownFor(x,b,c){const rs=c?.relative_strength||{},p=c?.rotation_persistence,cat=c?.catalyst||{},hist=c?.historical_expectancy||{},flow=flowEvidenceFor(x.ticker),gx=gexImplicationFor(x.ticker,c),r5=rs["5"]||{},r20=rs["20"]||{};return [["Rotation",b.alignment==="FULL"?10:b.alignment==="EARLY"?9:5],["Market RS",r20.vs_spy>0?10:r5.vs_spy>0?7:3],["Sector RS",r20.vs_parent>0?10:r5.vs_parent>0?7:c?.parent?3:5],["Persistence",p==null?5:Math.round(p/10)],["Structure",c?.structure?.trend_strength==null?5:Math.min(10,c.structure.trend_strength*2.5)],["Flow",flow.score==null?5:Math.round(flow.score/10)],["GEX",gx.detail.includes("headwind")?3:gx.detail.includes("accelerate")?9:6],["Execution",optionScanMap[x.ticker]?.liquidity==="Liquid"?10:optionScanMap[x.ticker]?.liquidity==="Tradable"?8:4],["Expectancy",expectancyFactor(hist)],["Catalyst",cat.days_to_earnings==null?5:cat.days_to_earnings<=3?1:cat.days_to_earnings<=10?5:9]]}
 async function loadInstitutionalContext(ticker,parent=null,quiet=false){ticker=normalizeStockTicker(ticker);if(!ticker)return null;activeInstitutionalTicker=ticker;const el=ensureInstitutionalPanel();if(el&&!quiet)el.innerHTML=`<div class="note">Loading ${ticker} institutional decision layer…</div>`;try{const q=parent?`?parent=${encodeURIComponent(parent)}`:"",r=await fetch(`/api/institutional-context/${encodeURIComponent(ticker)}${q}`),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Institutional context failed");institutionalContextMap[ticker]=j;if(activeInstitutionalTicker===ticker)renderInstitutionalContext(ticker);renderTopSetups();return j}catch(e){if(el&&!quiet)el.innerHTML=`<span class="warn">Institutional layer: ${e.message}</span>`;return null}}
-function renderInstitutionalContext(ticker){const c=institutionalContextMap[ticker],el=ensureInstitutionalPanel();if(!c||!el)return;const rs=c.relative_strength||{},s=c.structure||{},cat=c.catalyst||{},flow=flowEvidenceFor(ticker),gx=gexImplicationFor(ticker,c),hist=histExpectancyLabel(c.historical_expectancy),r5=rs["5"]||{},r10=rs["10"]||{},r20=rs["20"]||{},ct=cat.next_earnings?`${cat.next_earnings} · ${cat.days_to_earnings}d`:'No confirmed earnings date available',cc=cat.days_to_earnings!=null&&cat.days_to_earnings<=3?'instBad':cat.days_to_earnings!=null&&cat.days_to_earnings<=10?'instWarn':'instGood';el.innerHTML=`<div class="instDecisionHead"><div><h3>${ticker} · Institutional Decision Layer</h3><div class="tiny">Observe → Rank → Explain → Execute → Invalidate → Measure</div></div><span class="horizon">${c.horizon||"—"}</span></div><div class="instGrid"><div class="instCard"><div class="k">ROTATION PERSISTENCE</div><div class="v ${Number(c.rotation_persistence)>=67?'instGood':''}">${c.rotation_persistence==null?'—':c.rotation_persistence+'/100'}</div><div class="d">5/10/20D relative leadership${c.triple_relative_strength?' · triple RS confirmed':''}</div></div><div class="instCard"><div class="k">RELATIVE STRENGTH</div><div class="v">${c.parent?`${instFmt(r20.vs_parent)} vs ${c.parent}`:instFmt(r20.vs_spy)}</div><div class="d">20D vs SPY ${instFmt(r20.vs_spy)} · 5D ${instFmt(r5.vs_spy)}</div></div><div class="instCard"><div class="k">FLOW EVIDENCE</div><div class="v">${flow.label}</div><div class="d">${flow.detail}</div></div><div class="instCard"><div class="k">GEX TRADE EFFECT</div><div class="v">${gx.label}</div><div class="d">${gx.detail}</div></div><div class="instCard"><div class="k">CATALYST RISK</div><div class="v ${cc}">${cat.risk||"Unknown"}</div><div class="d">${ct}</div></div><div class="instCard"><div class="k">HISTORICAL EXPECTANCY</div><div class="v">${hist.label}</div><div class="d">${hist.detail}</div></div><div class="instCard"><div class="k">PRICE STRUCTURE</div><div class="v">${s.direction||"—"}</div><div class="d">Trend ${s.trend_strength??'—'}/4 · ATR ${instMoney(s.atr14)}</div></div><div class="instCard"><div class="k">R:R TO TARGET 2</div><div class="v">${s.rr_to_target2==null?'—':Number(s.rr_to_target2).toFixed(1)+'×'}</div><div class="d">Structure/volatility heuristic</div></div></div><div class="instSection"><div class="instSectionTitle">RELATIVE LEADERSHIP</div><div class="instFactors"><div class="instFactor">5D vs SPY<strong>${instFmt(r5.vs_spy)}</strong></div><div class="instFactor">10D vs SPY<strong>${instFmt(r10.vs_spy)}</strong></div><div class="instFactor">20D vs SPY<strong>${instFmt(r20.vs_spy)}</strong></div><div class="instFactor">5D vs ${c.parent||'group'}<strong>${instFmt(r5.vs_parent)}</strong></div><div class="instFactor">20D vs ${c.parent||'group'}<strong>${instFmt(r20.vs_parent)}</strong></div></div></div><div class="instSection"><div class="instSectionTitle">STRUCTURE REVIEW · EXECUTION / INVALIDATION</div><div class="instLevelGrid"><div class="instLevel"><span>TRIGGER</span><b>${instMoney(s.trigger)}</b></div><div class="instLevel"><span>CONFIRMATION</span><b>${instMoney(s.confirmation)}</b></div><div class="instLevel"><span>INVALIDATION</span><b>${instMoney(s.invalidation)}</b></div><div class="instLevel"><span>HARD FAIL</span><b>${instMoney(s.hard_fail)}</b></div><div class="instLevel"><span>TARGET 1</span><b>${instMoney(s.target1)}</b></div><div class="instLevel"><span>TARGET 2</span><b>${instMoney(s.target2)}</b></div></div><div class="tiny" style="margin-top:6px">Confirmation is trigger ±0.15 ATR. Invalidation uses recent structure + 20D mean; hard fail uses broader 20D/50D structure. Decision heuristics, not stop instructions.</div></div>`}
-const _topSetupEvaluationV23=topSetupEvaluation;topSetupEvaluation=function(x){const b=_topSetupEvaluationV23(x),c=institutionalContextMap[x.ticker];if(!c)return {...b,factors:factorBreakdownFor(x,b,null)};let score=b.score,r20=c.relative_strength?.["20"]||{};if(c.triple_relative_strength)score+=6;else{if(Number(r20.vs_spy)>0)score+=3;if(Number(r20.vs_parent)>0)score+=3}if(c.rotation_persistence!=null&&Number(c.rotation_persistence)>=80)score+=4;else if(c.rotation_persistence!=null&&Number(c.rotation_persistence)<50)score-=4;if(c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=3)score-=10;const gx=gexImplicationFor(x.ticker,c);if(gx.detail.includes("headwind"))score-=4;else if(gx.detail.includes("accelerate"))score+=3;return {...b,score:Math.max(0,Math.min(100,Math.round(score))),context:c,factors:factorBreakdownFor(x,b,c)}};
+function renderInstitutionalContext(ticker){const c=institutionalContextMap[ticker],el=ensureInstitutionalPanel();if(!c||!el)return;const rs=c.relative_strength||{},s=c.structure||{},cat=c.catalyst||{},macro=c.macro_risk||{},flow=flowEvidenceFor(ticker),gx=gexImplicationFor(ticker,c),hist=histExpectancyLabel(c.historical_expectancy),r5=rs["5"]||{},r10=rs["10"]||{},r20=rs["20"]||{},ct=cat.next_earnings?`${cat.next_earnings} · ${cat.days_to_earnings}d`:'No confirmed earnings date available',cc=cat.days_to_earnings==null?'instWarn':cat.days_to_earnings<=3?'instBad':cat.days_to_earnings<=10?'instWarn':'instGood';el.innerHTML=`<div class="instDecisionHead"><div><h3>${ticker} · Institutional Decision Layer</h3><div class="tiny">Observe → Rank → Explain → Execute → Invalidate → Measure</div></div><span class="horizon">${c.horizon||"—"}</span></div><div class="instGrid"><div class="instCard"><div class="k">ROTATION PERSISTENCE</div><div class="v ${Number(c.rotation_persistence)>=67?'instGood':''}">${c.rotation_persistence==null?'—':c.rotation_persistence+'/100'}</div><div class="d">5/10/20D relative leadership${c.triple_relative_strength?' · triple RS confirmed':''}</div></div><div class="instCard"><div class="k">RELATIVE STRENGTH</div><div class="v">${c.parent?`${instFmt(r20.vs_parent)} vs ${c.parent}`:instFmt(r20.vs_spy)}</div><div class="d">20D vs SPY ${instFmt(r20.vs_spy)} · 5D ${instFmt(r5.vs_spy)}</div></div><div class="instCard"><div class="k">FLOW EVIDENCE</div><div class="v">${flow.label}</div><div class="d">${flow.detail}</div></div><div class="instCard"><div class="k">GEX TRADE EFFECT</div><div class="v">${gx.label}</div><div class="d">${gx.detail}</div></div><div class="instCard"><div class="k">CATALYST RISK</div><div class="v ${cc}">${cat.risk||"Unknown"}</div><div class="d">${ct}</div></div><div class="instCard"><div class="k">MACRO RISK</div><div class="v ${macro.risk==="HIGH"?'instBad':macro.risk==="ELEVATED"?'instWarn':''}">${macro.risk||"—"}</div><div class="d">${(macro.events||[]).slice(0,2).map(e=>`${e.days_away}d · ${e.type} ${e.time||''}`).join(' · ')||'No major event in 7D'}</div></div><div class="instCard"><div class="k">HISTORICAL EXPECTANCY</div><div class="v">${hist.label}</div><div class="d">${hist.detail}</div></div><div class="instCard"><div class="k">PRICE STRUCTURE</div><div class="v">${s.direction||"—"}</div><div class="d">Trend ${s.trend_strength??'—'}/4 · ATR ${instMoney(s.atr14)}</div></div><div class="instCard"><div class="k">R:R TO TARGET 2</div><div class="v">${s.rr_to_target2==null?'—':Number(s.rr_to_target2).toFixed(1)+'×'}</div><div class="d">Structure/volatility heuristic</div></div></div><div class="instSection"><div class="instSectionTitle">RELATIVE LEADERSHIP</div><div class="instFactors"><div class="instFactor">5D vs SPY<strong>${instFmt(r5.vs_spy)}</strong></div><div class="instFactor">10D vs SPY<strong>${instFmt(r10.vs_spy)}</strong></div><div class="instFactor">20D vs SPY<strong>${instFmt(r20.vs_spy)}</strong></div><div class="instFactor">5D vs ${c.parent||'group'}<strong>${instFmt(r5.vs_parent)}</strong></div><div class="instFactor">20D vs ${c.parent||'group'}<strong>${instFmt(r20.vs_parent)}</strong></div></div></div><div class="instSection"><div class="instSectionTitle">STRUCTURE REVIEW · EXECUTION / INVALIDATION</div><div class="instLevelGrid"><div class="instLevel"><span>TRIGGER</span><b>${instMoney(s.trigger)}</b></div><div class="instLevel"><span>CONFIRMATION</span><b>${instMoney(s.confirmation)}</b></div><div class="instLevel"><span>INVALIDATION</span><b>${instMoney(s.invalidation)}</b></div><div class="instLevel"><span>HARD FAIL</span><b>${instMoney(s.hard_fail)}</b></div><div class="instLevel"><span>TARGET 1</span><b>${instMoney(s.target1)}</b></div><div class="instLevel"><span>TARGET 2</span><b>${instMoney(s.target2)}</b></div></div><div class="tiny" style="margin-top:6px">Confirmation is trigger ±0.15 ATR. Invalidation uses recent structure + 20D mean; hard fail uses broader 20D/50D structure. Decision heuristics, not stop instructions.</div></div>`}
+const _topSetupEvaluationV23=topSetupEvaluation;topSetupEvaluation=function(x){const b=_topSetupEvaluationV23(x),c=institutionalContextMap[x.ticker];if(!c)return {...b,factors:factorBreakdownFor(x,b,null)};let score=b.score,r20=c.relative_strength?.["20"]||{};if(c.triple_relative_strength)score+=6;else{if(Number(r20.vs_spy)>0)score+=3;if(Number(r20.vs_parent)>0)score+=3}if(c.rotation_persistence!=null&&Number(c.rotation_persistence)>=80)score+=4;else if(c.rotation_persistence!=null&&Number(c.rotation_persistence)<50)score-=4;if(c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=3)score-=10;return {...b,score:Math.max(0,Math.min(100,Math.round(score))),context:c,factors:factorBreakdownFor(x,b,c)}};
 const _renderTopSetupsV23=renderTopSetups;renderTopSetups=function(){_renderTopSetupsV23();const g=document.getElementById("topSetupsGrid");if(!g)return;(globalTopSetupData||[]).forEach(x=>{});g.querySelectorAll('[data-top-setup]').forEach(card=>{const ticker=card.dataset.topSetup,x=(globalTopSetupData||[]).find(z=>z.ticker===ticker);if(!x)return;const e=topSetupEvaluation(x),c=e.context;if(!c)return;const s=c.structure||{},old=card.querySelector('.topSetupInstitutional');if(old)old.remove();const d=document.createElement('div');d.className='topSetupInstitutional';d.innerHTML=`<div class="topSetupInstGrid">${(e.factors||[]).map(z=>`<div class="topSetupInstMetric">${z[0]}<b>${z[1]}/10</b></div>`).join('')}</div><div class="tiny" style="margin-top:6px">${c.horizon} · trigger ${instMoney(s.trigger)} · invalidation ${instMoney(s.invalidation)} · T2 ${instMoney(s.target2)} · R:R ${s.rr_to_target2??'—'}×${c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=10?` · <span class="instWarn">earnings ${c.catalyst.days_to_earnings}d</span>`:''}</div>`;const actions=card.querySelector('.topSetupActions');card.insertBefore(d,actions||null);const score=card.querySelector('.topSetupScore');if(score)score.textContent=`${e.score}/100`})};
 const _runAutomaticTopSetupsV23=runAutomaticTopSetups;runAutomaticTopSetups=async function(force=false){await _runAutomaticTopSetupsV23(force);const rows=(globalTopSetupData||[]).slice(0,10);for(let n=0;n<rows.length;n+=3)await Promise.all(rows.slice(n,n+3).map(x=>loadInstitutionalContext(x.ticker,x._parentTicker||null,true)));renderTopSetups()};
 const _openSectorStockTickerV23=openSectorStockTicker;openSectorStockTicker=async function(rawTicker,opts={}){const ticker=normalizeStockTicker(rawTicker),parent=currentSector,out=await _openSectorStockTickerV23(rawTicker,opts);loadInstitutionalContext(ticker,parent,false);return out};const _openTopSetupDeepDiveV23=openTopSetupDeepDive;openTopSetupDeepDive=function(ticker,parentTicker=null,target="chart"){const out=_openTopSetupDeepDiveV23(ticker,parentTicker,target);loadInstitutionalContext(ticker,parentTicker||currentSector,false);return out};const _renderFlowV23=renderFlow;renderFlow=function(x){const out=_renderFlowV23(x);if(x?.ticker&&institutionalContextMap[x.ticker])renderInstitutionalContext(x.ticker);return out};const _renderOptionsPanelV23=renderOptionsPanel;renderOptionsPanel=function(){const out=_renderOptionsPanelV23();if(activeOptionsData?.ticker&&institutionalContextMap[activeOptionsData.ticker])renderInstitutionalContext(activeOptionsData.ticker);return out};
