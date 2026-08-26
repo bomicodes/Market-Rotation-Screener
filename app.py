@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.2"
+APP_VERSION = "24.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2799,6 +2799,9 @@ button {
 /* v24.2 RRG clarity + proportional canvas */
 #sectorChart,#stockChart{width:100%!important;height:auto!important;aspect-ratio:3/2;display:block}
 @media(max-width:760px){#sectorChart,#stockChart{aspect-ratio:4/3;height:auto!important}}
+
+/* v24.3 dashboard simplification */
+/* Sector rotation heat map removed from Dashboard because Sector Summary + RRG already convey the same rotation signal. Dedicated Heat Map view remains available for deeper stock/sector triage. */
 </style>
 </head>
 <body>
@@ -4025,12 +4028,6 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
       <div class="panel">
         <div class="dashTopline"><span class="dashTitle">MARKET OVERVIEW</span><span id="dashboardUpdated" class="note">Awaiting refresh</span></div>
         <div id="dashboardMarketOverview" class="marketOverviewGrid"></div>
-      </div>
-      <div class="panel">
-        <div class="dashTopline"><span class="dashTitle">SECTOR ROTATION HEAT MAP</span><span class="note">Composite</span></div>
-        <div class="heatModeTabs" style="margin-bottom:8px"><button id="dashHeatComposite" class="active">Composite</button><button id="dashHeatFast">Fast 10/5</button><button id="dashHeatTrend">Trend 25/12</button></div>
-        <div id="dashboardHeatGrid" class="dashHeatGrid"></div>
-        <div class="heatScale"></div><div class="heatScaleLabels"><span>Weak</span><span>Neutral</span><span>Strong</span></div>
       </div>
       <div class="panel">
         <div class="dashTopline"><span class="dashTitle">BREADTH & RISK</span><span id="regimeSummary" class="note">Loading…</span></div>
