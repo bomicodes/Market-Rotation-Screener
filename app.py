@@ -2867,7 +2867,9 @@ def api_feed_comparison(ticker):
     try:
         if not ALPACA_API_KEY or not ALPACA_API_SECRET:
             return jsonify({"ok":False,"error":"Alpaca is not configured."}),400
-        return jsonify({"ok":True,**feed_comparison_payload(ticker)})
+        key=f"feed-comparison-v1:{ticker.upper().strip()}"
+        payload=cached(key,lambda:feed_comparison_payload(ticker),ttl=90)
+        return jsonify({"ok":True,**payload})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
