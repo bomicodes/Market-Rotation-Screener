@@ -1,0 +1,38 @@
+name: Bump app version to 25.7
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/bump-app-version-25-7.yml'
+permissions:
+  contents: write
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update APP_VERSION
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app.py')
+          s=p.read_text()
+          old='APP_VERSION = "25.6"'
+          new='APP_VERSION = "25.7"'
+          if old not in s:
+              raise SystemExit(f'Expected {old!r} not found')
+          p.write_text(s.replace(old,new,1))
+          PY
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+      - name: Commit version bump and remove one-shot workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/bump-app-version-25-7.yml
+          git add app.py
+          git commit -m 'Bump APP_VERSION to 25.7'
+          git push
