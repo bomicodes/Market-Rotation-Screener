@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.0"
+APP_VERSION = "25.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -473,11 +473,57 @@ def _yf_download_retry(ticker, period, interval="1d", timeout=12, attempts=2, pr
             return hit[1].copy()
         return last if last is not None else pd.DataFrame()
 
+def _period_days(period):
+    p=str(period or "").lower()
+    table={"5d":8,"1mo":35,"1m":35,"3mo":105,"3m":105,"6mo":205,"6m":205,
+           "1y":370,"18mo":560,"2y":740,"3y":1110,"4y":1480,"5y":1850}
+    return table.get(p,1110)
+
+def _alpaca_daily_ohlc(ticker, period="3y"):
+    ticker=str(ticker or "").upper().strip()
+    key=f"alpaca-day-v25-1:{ALPACA_STOCK_FEED}:{ticker}:{period}"
+    now=time.time(); hit=CACHE.get(key); fresh_ttl=300; stale_ttl=86400
+    if hit and now-hit[0] < fresh_ttl:return hit[1].copy()
+    if not (ALPACA_API_KEY and ALPACA_API_SECRET):return pd.DataFrame()
+    with _cache_lock(key):
+        now=time.time(); hit=CACHE.get(key)
+        if hit and now-hit[0] < fresh_ttl:return hit[1].copy()
+        try:
+            from zoneinfo import ZoneInfo
+            end=datetime.now(ZoneInfo("America/New_York")); start=end-timedelta(days=_period_days(period))
+            url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+            params={"timeframe":"1Day","start":start.isoformat(),"end":end.isoformat(),
+                    "adjustment":"raw","feed":ALPACA_STOCK_FEED,"sort":"asc","limit":10000}
+            raw=[]; token=None
+            for _ in range(4):
+                if token:params["page_token"]=token
+                r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20)
+                r.raise_for_status(); j=r.json() or {}; raw.extend(j.get("bars") or [])
+                token=j.get("next_page_token") or j.get("page_token")
+                if not token:break
+            if raw:
+                rows=[]; idx=[]
+                for b in raw:
+                    try:
+                        idx.append(pd.Timestamp(b.get("t")).tz_convert("America/New_York").tz_localize(None))
+                        rows.append({"Open":float(b.get("o")),"High":float(b.get("h")),"Low":float(b.get("l")),
+                                     "Close":float(b.get("c")),"Volume":float(b.get("v") or 0)})
+                    except Exception:pass
+                if rows:
+                    df=pd.DataFrame(rows,index=pd.DatetimeIndex(idx)).sort_index()
+                    CACHE[key]=(time.time(),df.copy()); _mark_source("alpaca_stocks",True); return df
+        except Exception as e:
+            _mark_source("alpaca_stocks",False,e)
+        hit=CACHE.get(key)
+        if hit and now-hit[0] < stale_ttl:return hit[1].copy()
+        return pd.DataFrame()
+
 def dl_ohlc(ticker, period="3y"):
-    # Daily history uses the same canonical/coalesced provider cache as every
-    # other Yahoo-backed module. This prevents Chart + Context + expectancy from
-    # each firing their own download for the same ticker.
-    return _yf_download_retry(ticker,period,"1d",timeout=12,attempts=2)
+    # Paid consolidated SIP is canonical for deep-dive OHLC. Yahoo is a fallback,
+    # not a parallel dependency, which removes most rate-limit failures.
+    df=_alpaca_daily_ohlc(ticker,period)
+    if df is not None and len(df):return df
+    return _yf_download_retry(ticker,period,"1d",timeout=10,attempts=1)
 
 
 
@@ -737,77 +783,63 @@ def _period_start_et(period):
     days={"1m":35,"3m":100,"6m":200}.get(period,35)
     return now-timedelta(days=days),now
 
-def alpaca_chart_bars(ticker,timeframe,period):
-    """Return 1H/4H regular-session bars with Alpaca preferred and Yahoo fallback."""
-    if timeframe not in ("1h","4h"):
-        return []
-
-    parsed=[]
-    if ALPACA_API_KEY and ALPACA_API_SECRET:
-        try:
-            start,end=_period_start_et(period)
-            url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
-            params={
-                "timeframe":"1Hour","start":start.isoformat(),"end":end.isoformat(),
-                "adjustment":"raw","feed":ALPACA_STOCK_FEED,"sort":"asc","limit":10000
-            }
-            r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
-            if r.ok:
-                for b in ((r.json() or {}).get("bars") or []):
+def _canonical_hourly_bars(ticker,period):
+    ticker=str(ticker or "").upper().strip(); key=f"alpaca-hour-v25-1:{ALPACA_STOCK_FEED}:{ticker}:{period}"
+    now=time.time(); hit=CACHE.get(key); fresh_ttl=120; stale_ttl=21600
+    if hit and now-hit[0] < fresh_ttl:return [dict(x) for x in hit[1]]
+    with _cache_lock(key):
+        now=time.time(); hit=CACHE.get(key)
+        if hit and now-hit[0] < fresh_ttl:return [dict(x) for x in hit[1]]
+        parsed=[]
+        if ALPACA_API_KEY and ALPACA_API_SECRET:
+            try:
+                start_dt,end_dt=_period_start_et(period); url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+                params={"timeframe":"1Hour","start":start_dt.isoformat(),"end":end_dt.isoformat(),
+                        "adjustment":"raw","feed":ALPACA_STOCK_FEED,"sort":"asc","limit":10000}
+                raw=[]; token=None
+                for _ in range(3):
+                    if token:params["page_token"]=token
+                    r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20); r.raise_for_status()
+                    j=r.json() or {}; raw.extend(j.get("bars") or []); token=j.get("next_page_token") or j.get("page_token")
+                    if not token:break
+                for b in raw:
                     try:
-                        dt=pd.Timestamp(b.get("t"))
-                        if dt.tzinfo is None: dt=dt.tz_localize("UTC")
-                        dt=dt.tz_convert("America/New_York")
-                    except Exception:
-                        continue
-                    mins=dt.hour*60+dt.minute
-                    if mins<570 or mins>=960: continue
-                    parsed.append({
-                        "dt":dt,"open":float(b.get("o")),"high":float(b.get("h")),
-                        "low":float(b.get("l")),"close":float(b.get("c")),
-                        "volume":int(b.get("v") or 0)
-                    })
-        except Exception:
-            parsed=[]
-
-    if not parsed:
-        try:
-            days={"1m":35,"3m":100,"6m":200}.get(period,35)
-            yperiod="1mo" if days<=35 else "3mo" if days<=100 else "6mo"
-            df=_yf_download_retry(ticker,yperiod,"60m",timeout=12,attempts=2,prepost=False)
-            if df is not None and len(df):
-                for idx,row in df.dropna(subset=["Close"]).iterrows():
-                    try:
-                        dt=pd.Timestamp(idx)
-                        if dt.tzinfo is not None: dt=dt.tz_convert("America/New_York")
-                    except Exception:
-                        continue
-                    parsed.append({
-                        "dt":dt,"open":float(row.get("Open",row["Close"])),
-                        "high":float(row.get("High",row["Close"])),
-                        "low":float(row.get("Low",row["Close"])),
-                        "close":float(row["Close"]),
-                        "volume":int(row.get("Volume") or 0)
-                    })
-        except Exception:
-            parsed=[]
-
-    if timeframe=="1h":
+                        dt=pd.Timestamp(b.get("t"));
+                        if dt.tzinfo is None:dt=dt.tz_localize("UTC")
+                        dt=dt.tz_convert("America/New_York"); mins=dt.hour*60+dt.minute
+                        if mins<570 or mins>=960:continue
+                        parsed.append({"dt":dt,"open":float(b.get("o")),"high":float(b.get("h")),
+                                       "low":float(b.get("l")),"close":float(b.get("c")),"volume":int(b.get("v") or 0)})
+                    except Exception:pass
+                if parsed:_mark_source("alpaca_stocks",True)
+            except Exception as e:_mark_source("alpaca_stocks",False,e); parsed=[]
+        if not parsed:
+            hit=CACHE.get(key)
+            if hit and now-hit[0] < stale_ttl:return [dict(x) for x in hit[1]]
+            try:
+                days=_period_days(period); yperiod="1mo" if days<=35 else "3mo" if days<=105 else "6mo"
+                df=_yf_download_retry(ticker,yperiod,"60m",timeout=10,attempts=1,prepost=False)
+                if df is not None and len(df):
+                    for idx,row in df.dropna(subset=["Close"]).iterrows():
+                        dt=pd.Timestamp(idx); parsed.append({"dt":dt,"open":float(row.get("Open",row["Close"])),
+                           "high":float(row.get("High",row["Close"])),"low":float(row.get("Low",row["Close"])),
+                           "close":float(row["Close"]),"volume":int(row.get("Volume") or 0)})
+            except Exception:parsed=[]
+        if parsed:CACHE[key]=(time.time(),[dict(x) for x in parsed])
         return parsed
 
+def alpaca_chart_bars(ticker,timeframe,period):
+    if timeframe not in ("1h","4h"):return []
+    parsed=_canonical_hourly_bars(ticker,period)
+    if timeframe=="1h":return parsed
     groups={}
     for b in parsed:
-        mins=b["dt"].hour*60+b["dt"].minute
-        slot=0 if mins < 810 else 1
+        mins=b["dt"].hour*60+b["dt"].minute; slot=0 if mins<810 else 1
         groups.setdefault((b["dt"].date(),slot),[]).append(b)
     out=[]
     for key in sorted(groups):
-        g=groups[key]
-        out.append({
-            "dt":g[0]["dt"],"open":g[0]["open"],
-            "high":max(x["high"] for x in g),"low":min(x["low"] for x in g),
-            "close":g[-1]["close"],"volume":sum(x["volume"] for x in g)
-        })
+        g=groups[key]; out.append({"dt":g[0]["dt"],"open":g[0]["open"],"high":max(x["high"] for x in g),
+             "low":min(x["low"] for x in g),"close":g[-1]["close"],"volume":sum(x["volume"] for x in g)})
     return out
 
 def sma(arr, n):
@@ -2799,7 +2831,10 @@ def institutional_context_payload(ticker,parent=None):
 @app.get("/api/institutional-context/<ticker>")
 def api_institutional_context(ticker):
     try:
-        parent=(request.args.get("parent") or "").upper().strip() or None;key=f"institutional-v24:{ticker.upper()}:{parent or 'NONE'}";payload=cached(key,lambda:institutional_context_payload(ticker,parent),ttl=900);return jsonify({"ok":True,**payload})
+        parent=(request.args.get("parent") or "").upper().strip() or None
+        key=f"institutional-v25-1:{ticker.upper()}:{parent or 'NONE'}"
+        payload,stale,err=cached_refresh_safe(key,lambda:institutional_context_payload(ticker,parent),ttl=900)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
 @app.get("/api/watchlist")
@@ -3090,7 +3125,7 @@ def api_flow(ticker):
         # Reuse the exact options payload already loaded by the deep-dive panel.
         # Previously Flow used an old cache namespace, forcing a second full chain
         # download immediately after /api/options and making the panel appear stuck.
-        base,_,_=cached_refresh_safe(f"options-v23:{ticker.upper()}:0-30",lambda:options_quality_payload(ticker,"0-30"),ttl=600)
+        base,_,_=cached_refresh_safe(f"options-v24-1:{ticker.upper()}:0-30:7:35",lambda:options_quality_payload(ticker,"0-30",35,7),ttl=600)
         payload,stale,err=cached_refresh_safe(f"flow-v23-6:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=600)
         return jsonify({"ok":True,"stale":stale,"refresh_error":err,**payload})
     except Exception as e:
@@ -3184,16 +3219,22 @@ def api_chart_preview(ticker):
                 })
 
         try:
-            profiles=alpaca_session_volume_profiles(ticker)
-        except Exception as profile_err:
-            profiles={"session":None,"previous":None,"error":str(profile_err)}
-        try:
-            visible_profiles=alpaca_visible_profiles(ticker,period,timeframe)
+            visible_profiles, vp_stale, vp_err=cached_refresh_safe(
+                f"visible-v25-1:{ALPACA_STOCK_FEED}:{ticker}:{period}:{timeframe}",
+                lambda:alpaca_visible_profiles(ticker,period,timeframe),ttl=120)
         except Exception as visible_err:
-            visible_profiles={"sessions":[],"weeks":[],"source":None,"error":str(visible_err)}
+            visible_profiles={"sessions":[],"weeks":[],"source":None,"error":str(visible_err)}; vp_stale=False; vp_err=str(visible_err)
+        sess=(visible_profiles or {}).get("sessions") or []; weeks=(visible_profiles or {}).get("weeks") or []
+        profiles={
+            "session":(sess[-1].get("profile") if sess else None),
+            "previous":(sess[-2].get("profile") if len(sess)>=2 else None),
+            "current_week":(weeks[-1].get("profile") if weeks else None),
+            "previous_week":(weeks[-2].get("profile") if len(weeks)>=2 else None),
+            "error":(visible_profiles or {}).get("error") or vp_err,
+            "stale":vp_stale,
+        }
         # Value migration compares the latest two completed session profiles.
         migration=None
-        sess=(visible_profiles or {}).get("sessions") or []
         if len(sess)>=2:
             a=sess[-2].get("profile") or {}; b=sess[-1].get("profile") or {}
             dp=(_safe_float(b.get("poc")) or 0)-(_safe_float(a.get("poc")) or 0)
@@ -3298,49 +3339,53 @@ def _four_hour_from_hourly(hourly):
     return pd.concat(chunks).sort_index() if chunks else pd.DataFrame()
 
 
+def strat_payload(ticker):
+    ticker=ticker.upper().strip()
+    # Prefer the paid consolidated Alpaca SIP feed for hourly STRAT bars.
+    # This avoids a second Yahoo request immediately after Chart Review and
+    # keeps intraday price-action analysis on the same canonical source.
+    intraday=pd.DataFrame()
+    try:
+        abars=alpaca_chart_bars(ticker,"1h","3m")
+        if abars:
+            intraday=pd.DataFrame([{
+                "Open":b.get("open"),"High":b.get("high"),"Low":b.get("low"),
+                "Close":b.get("close"),"Volume":b.get("volume"),"dt":b.get("dt")
+            } for b in abars])
+            if len(intraday):
+                intraday.index=pd.to_datetime(intraday.pop("dt")).tz_localize(None)
+                intraday=intraday.sort_index()
+    except Exception:
+        intraday=pd.DataFrame()
+    if intraday is None or len(intraday)==0:
+        intraday=_yf_download_retry(ticker,"60d","60m",timeout=12,attempts=1,prepost=False)
+    daily=dl_ohlc(ticker,"2y")
+    if intraday is None:intraday=pd.DataFrame()
+    if daily is None:daily=pd.DataFrame()
+    if len(intraday):intraday=intraday.sort_index()
+    if len(daily):daily=daily.sort_index()
+    fourh=_four_hour_from_hourly(intraday)
+    weekly=pd.DataFrame()
+    if len(daily):
+        weekly=daily.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna(subset=["Open","High","Low","Close"])
+    frames=[
+        _strat_frame(intraday,"1H"),
+        _strat_frame(fourh,"4H"),
+        _strat_frame(daily,"1D"),
+        _strat_frame(weekly,"1W"),
+    ]
+    bulls=sum(1 for x in frames if x.get("ftc")=="bullish")
+    bears=sum(1 for x in frames if x.get("ftc")=="bearish")
+    continuity="bullish" if bulls>bears else ("bearish" if bears>bulls else "mixed")
+    return {"ticker":ticker,"frames":frames,"bullish_count":bulls,"bearish_count":bears,"continuity":continuity}
+
 @app.get("/api/strat/<ticker>")
 def api_strat(ticker):
     ticker=ticker.upper().strip()
     try:
-        # Prefer the paid consolidated Alpaca SIP feed for hourly STRAT bars.
-        # This avoids a second Yahoo request immediately after Chart Review and
-        # keeps intraday price-action analysis on the same canonical source.
-        intraday=pd.DataFrame()
-        try:
-            abars=alpaca_chart_bars(ticker,"1h","3m")
-            if abars:
-                intraday=pd.DataFrame([{
-                    "Open":b.get("open"),"High":b.get("high"),"Low":b.get("low"),
-                    "Close":b.get("close"),"Volume":b.get("volume"),"dt":b.get("dt")
-                } for b in abars])
-                if len(intraday):
-                    intraday.index=pd.to_datetime(intraday.pop("dt")).tz_localize(None)
-                    intraday=intraday.sort_index()
-        except Exception:
-            intraday=pd.DataFrame()
-        if intraday is None or len(intraday)==0:
-            intraday=_yf_download_retry(ticker,"60d","60m",timeout=12,attempts=1,prepost=False)
-        daily=dl_ohlc(ticker,"2y")
-        if intraday is None:intraday=pd.DataFrame()
-        if daily is None:daily=pd.DataFrame()
-        if len(intraday):intraday=intraday.sort_index()
-        if len(daily):daily=daily.sort_index()
-        fourh=_four_hour_from_hourly(intraday)
-        weekly=pd.DataFrame()
-        if len(daily):
-            weekly=daily.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last","Volume":"sum"}).dropna(subset=["Open","High","Low","Close"])
-        frames=[
-            _strat_frame(intraday,"1H"),
-            _strat_frame(fourh,"4H"),
-            _strat_frame(daily,"1D"),
-            _strat_frame(weekly,"1W"),
-        ]
-        bulls=sum(1 for x in frames if x.get("ftc")=="bullish")
-        bears=sum(1 for x in frames if x.get("ftc")=="bearish")
-        continuity="bullish" if bulls>bears else ("bearish" if bears>bulls else "mixed")
-        return jsonify({"ok":True,"ticker":ticker,"frames":frames,"bullish_count":bulls,"bearish_count":bears,"continuity":continuity})
-    except Exception as e:
-        return jsonify({"ok":False,"error":str(e)}),500
+        payload,stale,err=cached_refresh_safe(f"strat-v25-1:{ticker}",lambda:strat_payload(ticker),ttl=120)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
 
 @app.get("/api/market")
@@ -4751,20 +4796,24 @@ function safeTickerUrl(path,ticker,params={}){
  });
  return q.length?`${base}?${q.join("&")}`:base;
 }
-async function safeTickerFetchJson(path,ticker,params={}){
- const url=safeTickerUrl(path,ticker,params);
- let r;
- try{
-   r=await window.fetch(url,{method:"GET",credentials:"same-origin",cache:"no-store",headers:{Accept:"application/json"}});
- }catch(e){
-   console.error("Ticker request dispatch failed",{path,ticker,url,error:e});
-   throw new Error(`Request could not be dispatched: ${e?.message||e}`);
- }
- const raw=await r.text();
- let j;
- try{j=raw?JSON.parse(raw):{};}catch(e){throw new Error(`Service returned an unreadable response (${r.status})`);}
- if(!r.ok||!j?.ok)throw new Error(j?.error||`Request failed (${r.status})`);
- return j;
+const tickerRequestInflight=new Map(),tickerResponseCache=new Map();
+async function safeTickerFetchJson(path,ticker,params={},opts={}){
+ const url=safeTickerUrl(path,ticker,params),ttl=Number(opts.ttl||0),now=Date.now();
+ const cached=tickerResponseCache.get(url);
+ if(ttl>0&&cached&&now-cached.at<ttl)return cached.value;
+ if(tickerRequestInflight.has(url))return tickerRequestInflight.get(url);
+ const promise=(async()=>{
+   let r;
+   try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"}})}
+   catch(e){throw new Error(`Request could not be dispatched: ${e?.message||e}`)}
+   let raw="",j={};
+   try{raw=await r.text();j=raw?JSON.parse(raw):{};}catch(e){throw new Error(`Service returned an unreadable response (${r.status})`)}
+   if(!r.ok||!j?.ok)throw new Error(j?.error||`Request failed (${r.status})`);
+   if(ttl>0)tickerResponseCache.set(url,{at:Date.now(),value:j});
+   return j;
+ })();
+ tickerRequestInflight.set(url,promise);
+ try{return await promise}finally{tickerRequestInflight.delete(url)}
 }
 async function openSectorStockTicker(rawTicker,{scroll=true}={}){
  const ticker=normalizeStockTicker(rawTicker);
@@ -5304,7 +5353,8 @@ function applyMarketPayload(j,fromCache=false){
  renderGroups();
  renderHeatMap();
  renderDashboardMarket(j);
- setTimeout(()=>runAutomaticTopSetups(false),80);
+ if("requestIdleCallback" in window)requestIdleCallback(()=>runAutomaticTopSetups(false),{timeout:3000});
+ else setTimeout(()=>runAutomaticTopSetups(false),1800);
 }
 
 function fmtDashValue(v,d=2){return v==null?"—":Number(v).toFixed(d)}
@@ -5625,7 +5675,7 @@ async function checkAlpacaStatus(){
      const signup=document.getElementById("alpacaSignupBtn");
      if(alpacaConfigured){
        box.classList.add("ready");
-       box.innerHTML='<b>✓ Alpaca connected</b><span class="note">Options screening is ready. Dealer positioning + sampled flow will load with each analyzed ticker.</span>';
+       box.innerHTML='<b>✓ Alpaca connected</b><span class="note">Options screening is ready. Dealer positioning loads with each ticker; institutional flow loads on demand for faster analysis.</span>';
        if(signup)signup.style.display="none";
      }else{
        box.classList.remove("ready");
@@ -5922,7 +5972,7 @@ async function loadFlowTicker(ticker,force=false){
  const st=document.getElementById("flowStatus"),sec=document.getElementById("flowSection");if(sec)sec.style.display="block";if(st)st.textContent=`Loading ${ticker} flow…`;
  try{
    const j=await safeTickerFetchJson("/api/flow",ticker,force?{refresh:1}:{});
-   activeFlowData=j;renderFlow(j);renderHeatMap()
+   activeFlowData=j;renderFlow(j);renderHeatMap();const fb=document.getElementById("refreshFlow");if(fb)fb.textContent="Refresh flow"
  }catch(e){
    activeFlowData=null;
    if(st)st.innerHTML=`<span class="warn">${e.message}</span><div class="tiny" style="margin-top:5px">GEX, chain snapshots, STRAT, and options screening remain available. Use FlowMS for directional flow while this Alpaca entitlement is unavailable.</div>`;
@@ -5992,7 +6042,9 @@ async function loadOptionsTicker(ticker,opts={}){
      try{localStorage.setItem(LIVE_WATCHLIST_KEY,JSON.stringify(liveWatchlist))}catch(e){}
      renderLiveWatchlist();
    }
-   renderOptionsPanel();renderLiveStocks();loadFlowTicker(ticker,false);
+   renderOptionsPanel();renderLiveStocks();
+   const fs=document.getElementById("flowSection"),fst=document.getElementById("flowStatus"),fb=document.getElementById("refreshFlow");
+   if(fs)fs.style.display="block";if(fst)fst.textContent=`${ticker} · flow deferred for faster loading`;if(fb)fb.textContent="Load flow";
  }catch(e){console.error("Options request failed",ticker,e);st.innerHTML=`<span class="error">${ticker} options: ${e?.message||e}</span>`}
 }
 async function scanVisibleOptions(){
@@ -6464,18 +6516,8 @@ async function loadChartPreview(ticker,period=previewPeriod){
  document.getElementById("preview3M")?.classList.toggle("active",period==="3m");
  document.getElementById("preview6M")?.classList.toggle("active",period==="6m");
  try{
-   const chartUrl=safeTickerUrl("/api/chart-preview",ticker,{period,timeframe:previewTimeframe});
-   let r;
-   try{
-     r=await fetch(chartUrl,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"}});
-   }catch(fetchErr){
-     console.error("Chart fetch dispatch failed",{ticker,chartUrl,fetchErr});
-     throw new Error(`Chart request could not be dispatched: ${fetchErr?.message||fetchErr}`);
-   }
-   let j;
-   try{j=await r.json();}catch(parseErr){throw new Error(`Chart returned an unreadable response (${r.status})`);}
+   const j=await safeTickerFetchJson("/api/chart-preview",ticker,{period,timeframe:previewTimeframe},{ttl:30000});
    if(seq!==previewRequestSeq)return;
-   if(!r.ok||!j.ok)throw Error(j.error||`Chart preview failed (${r.status})`);
    previewPayload=j;previewTimeframe=(j.timeframe||previewTimeframe).toLowerCase();
    try{drawPricePreview(j);}catch(renderErr){console.error("Advanced chart render failed",ticker,renderErr);drawBasicPricePreview(j);}
    const valueSig=classifyValueAcceptance(j);
@@ -7324,7 +7366,7 @@ document.getElementById("liveTickerSearch").addEventListener("keydown",async(e)=
 document.getElementById("scanOptions").addEventListener("click",scanVisibleOptions);
 document.getElementById("optTypeFilter").addEventListener("change",renderOptionsPanel);
 document.getElementById("optLiquidityFilter").addEventListener("change",renderOptionsPanel);
-document.getElementById("refreshFlow")?.addEventListener("click",()=>{if(activeOptionsData?.ticker)loadFlowTicker(activeOptionsData.ticker,true)});
+document.getElementById("refreshFlow")?.addEventListener("click",()=>{if(activeOptionsData?.ticker){const force=!!(activeFlowData&&activeFlowData.ticker===activeOptionsData.ticker);loadFlowTicker(activeOptionsData.ticker,force);}});
 document.getElementById("refreshLiveWatchlist").addEventListener("click",refreshLiveWatchlistData);
 document.getElementById("clearLiveWatchlist").addEventListener("click",async()=>{
  const tickers=liveWatchlist.map(x=>x.ticker);liveWatchlist=[];saveLiveWatchlist();
@@ -7370,12 +7412,19 @@ function gexImplicationFor(ticker,ctx){const o=(activeOptionsData?.ticker===tick
 function histExpectancyLabel(h){if(!h||!h.count)return {label:"Exact setup N=0",detail:"Building a clean signature-specific sample"};const r=h.returns?.["5"]||{};return {label:`Exact setup N=${h.count}`,detail:`5D win ${r.win_rate==null?"—":r.win_rate+"%"} · median ${r.median==null?"—":r.median+"%"}`}}
 function expectancyFactor(h){const r=h?.returns?.["5"]||{},n=Number(r.n||0),wr=Number(r.win_rate),med=Number(r.median);if(n<5)return 5;if(wr>=65&&med>0)return 10;if(wr>=55&&med>0)return 8;if(wr>=50&&med>=0)return 6;if(wr<45||med<0)return 3;return 5}
 function factorBreakdownFor(x,b,c){const rs=c?.relative_strength||{},p=c?.rotation_persistence,cat=c?.catalyst||{},hist=c?.historical_expectancy||{},flow=flowEvidenceFor(x.ticker),gx=gexImplicationFor(x.ticker,c),r5=rs["5"]||{},r20=rs["20"]||{};return [["Rotation",b.alignment==="FULL"?10:b.alignment==="EARLY"?9:5],["Market RS",r20.vs_spy>0?10:r5.vs_spy>0?7:3],["Sector RS",r20.vs_parent>0?10:r5.vs_parent>0?7:c?.parent?3:5],["Persistence",p==null?5:Math.round(p/10)],["Structure",c?.structure?.trend_strength==null?5:Math.min(10,c.structure.trend_strength*2.5)],["Flow",flow.score==null?5:Math.round(flow.score/10)],["GEX",gx.detail.includes("headwind")?3:gx.detail.includes("accelerate")?9:6],["Execution",optionScanMap[x.ticker]?.liquidity==="Liquid"?10:optionScanMap[x.ticker]?.liquidity==="Tradable"?8:4],["Expectancy",expectancyFactor(hist)],["Catalyst",cat.days_to_earnings==null?5:cat.days_to_earnings<=3?1:cat.days_to_earnings<=10?5:9]]}
-async function loadInstitutionalContext(ticker,parent=null,quiet=false){ticker=normalizeStockTicker(ticker);if(!ticker)return null;activeInstitutionalTicker=ticker;const el=ensureInstitutionalPanel();if(el&&!quiet)el.innerHTML=`<div class="note">Loading ${ticker} institutional decision layer…</div>`;try{const q=parent?`?parent=${encodeURIComponent(parent)}`:"",r=await fetch(`/api/institutional-context/${encodeURIComponent(ticker)}${q}`),j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||"Institutional context failed");institutionalContextMap[ticker]=j;if(activeInstitutionalTicker===ticker)renderInstitutionalContext(ticker);renderTopSetups();return j}catch(e){if(el&&!quiet)el.innerHTML=`<span class="warn">Institutional layer: ${e.message}</span>`;return null}}
+async function loadInstitutionalContext(ticker,parent=null,quiet=false){
+ ticker=normalizeStockTicker(ticker);if(!ticker)return null;activeInstitutionalTicker=ticker;
+ const el=ensureInstitutionalPanel();if(el&&!quiet)el.innerHTML=`<div class="note">Loading ${ticker} institutional decision layer…</div>`;
+ try{
+   const j=await safeTickerFetchJson("/api/institutional-context",ticker,parent?{parent}: {},{ttl:60000});
+   institutionalContextMap[ticker]=j;if(activeInstitutionalTicker===ticker)renderInstitutionalContext(ticker);renderTopSetups();return j
+ }catch(e){if(el&&!quiet)el.innerHTML=`<span class="warn">Institutional layer: ${e.message}</span>`;return null}
+}
 function renderInstitutionalContext(ticker){const c=institutionalContextMap[ticker],el=ensureInstitutionalPanel();if(!c||!el)return;const rs=c.relative_strength||{},s=c.structure||{},cat=c.catalyst||{},macro=c.macro_risk||{},flow=flowEvidenceFor(ticker),gx=gexImplicationFor(ticker,c),hist=histExpectancyLabel(c.historical_expectancy),r5=rs["5"]||{},r10=rs["10"]||{},r20=rs["20"]||{},ct=cat.next_earnings?`${cat.next_earnings} · ${cat.days_to_earnings}d`:'No confirmed earnings date available',cc=cat.days_to_earnings==null?'instWarn':cat.days_to_earnings<=3?'instBad':cat.days_to_earnings<=10?'instWarn':'instGood';el.innerHTML=`<div class="instDecisionHead"><div><h3>${ticker} · Institutional Decision Layer</h3><div class="tiny">Observe → Rank → Explain → Execute → Invalidate → Measure</div></div><span class="horizon">${c.horizon||"—"}</span></div><div class="instGrid"><div class="instCard"><div class="k">ROTATION PERSISTENCE</div><div class="v ${Number(c.rotation_persistence)>=67?'instGood':''}">${c.rotation_persistence==null?'—':c.rotation_persistence+'/100'}</div><div class="d">5/10/20D relative leadership${c.triple_relative_strength?' · triple RS confirmed':''}</div></div><div class="instCard"><div class="k">RELATIVE STRENGTH</div><div class="v">${c.parent?`${instFmt(r20.vs_parent)} vs ${c.parent}`:instFmt(r20.vs_spy)}</div><div class="d">20D vs SPY ${instFmt(r20.vs_spy)} · 5D ${instFmt(r5.vs_spy)}</div></div><div class="instCard"><div class="k">FLOW EVIDENCE</div><div class="v">${flow.label}</div><div class="d">${flow.detail}</div></div><div class="instCard"><div class="k">GEX TRADE EFFECT</div><div class="v">${gx.label}</div><div class="d">${gx.detail}</div></div><div class="instCard"><div class="k">CATALYST RISK</div><div class="v ${cc}">${cat.risk||"Unknown"}</div><div class="d">${ct}</div></div><div class="instCard"><div class="k">MACRO RISK</div><div class="v ${macro.risk==="HIGH"?'instBad':macro.risk==="ELEVATED"?'instWarn':''}">${macro.risk||"—"}</div><div class="d">${(macro.events||[]).slice(0,2).map(e=>`${e.days_away}d · ${e.type} ${e.time||''}`).join(' · ')||'No major event in 7D'}</div></div><div class="instCard"><div class="k">HISTORICAL EXPECTANCY</div><div class="v">${hist.label}</div><div class="d">${hist.detail}</div></div><div class="instCard"><div class="k">PRICE STRUCTURE</div><div class="v">${s.direction||"—"}</div><div class="d">Trend ${s.trend_strength??'—'}/4 · ATR ${instMoney(s.atr14)}</div></div><div class="instCard"><div class="k">R:R TO TARGET 2</div><div class="v">${s.rr_to_target2==null?'—':Number(s.rr_to_target2).toFixed(1)+'×'}</div><div class="d">Structure/volatility heuristic</div></div></div><div class="instSection"><div class="instSectionTitle">RELATIVE LEADERSHIP</div><div class="instFactors"><div class="instFactor">5D vs SPY<strong>${instFmt(r5.vs_spy)}</strong></div><div class="instFactor">10D vs SPY<strong>${instFmt(r10.vs_spy)}</strong></div><div class="instFactor">20D vs SPY<strong>${instFmt(r20.vs_spy)}</strong></div><div class="instFactor">5D vs ${c.parent||'group'}<strong>${instFmt(r5.vs_parent)}</strong></div><div class="instFactor">20D vs ${c.parent||'group'}<strong>${instFmt(r20.vs_parent)}</strong></div></div></div><div class="instSection"><div class="instSectionTitle">STRUCTURE REVIEW · EXECUTION / INVALIDATION</div><div class="instLevelGrid"><div class="instLevel"><span>TRIGGER</span><b>${instMoney(s.trigger)}</b></div><div class="instLevel"><span>CONFIRMATION</span><b>${instMoney(s.confirmation)}</b></div><div class="instLevel"><span>INVALIDATION</span><b>${instMoney(s.invalidation)}</b></div><div class="instLevel"><span>HARD FAIL</span><b>${instMoney(s.hard_fail)}</b></div><div class="instLevel"><span>TARGET 1</span><b>${instMoney(s.target1)}</b></div><div class="instLevel"><span>TARGET 2</span><b>${instMoney(s.target2)}</b></div></div><div class="tiny" style="margin-top:6px">Confirmation is trigger ±0.15 ATR. Invalidation uses recent structure + 20D mean; hard fail uses broader 20D/50D structure. Decision heuristics, not stop instructions.</div></div>`}
 const _topSetupEvaluationV23=topSetupEvaluation;topSetupEvaluation=function(x){const b=_topSetupEvaluationV23(x),c=institutionalContextMap[x.ticker];if(!c)return {...b,factors:factorBreakdownFor(x,b,null)};let score=b.score,r20=c.relative_strength?.["20"]||{};if(c.triple_relative_strength)score+=6;else{if(Number(r20.vs_spy)>0)score+=3;if(Number(r20.vs_parent)>0)score+=3}if(c.rotation_persistence!=null&&Number(c.rotation_persistence)>=80)score+=4;else if(c.rotation_persistence!=null&&Number(c.rotation_persistence)<50)score-=4;if(c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=3)score-=10;const mr=c.macro_risk?.risk||"CLEAR";if(mr==="HIGH")score-=12;else if(mr==="ELEVATED")score-=6;else if(mr==="WATCH")score-=2;return {...b,score:Math.max(0,Math.min(100,Math.round(score))),context:c,factors:factorBreakdownFor(x,b,c)}};
 const _renderTopSetupsV23=renderTopSetups;renderTopSetups=function(){_renderTopSetupsV23();const g=document.getElementById("topSetupsGrid");if(!g)return;(globalTopSetupData||[]).forEach(x=>{});g.querySelectorAll('[data-top-setup]').forEach(card=>{const ticker=card.dataset.topSetup,x=(globalTopSetupData||[]).find(z=>z.ticker===ticker);if(!x)return;const e=topSetupEvaluation(x),c=e.context;if(!c)return;const s=c.structure||{},old=card.querySelector('.topSetupInstitutional');if(old)old.remove();const d=document.createElement('div');d.className='topSetupInstitutional';d.innerHTML=`<div class="topSetupInstGrid">${(e.factors||[]).map(z=>`<div class="topSetupInstMetric">${z[0]}<b>${z[1]}/10</b></div>`).join('')}</div><div class="tiny" style="margin-top:6px">${c.horizon} · trigger ${instMoney(s.trigger)} · invalidation ${instMoney(s.invalidation)} · T2 ${instMoney(s.target2)} · R:R ${s.rr_to_target2??'—'}×${c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=10?` · <span class="instWarn">earnings ${c.catalyst.days_to_earnings}d</span>`:''}</div>`;const actions=card.querySelector('.topSetupActions');card.insertBefore(d,actions||null);const score=card.querySelector('.topSetupScore');if(score)score.textContent=`${e.score}/100`})};
 const _runAutomaticTopSetupsV23=runAutomaticTopSetups;runAutomaticTopSetups=async function(force=false){await _runAutomaticTopSetupsV23(force);const rows=(globalTopSetupData||[]).slice(0,10);for(let n=0;n<rows.length;n+=3)await Promise.all(rows.slice(n,n+3).map(x=>loadInstitutionalContext(x.ticker,x._parentTicker||null,true)));renderTopSetups()};
-const _openSectorStockTickerV23=openSectorStockTicker;openSectorStockTicker=async function(rawTicker,opts={}){const ticker=normalizeStockTicker(rawTicker),parent=currentSector,out=await _openSectorStockTickerV23(rawTicker,opts);loadInstitutionalContext(ticker,parent,false);return out};const _openTopSetupDeepDiveV23=openTopSetupDeepDive;openTopSetupDeepDive=function(ticker,parentTicker=null,target="chart"){const out=_openTopSetupDeepDiveV23(ticker,parentTicker,target);loadInstitutionalContext(ticker,parentTicker||currentSector,false);return out};const _renderFlowV23=renderFlow;renderFlow=function(x){const out=_renderFlowV23(x);if(x?.ticker&&institutionalContextMap[x.ticker])renderInstitutionalContext(x.ticker);return out};const _renderOptionsPanelV23=renderOptionsPanel;renderOptionsPanel=function(){const out=_renderOptionsPanelV23();if(activeOptionsData?.ticker&&institutionalContextMap[activeOptionsData.ticker])renderInstitutionalContext(activeOptionsData.ticker);return out};
+const _openSectorStockTickerV23=openSectorStockTicker;openSectorStockTicker=async function(rawTicker,opts={}){const ticker=normalizeStockTicker(rawTicker),parent=currentSector,out=await _openSectorStockTickerV23(rawTicker,opts);setTimeout(()=>loadInstitutionalContext(ticker,parent,false),350);return out};const _openTopSetupDeepDiveV23=openTopSetupDeepDive;openTopSetupDeepDive=function(ticker,parentTicker=null,target="chart"){const out=_openTopSetupDeepDiveV23(ticker,parentTicker,target);loadInstitutionalContext(ticker,parentTicker||currentSector,false);return out};const _renderFlowV23=renderFlow;renderFlow=function(x){const out=_renderFlowV23(x);if(x?.ticker&&institutionalContextMap[x.ticker])renderInstitutionalContext(x.ticker);return out};const _renderOptionsPanelV23=renderOptionsPanel;renderOptionsPanel=function(){const out=_renderOptionsPanelV23();if(activeOptionsData?.ticker&&institutionalContextMap[activeOptionsData.ticker])renderInstitutionalContext(activeOptionsData.ticker);return out};
 </script>
 """
 @app.errorhandler(500)
