@@ -1,0 +1,43 @@
+name: Apply v24.7 mobile request hardening
+on:
+  push:
+    paths:
+      - 'scripts/patch_v24_7_mobile_requests.py'
+      - '.github/workflows/apply-v24-7-mobile-requests.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_v24_7_mobile_requests.py
+      - name: Syntax check
+        run: python -m py_compile app.py
+      - name: Verify request hardening
+        run: |
+          grep -q 'APP_VERSION = "24.7"' app.py
+          grep -q 'function safeTickerFetchJson' app.py
+          grep -q 'safeTickerFetchJson("/api/strat",ticker)' app.py
+          grep -q 'safeTickerFetchJson("/api/options",ticker' app.py
+          grep -q 'profiles={"session":None,"previous":None,"error":str(profile_err)}' app.py
+      - name: Run core regression tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_core_logic.py -q
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189823+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Harden mobile ticker requests and chart profile fallback'
+          git push
