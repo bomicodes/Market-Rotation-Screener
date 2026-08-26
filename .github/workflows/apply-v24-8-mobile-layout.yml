@@ -1,0 +1,43 @@
+name: Apply v24.8 mobile layout
+on:
+  push:
+    paths:
+      - 'scripts/patch_v24_8_mobile_layout.py'
+      - '.github/workflows/apply-v24-8-mobile-layout.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_v24_8_mobile_layout.py
+      - name: Syntax check
+        run: python -m py_compile app.py
+      - name: Verify mobile layout
+        run: |
+          grep -q 'APP_VERSION = "24.8"' app.py
+          grep -q 'v24.8 mobile dashboard + sector summary' app.py
+          grep -q '<th>Signal</th>' app.py
+          grep -q 'content:"FAST 10/5"' app.py
+          grep -q 'content:"TREND 25/12"' app.py
+      - name: Run core regression tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_core_logic.py -q
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189823+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Improve mobile dashboard and preserve sector RRG tags'
+          git push
