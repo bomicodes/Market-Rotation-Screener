@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.3"
+APP_VERSION = "25.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6887,7 +6887,7 @@ async function runAutomaticTopSetups(force=false){
      const aq=(ao?.liquidity==="Liquid"?2:1)+(ao?.iv_state==="Cheap / Crushed"?2:ao?.iv_state==="Normal"?1:0);
      const bq=(bo?.liquidity==="Liquid"?2:1)+(bo?.iv_state==="Cheap / Crushed"?2:bo?.iv_state==="Normal"?1:0);
      return (preliminaryRRGScore(b)+bq)-(preliminaryRRGScore(a)+aq);
-   }).slice(0,10);
+   }).slice(0,16);
 
    if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;
    for(let n=0;n<finalists.length;n+=3){
@@ -6985,13 +6985,39 @@ function setupCompleteness(x,e){
 function renderTopSetups(){
  const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
  const source=(globalTopSetupData&&globalTopSetupData.length)?globalTopSetupData:[];
- const rows=source.map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score).slice(0,2);
+ // Show a useful shortlist rather than only the top two. Keep the hard quality
+ // gate, but surface up to six qualified names so the trader can compare setups.
+ const qualified=source.map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score);
+ const rows=qualified.slice(0,6);
  if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`:"No A-quality setup currently";
  if(!rows.length){
    const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. The scanner will not force a pick.";
    g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>`;return
  }
- g.innerHTML=rows.map(({x,e},i)=>{const va=e.va,complete=setupCompleteness(x,e),label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT",trigger=va?.direction==="bullish"?`Hold above VAH $${Number(va.vah).toFixed(2)}`:va?.direction==="bearish"?`Hold below VAL $${Number(va.val).toFixed(2)}`:va?`Watch VAH $${Number(va.vah).toFixed(2)} / VAL $${Number(va.val).toFixed(2)}`:"Load chart for VAH / VAL";return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b>${complete.complete?'':`<div class="tiny instWarn">Incomplete: ${complete.missing.join(', ')}</div>`}</div>
+ g.innerHTML=rows.map(({x,e},i)=>{
+ const va=e.va,complete=setupCompleteness(x,e),label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";
+ // Trigger must be actionable from CURRENT price. A historical VAH/VAL that price
+ // has already cleared by a meaningful amount is context, not a fresh entry trigger.
+ const opt=optionScanMap[x.ticker]||{};
+ const spot=Number(opt.spot??va?.close);
+ const vah=Number(va?.vah),val=Number(va?.val);
+ let trigger="Load chart for VAH / VAL";
+ if(va){
+   if(va.direction==="bullish"&&Number.isFinite(vah)){
+     const ext=Number.isFinite(spot)&&spot>0?(spot-vah)/vah*100:null;
+     trigger=ext!=null&&ext>1.0
+       ?`Already ${ext.toFixed(1)}% above VAH $${vah.toFixed(2)} · wait for retest/hold or new base`
+       :`Hold above VAH $${vah.toFixed(2)}`;
+   }else if(va.direction==="bearish"&&Number.isFinite(val)){
+     const ext=Number.isFinite(spot)&&spot>0?(val-spot)/val*100:null;
+     trigger=ext!=null&&ext>1.0
+       ?`Already ${ext.toFixed(1)}% below VAL $${val.toFixed(2)} · wait for retest/rejection or new base`
+       :`Hold below VAL $${val.toFixed(2)}`;
+   }else if(Number.isFinite(vah)&&Number.isFinite(val)){
+     trigger=`Watch VAH $${vah.toFixed(2)} / VAL $${val.toFixed(2)}`;
+   }
+ }
+ return `<div class="topSetupCard ${label==="A+ SETUP"?"aPlus":""}" data-top-setup="${x.ticker}"><div class="topSetupHead"><div><div class="topSetupTicker">${i===0?"★ ":""}${x.ticker}</div><div class="topSetupStatus">${label} · ${alignmentLabel}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">${e.score}/100</div></div><div class="topSetupReasons">${e.reasons.slice(0,6).map(r=>`<span class="${r[1]}">${r[0]}</span>`).join("")}</div><div class="topSetupTrigger">TRIGGER · <b>${trigger}</b>${complete.complete?'':`<div class="tiny instWarn">Incomplete: ${complete.missing.join(', ')}</div>`}</div>
 <div class="topSetupActions">
   <button class="topSetupAction primaryDive" data-top-open="${x.ticker}" data-parent="${x._parentTicker||""}">Open setup</button>
   <button class="topSetupAction gexDive" data-top-gex="${x.ticker}" data-parent="${x._parentTicker||""}">GEX</button>
