@@ -1,3 +1,8 @@
+v24.4 — ALPACA FEED COMPARISON TOOL (IEX vs SIP, INDICATIVE vs OPRA)
+- Added a Feed Comparison panel to measure what an Alpaca Algo Trader Plus trial actually changes for a chosen ticker: session volume and VAH/POC/VAL from IEX vs SIP bars, plus contract count, median spread, call/put walls, and gamma regime from indicative vs OPRA snapshots.
+- Comparison fetches use explicit feed parameters and are isolated from production chart/options paths, so testing the paid entitlement cannot change the current audited behavior.
+- Unavailable paid entitlements report cleanly instead of crashing, allowing before-vs-during-trial comparison. New endpoint: GET /api/feed-comparison/<ticker>.
+
 v24.0 — SERVER-SYNCED WATCHLIST, REGRESSION TESTS, GLOSSARY, SOURCE HEALTH, MACRO CALENDAR
 - Watchlist now syncs to the server (Postgres/SQLite, same backend as setup snapshots) instead of living only in one browser's localStorage. Bookmarks made on one device now show up on another; localStorage is kept as an instant-load/offline cache, not the source of truth. New endpoints: GET/POST/DELETE /api/watchlist.
 - Added tests/test_core_logic.py: 10 regression tests for PEAD directional persistence/reversion classification and STRAT scenario classification, using synthetic OHLC data and monkeypatched dl_ohlc — no network calls required. Verified against the real functions (all pass) and confirmed they actually catch regressions, not just pass trivially. Run with `pytest tests/test_core_logic.py -v` (requirements-dev.txt added, kept separate from production requirements.txt).

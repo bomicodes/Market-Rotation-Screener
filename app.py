@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.3"
+APP_VERSION = "24.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2175,6 +2175,107 @@ def _institutional_candidate_score(r):
     return score
 
 
+
+
+def _fetch_stock_bars_with_feed(ticker, feed, days=3):
+    """Fetch Alpaca stock bars with an explicit feed override for comparison only."""
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    url = f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/bars"
+    params = {
+        "timeframe": "1Min", "start": (now - timedelta(days=days)).isoformat(), "end": now.isoformat(),
+        "adjustment": "raw", "feed": feed, "sort": "asc", "limit": 10000,
+    }
+    raw=[]; token=None
+    for _ in range(3):
+        if token: params["page_token"]=token
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20)
+        if r.status_code in (401,403):
+            raise PermissionError(f"Account is not entitled to the '{feed}' stock feed yet.")
+        r.raise_for_status()
+        j=r.json() or {}
+        raw.extend(j.get("bars") or [])
+        token=j.get("next_page_token") or j.get("page_token")
+        if not token: break
+    return raw
+
+def _fetch_option_snapshots_with_feed(ticker,start_date,end_date,spot,feed):
+    """Fetch Alpaca option snapshots with an explicit feed override for comparison only."""
+    url=f"{ALPACA_DATA_BASE_URL}/v1beta1/options/snapshots/{ticker}"
+    params={
+        "feed":feed,"expiration_date_gte":start_date,"expiration_date_lte":end_date,
+        "strike_price_gte":round(max(.01,spot*.85),2),"strike_price_lte":round(spot*1.15,2),"limit":1000,
+    }
+    out={}; token=None
+    for _ in range(3):
+        if token: params["page_token"]=token
+        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20)
+        if r.status_code in (401,403):
+            raise PermissionError(f"Account is not entitled to the '{feed}' options feed yet.")
+        r.raise_for_status()
+        j=r.json() or {}
+        part=j.get("snapshots") or {}
+        if isinstance(part,dict): out.update(part)
+        token=j.get("next_page_token")
+        if not token: break
+    return out
+
+def feed_comparison_payload(ticker):
+    ticker=ticker.upper().strip()
+    out={"ticker":ticker,"stocks":{},"options":{}}
+    for feed in ("iex","sip"):
+        try:
+            bars=_fetch_stock_bars_with_feed(ticker,feed,days=3)
+            if not bars:
+                out["stocks"][feed]={"available":False,"reason":"No bars returned for this window."}; continue
+            last_date=str(bars[-1].get("t",""))[:10]
+            session_bars=[b for b in bars if str(b.get("t",""))[:10]==last_date]
+            total_vol=sum(float(b.get("v") or 0) for b in session_bars)
+            profile=_profile_from_intraday_bars(session_bars,last_date,rows_count=48,value_area_pct=68)
+            out["stocks"][feed]={
+                "available":True,"session_date":last_date,"total_volume":int(total_vol),
+                "vah":round(profile["vah"],2) if profile else None,
+                "poc":round(profile["poc"],2) if profile else None,
+                "val":round(profile["val"],2) if profile else None,
+            }
+        except Exception as e:
+            out["stocks"][feed]={"available":False,"reason":str(e)}
+    spot=None
+    try:
+        px=dl_ohlc(ticker,"5d")
+        if px is not None and len(px): spot=float(px["Close"].dropna().iloc[-1])
+    except Exception: pass
+    if spot:
+        today=pd.Timestamp.now().normalize(); start=today.strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+        try:
+            contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+        except Exception: meta={}
+        for feed in ("indicative","opra"):
+            try:
+                snaps=_fetch_option_snapshots_with_feed(ticker,start,end,spot,feed)
+                if not snaps:
+                    out["options"][feed]={"available":False,"reason":"No contracts returned."}; continue
+                rows=[]
+                for sym,snap in snaps.items():
+                    if sym not in meta: continue
+                    r=option_contract_row(sym,snap,meta[sym],spot)
+                    if r["expiration"] and r["moneyness_pct"] is not None and abs(r["moneyness_pct"])<=15: rows.append(r)
+                positioning=modeled_dealer_positioning(rows,spot) if rows else {"available":False}
+                spreads=[r["spread_pct"] for r in rows if r.get("spread_pct") is not None]
+                out["options"][feed]={
+                    "available":True,"contracts":len(rows),
+                    "median_spread_pct":round(float(np.median(spreads)),2) if spreads else None,
+                    "call_wall":positioning.get("call_wall"),"put_wall":positioning.get("put_wall"),
+                    "gamma_regime":positioning.get("gamma_regime"),
+                }
+            except Exception as e:
+                out["options"][feed]={"available":False,"reason":str(e)}
+    else:
+        out["options"]["indicative"]={"available":False,"reason":"Could not determine spot price."}
+        out["options"]["opra"]={"available":False,"reason":"Could not determine spot price."}
+    return out
+
 def _cluster_institutional_events(raw, meta):
     """Cluster fragmented prints into contract-level institutional flow events.
 
@@ -2703,6 +2804,16 @@ def api_source_health():
 def api_macro_calendar():
     try:return jsonify({"ok":True,"events":upcoming_macro_events(int(request.args.get("within_days",60)))})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+@app.get("/api/feed-comparison/<ticker>")
+def api_feed_comparison(ticker):
+    try:
+        if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+            return jsonify({"ok":False,"error":"Alpaca is not configured."}),400
+        return jsonify({"ok":True,**feed_comparison_payload(ticker)})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
 
 def auth_required():
     return bool(SCREENER_PASSWORD) and not session.get("authenticated", False)
@@ -3850,6 +3961,10 @@ body{background:radial-gradient(circle at 48% -15%,rgba(22,53,75,.40) 0,rgba(6,1
 .sourceHealthStrip .dot.degraded{background:#f59e0b}
 .sourceHealthStrip .dot.unknown{background:#3a4a58}
 .sourceHealthStrip .src{cursor:default}
+
+.feedCompTable{width:100%;border-collapse:collapse;font-size:12px}
+.feedCompTable th,.feedCompTable td{text-align:left;padding:5px 8px;border-bottom:1px solid #1b2835}
+.feedCompTable th{color:#7f97a8;font-weight:600;font-size:10px;text-transform:uppercase}
 .panel,.sideSection,.gexRailCard{background:linear-gradient(180deg,rgba(13,22,31,.98),rgba(8,15,22,.98));border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.14),inset 0 1px rgba(255,255,255,.018)}
 .panel{border-radius:13px;padding:14px}.dashCol .panel{margin-bottom:13px}.dashTitle,.gexRailTitle{color:#edf3f8;letter-spacing:.42px}.note,.tiny{color:var(--muted)}
 .dashboardGrid{grid-template-columns:minmax(285px,.82fr) minmax(620px,1.82fr) minmax(270px,.78fr);gap:14px}
@@ -3988,6 +4103,18 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 </header>
 <div class="pageIntro"><h1>Market Rotation Screener</h1><div class="sub">Fast <span class="glossTerm" data-gloss="RRG">RRG</span> (10/5) finds change; Trend <span class="glossTerm" data-gloss="RRG">RRG</span> (25/12) confirms persistence.</div></div>
 <div id="sourceHealthStrip" class="sourceHealthStrip"></div>
+
+
+<div class="panel" id="feedCompPanel" style="margin:10px 20px 0">
+  <div class="row" style="align-items:center;gap:10px">
+    <strong>Feed comparison</strong>
+    <span class="note">IEX vs SIP stocks · indicative vs OPRA options — measure the Alpaca upgrade before committing</span>
+    <input id="feedCompTicker" placeholder="Ticker" style="width:90px;text-transform:uppercase" maxlength="8">
+    <button id="feedCompRun" class="primary">Compare</button>
+    <span id="feedCompStatus" class="status"></span>
+  </div>
+  <div id="feedCompResults" style="margin-top:8px"></div>
+</div>
 
 <div id="heatmap" class="view">
   <div class="panel">
@@ -4379,6 +4506,34 @@ async function refreshSourceHealth(){const el=document.getElementById("sourceHea
 document.addEventListener("DOMContentLoaded",refreshSourceHealth);setInterval(refreshSourceHealth,5*60*1000);
 async function refreshMacroCalendar(){const el=document.getElementById("dashboardMacro");if(!el)return;try{const r=await fetch("/api/macro-calendar?within_days=90"),j=await r.json();if(!j?.ok||!Array.isArray(j.events))return;if(!j.events.length){el.innerHTML=`<div class="note">No confirmed major macro dates in the next 90 days.</div>`;return;}el.innerHTML=j.events.map(e=>{const high=e.importance==="HIGH",urgent=e.days_away<=1&&high,tag=high?"HIGH":(e.importance||"WATCH");return `<div class="breadthRow"><div class="name">${urgent?"⚠️ ":""}${e.label}<div class="tiny">${tag} · ${e.time||"time TBA"} · ${e.source||"official source"}</div></div><div class="val ${urgent?"neg":""}">${e.date}</div><div class="move ${urgent?"neg":""}">${e.days_away}d</div></div>`;}).join("");}catch(e){}}
 document.addEventListener("DOMContentLoaded",refreshMacroCalendar);setInterval(refreshMacroCalendar,60*60*1000);
+
+
+function fmtDelta(a,b){
+ if(a==null||b==null||!Number.isFinite(Number(a))||!Number.isFinite(Number(b)))return "—";
+ a=Number(a);b=Number(b); if(a===0)return b===0?"0%":"n/a";
+ const pct=((b-a)/Math.abs(a))*100; return `${pct>0?"+":""}${pct.toFixed(1)}%`;
+}
+function feedCompRow(label,freeVal,paidVal,deltaText,freeFmt=(x)=>x,paidFmt=(x)=>x){
+ return `<tr><td>${label}</td><td>${freeVal==null?"—":freeFmt(freeVal)}</td><td>${paidVal==null?"—":paidFmt(paidVal)}</td><td>${deltaText}</td></tr>`;
+}
+function feedCompUnavailable(side,reason){return `<div class="note" style="margin-top:4px">${side}: not available — ${reason||"unknown reason"}</div>`;}
+async function runFeedComparison(){
+ const input=document.getElementById("feedCompTicker"),st=document.getElementById("feedCompStatus"),out=document.getElementById("feedCompResults");
+ const ticker=(input?.value||"").trim().toUpperCase(); if(!ticker){if(st)st.textContent="Enter a ticker";return;}
+ if(st)st.textContent="Comparing…";if(out)out.innerHTML="";
+ try{
+   const r=await fetch(`/api/feed-comparison/${encodeURIComponent(ticker)}`),j=await r.json();
+   if(!j?.ok){if(st)st.textContent=j?.error||"Comparison failed";return;}
+   if(st)st.textContent=`${ticker} · ${new Date().toLocaleTimeString()}`; const s=j.stocks||{},o=j.options||{}; let html="";
+   if(s.iex?.available&&s.sip?.available){html+=`<div class="tiny" style="margin-bottom:4px">STOCKS · session ${s.sip.session_date||s.iex.session_date||"—"}</div><table class="feedCompTable"><thead><tr><th></th><th>IEX (free)</th><th>SIP (paid)</th><th>Δ</th></tr></thead><tbody>${feedCompRow("Session volume",s.iex.total_volume,s.sip.total_volume,fmtDelta(s.iex.total_volume,s.sip.total_volume),(x)=>Number(x).toLocaleString(),(x)=>Number(x).toLocaleString())}${feedCompRow("VAH",s.iex.vah,s.sip.vah,fmtDelta(s.iex.vah,s.sip.vah),(x)=>"$"+x,(x)=>"$"+x)}${feedCompRow("POC",s.iex.poc,s.sip.poc,fmtDelta(s.iex.poc,s.sip.poc),(x)=>"$"+x,(x)=>"$"+x)}${feedCompRow("VAL",s.iex.val,s.sip.val,fmtDelta(s.iex.val,s.sip.val),(x)=>"$"+x,(x)=>"$"+x)}</tbody></table>`;}
+   else{html+=`<div class="tiny" style="margin-bottom:4px">STOCKS</div>`;if(!s.iex?.available)html+=feedCompUnavailable("IEX",s.iex?.reason);if(!s.sip?.available)html+=feedCompUnavailable("SIP",s.sip?.reason);}
+   if(o.indicative?.available&&o.opra?.available){html+=`<div class="tiny" style="margin:10px 0 4px">OPTIONS</div><table class="feedCompTable"><thead><tr><th></th><th>Indicative (free)</th><th>OPRA (paid)</th><th>Δ</th></tr></thead><tbody>${feedCompRow("Contracts in range",o.indicative.contracts,o.opra.contracts,fmtDelta(o.indicative.contracts,o.opra.contracts))}${feedCompRow("Median spread %",o.indicative.median_spread_pct,o.opra.median_spread_pct,fmtDelta(o.indicative.median_spread_pct,o.opra.median_spread_pct))}${feedCompRow("Call wall",o.indicative.call_wall,o.opra.call_wall,fmtDelta(o.indicative.call_wall,o.opra.call_wall),(x)=>"$"+x,(x)=>"$"+x)}${feedCompRow("Put wall",o.indicative.put_wall,o.opra.put_wall,fmtDelta(o.indicative.put_wall,o.opra.put_wall),(x)=>"$"+x,(x)=>"$"+x)}<tr><td>Gamma regime</td><td>${o.indicative.gamma_regime||"—"}</td><td>${o.opra.gamma_regime||"—"}</td><td>${o.indicative.gamma_regime===o.opra.gamma_regime?"same":"DIFFERS"}</td></tr></tbody></table>`;}
+   else{html+=`<div class="tiny" style="margin:10px 0 4px">OPTIONS</div>`;if(!o.indicative?.available)html+=feedCompUnavailable("Indicative",o.indicative?.reason);if(!o.opra?.available)html+=feedCompUnavailable("OPRA",o.opra?.reason);}
+   if(out)out.innerHTML=html||`<div class="note">No comparable data returned.</div>`;
+ }catch(e){if(st)st.textContent="Comparison failed — "+(e?.message||"network error");}
+}
+document.getElementById("feedCompRun")?.addEventListener("click",runFeedComparison);
+document.getElementById("feedCompTicker")?.addEventListener("keydown",e=>{if(e.key==="Enter")runFeedComparison();});
 
 function fmtCompact(n){
  const x=Number(n); if(!Number.isFinite(x)) return "—";
