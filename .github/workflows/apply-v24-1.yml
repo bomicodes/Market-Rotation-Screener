@@ -4,6 +4,7 @@ on:
     paths:
       - 'scripts/apply_v24_1_swing_edge.py'
       - 'scripts/apply_v24_1_frontend.py'
+      - 'tests/test_swing_reliability.py'
       - '.github/workflows/apply-v24-1.yml'
 permissions:
   contents: write
@@ -19,7 +20,7 @@ jobs:
       - run: python scripts/apply_v24_1_frontend.py
       - run: pip install -r requirements-dev.txt
       - run: python -m py_compile app.py
-      - run: pytest tests/test_core_logic.py -q
+      - run: pytest tests/test_core_logic.py tests/test_swing_reliability.py -q
       - name: Commit v24.1
         run: |
           git config user.name "github-actions[bot]"
