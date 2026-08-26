@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Local data
+*.sqlite3
+*.sqlite3-journal
+market_rotation_setups.sqlite3
+
+# Editor/OS cruft
+.DS_Store
+.vscode/
+.idea/
+
+# Env files (never commit real secrets)
+.env
+.env.local
