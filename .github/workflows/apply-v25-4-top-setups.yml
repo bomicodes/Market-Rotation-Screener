@@ -1,0 +1,42 @@
+name: Apply v25.4 Top Setups count and triggers
+on:
+  push:
+    paths:
+      - 'scripts/patch_v25_4_top_setups_count_and_triggers.py'
+      - '.github/workflows/apply-v25-4-top-setups.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_v25_4_top_setups_count_and_triggers.py
+      - name: Syntax check
+        run: python -m py_compile app.py
+      - name: Verify patch
+        run: |
+          grep -q 'APP_VERSION = "25.4"' app.py
+          grep -q 'qualified.slice(0,6)' app.py
+          grep -q 'wait for retest/hold or new base' app.py
+          grep -q 'slice(0,16)' app.py
+      - name: Run core regression tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_core_logic.py -q
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189823+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Show 4-6 Top Setups and make triggers price-aware'
+          git push
