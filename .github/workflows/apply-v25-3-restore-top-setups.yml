@@ -41,3 +41,4 @@ jobs:
           git add app.py
           git commit -m 'Restore Top Setups with controlled mobile scanning'
           git push
+# retrigger: 2026-08-26
