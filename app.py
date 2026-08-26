@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.1"
+APP_VERSION = "24.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2795,6 +2795,10 @@ button {
 .flowSplit{height:9px;border-radius:8px;overflow:hidden;background:#24303b;display:flex;margin-top:6px}.flowSplit span:first-child{background:#34d399}.flowSplit span:last-child{background:#f87171}
 .flowTable{margin-top:8px}.flowDisclosure{margin-top:8px;padding:8px;border-left:3px solid #f59e0b;background:#111820}
 
+
+/* v24.2 RRG clarity + proportional canvas */
+#sectorChart,#stockChart{width:100%!important;height:auto!important;aspect-ratio:3/2;display:block}
+@media(max-width:760px){#sectorChart,#stockChart{aspect-ratio:4/3;height:auto!important}}
 </style>
 </head>
 <body>
@@ -4657,9 +4661,20 @@ function sparklineSVG(x,mode="fast"){
  const path=pts.map((p,i)=>{const px=(p.x-xmin)/Math.max(.001,xmax-xmin)*(w-2)+1,py=h-1-(p.y-ymin)/Math.max(.001,ymax-ymin)*(h-2);return `${i?"L":"M"}${px.toFixed(1)},${py.toFixed(1)}`}).join(" ");
  return `<svg class="miniSpark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${path}" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>`;
 }
+function _rrgCanvasContext(c){
+ const rect=c.getBoundingClientRect();
+ const W=Math.max(320,Math.round(rect.width||c.clientWidth||900));
+ const H=Math.max(280,Math.round(rect.height||c.clientHeight||600));
+ const dpr=Math.min(2.5,Math.max(1,window.devicePixelRatio||1));
+ const bw=Math.max(1,Math.round(W*dpr)),bh=Math.max(1,Math.round(H*dpr));
+ if(c.width!==bw||c.height!==bh){c.width=bw;c.height=bh;}
+ const ctx=c.getContext("2d");
+ ctx.setTransform(dpr,0,0,dpr,0,0);
+ return {ctx,W,H};
+}
 function drawRRG(id,rows,focusTicker=undefined){
  rows=rrgRowsForChart(id,rows);
- const c=document.getElementById(id),ctx=c.getContext("2d"),W=c.width,H=c.height,p=42;
+ const c=document.getElementById(id),cv=_rrgCanvasContext(c),ctx=cv.ctx,W=cv.W,H=cv.H,p=48;
  rrgFocusState[id]=rrgFocusState[id]||{selected:null,rows:[],hits:[]};
  const state=rrgFocusState[id];
  if(focusTicker!==undefined)state.selected=focusTicker;
@@ -4677,12 +4692,18 @@ function drawRRG(id,rows,focusTicker=undefined){
  }
 
  let xs=[],ys=[];
- rows.forEach(r=>(r.tail||[]).forEach(pt=>{xs.push(pt.x);ys.push(pt.y)}));
- let xmin=Math.min(98,...xs)-.8,xmax=Math.max(102,...xs)+.8,
-     ymin=Math.min(98,...ys)-.8,ymax=Math.max(102,...ys)+.8;
-
- const X=x=>p+(x-xmin)/(xmax-xmin)*(W-2*p),
-       Y=y=>H-p-(y-ymin)/(ymax-ymin)*(H-2*p),
+ rows.forEach(r=>(r.tail||[]).forEach(pt=>{if(Number.isFinite(Number(pt.x)))xs.push(Number(pt.x));if(Number.isFinite(Number(pt.y)))ys.push(Number(pt.y));}));
+ // Keep 100/100 exactly centered and use ONE pixels-per-RRG-unit scale for
+ // both axes. This preserves tail angles and quadrant geometry instead of
+ // stretching X and Y independently to fill the panel.
+ const dx=Math.max(2,...xs.map(v=>Math.abs(v-100)))+.65;
+ const dy=Math.max(2,...ys.map(v=>Math.abs(v-100)))+.65;
+ const plotW=Math.max(1,W-2*p),plotH=Math.max(1,H-2*p);
+ const unitsPerPx=Math.max((2*dx)/plotW,(2*dy)/plotH);
+ const halfX=unitsPerPx*plotW/2,halfY=unitsPerPx*plotH/2;
+ const xmin=100-halfX,xmax=100+halfX,ymin=100-halfY,ymax=100+halfY;
+ const X=x=>p+(x-xmin)/(xmax-xmin)*plotW,
+       Y=y=>H-p-(y-ymin)/(ymax-ymin)*plotH,
        cx=X(100),cy=Y(100);
 
  ctx.strokeStyle="#475569";
@@ -6156,11 +6177,35 @@ async function loadChartPreview(ticker,period=previewPeriod){
 }
 
 function heatTone(score){return `h${Math.max(0,Math.min(10,Math.round(score||0)))}`;}
+function _rrgEndpoint(src){
+ const pts=src?.tail||[]; const p=pts.length?pts[pts.length-1]:null;
+ return p&&Number.isFinite(Number(p.x))&&Number.isFinite(Number(p.y))?{x:Number(p.x),y:Number(p.y)}:null;
+}
+function _meanStd(vals){
+ const a=vals.filter(Number.isFinite); if(!a.length)return {mean:100,sd:1};
+ const mean=a.reduce((s,v)=>s+v,0)/a.length;
+ const variance=a.reduce((s,v)=>s+(v-mean)*(v-mean),0)/Math.max(1,a.length);
+ return {mean,sd:Math.max(.18,Math.sqrt(variance))};
+}
 function sectorHeatScore(x){
- const st=rotationStage(x).level; let s=st*2; const f=x.fast||x||{},t=x.trend||{};
- if(f.tail_trajectory==="Rotating In")s+=1; if(f.tail_trajectory==="Rotating Out")s-=1;
- if((t.quadrant==="Leading"||t.quadrant==="Improving")&&t.rs_up&&t.mom_up)s+=1;
- return Math.max(0,Math.min(10,s));
+ // True relative composite: compare the current Fast/Trend RS and momentum
+ // coordinates with peers in the same universe. The old implementation was
+ // a coarse stage counter, which could display 0.0 for a sector that was
+ // literally in the Leading quadrant.
+ const peers=(sectorData||[]).filter(r=>r?.group===x?.group);
+ const universe=peers.length>=4?peers:(sectorData||[]);
+ const rows=universe.map(r=>({r,f:_rrgEndpoint(r.fast||r),t:_rrgEndpoint(r.trend||{})}));
+ const fx=_meanStd(rows.map(o=>o.f?.x)),fy=_meanStd(rows.map(o=>o.f?.y));
+ const tx=_meanStd(rows.map(o=>o.t?.x)),ty=_meanStd(rows.map(o=>o.t?.y));
+ const f=_rrgEndpoint(x.fast||x),t=_rrgEndpoint(x.trend||{});
+ if(!f&&!t)return 5;
+ const z=(v,st)=>Number.isFinite(v)?(v-st.mean)/st.sd:0;
+ let composite=.35*z(f?.x,fx)+.25*z(f?.y,fy)+.25*z(t?.x,tx)+.15*z(t?.y,ty);
+ // Small absolute quadrant anchor prevents "best of a weak group" from
+ // looking strong solely because of cross-sectional standardization.
+ const qv=q=>({Leading:1,Improving:.45,Weakening:-.45,Lagging:-1}[q]||0);
+ composite=.78*composite+.22*(.6*qv((x.fast||x)?.quadrant)+.4*qv(x.trend?.quadrant));
+ return Math.max(0,Math.min(10,5+1.8*composite));
 }
 function heatTagsFor(x,isStock=false){
  const f=x.fast||x||{},t=x.trend||{}; const tags=[];
@@ -6949,6 +6994,19 @@ function activateViewById(id){
  if(wanted==="heatmap")renderHeatMap();
  if(wanted==="gexpage")mountGexPage();else restoreGexSection();
 }
+
+/* v24.2 responsive RRG redraw */
+let _rrgResizeTimer=null;
+window.addEventListener("resize",()=>{
+ clearTimeout(_rrgResizeTimer);
+ _rrgResizeTimer=setTimeout(()=>{
+   ["sectorChart","stockChart","historyChart"].forEach(id=>{
+     const st=rrgFocusState[id];
+     if(st?.rows?.length)drawRRG(id,st.rows,st.selected);
+   });
+ },120);
+});
+
 loadLiveWatchlist();renderLiveWatchlist();checkAlpacaStatus();loadMarket(false);
 document.getElementById("gexWindow")?.addEventListener("change",()=>{const t=activeOptionsData?.ticker||previewTicker;if(t)loadOptionsTicker(t,{scroll:false});});
 
