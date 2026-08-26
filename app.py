@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.8"
+APP_VERSION = "24.9"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4157,6 +4157,21 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
   .rrgInlineFilters .filterPills{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 
+
+/* v24.9 risk-support explainability + denser mobile sector summary */
+.riskSupportToggle{width:100%;display:flex;align-items:center;justify-content:space-between;border:1px solid #213445;background:#0a141d;color:#91a4b7;border-radius:7px;padding:7px 9px;margin:-2px 0 7px;font-size:9px;font-weight:800;letter-spacing:.25px;text-align:left}
+.riskSupportToggle:hover{border-color:#34536d;color:#c6d4e0}.riskScoreInline{border:0;background:transparent;color:inherit;padding:0;font:inherit;cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}.riskScoreInline b{color:#dce8f2}
+.riskSupportBreakdown{border:1px solid #203242;background:#09131b;border-radius:8px;padding:4px 9px;margin:0 0 8px}.riskSupportBreakdown[hidden]{display:none!important}.riskPart{display:grid;grid-template-columns:18px 1fr auto;gap:7px;align-items:center;padding:6px 0;border-bottom:1px solid #172735}.riskPart:last-child{border-bottom:0}.riskPart .riskMark{font-size:11px;font-weight:900}.riskPart b{display:block;font-size:10px}.riskPart small{display:block;color:#74889b;font-size:8px;margin-top:1px}.riskPart strong{font-size:9px}.riskPart.good .riskMark,.riskPart.good strong{color:#4ade80}.riskPart.bad .riskMark,.riskPart.bad strong{color:#fb7185}.riskPart.neutral{color:#94a3b8}
+@media(max-width:760px){
+ .riskSupportToggle{padding:6px 8px;margin:0 0 6px;font-size:8px}.riskSupportBreakdown{padding:3px 7px;margin-bottom:6px}.riskPart{padding:5px 0;grid-template-columns:16px 1fr auto}.riskPart b{font-size:9px}.riskPart small{font-size:7px}.riskPart strong{font-size:8px}
+ .sectorSummaryPanel{padding:8px!important}.sectorSummaryPanel .dashTopline{margin-bottom:4px}.sectorSummaryPanel .dashTitle{font-size:11px}.sectorSummaryPanel .dashTopline .note{font-size:8px}
+ .sectorSummaryPanel tr.sectorTickerRow{grid-template-columns:20px minmax(0,1fr);gap:2px 6px;padding:6px 1px!important}
+ .sectorSummaryPanel tr.sectorTickerRow td:nth-child(1){font-size:9px;padding-top:1px!important}
+ .sectorSummaryPanel tr.sectorTickerRow td:nth-child(2)>b{font-size:12px!important;line-height:1.1}.sectorSummaryPanel tr.sectorTickerRow td:nth-child(2) .tiny{font-size:8px!important;line-height:1.2;margin-top:1px!important}
+ .sectorSummaryPanel tr.sectorTickerRow td:nth-child(3),.sectorSummaryPanel tr.sectorTickerRow td:nth-child(4){gap:4px!important;min-height:18px}.sectorSummaryPanel tr.sectorTickerRow td:nth-child(5){margin-top:0!important}
+ .sectorSummaryPanel tr.sectorTickerRow td:nth-child(3)::before,.sectorSummaryPanel tr.sectorTickerRow td:nth-child(4)::before{font-size:6.5px!important;min-width:42px!important;letter-spacing:.35px!important}
+ .sectorSummaryPanel .badge{font-size:7px!important;padding:2px 5px!important}.sectorSummaryPanel .flag{font-size:7px!important;padding:2px 5px!important}.sectorSummaryPanel td:nth-child(3) .tiny,.sectorSummaryPanel td:nth-child(4) .tiny{font-size:7px!important}
+}
 /* v24 Institutional Decision Layer */
 .instDecisionPanel{border:1px solid #31506c;background:linear-gradient(180deg,#0d1720,#0a1118);margin:12px 0}.instDecisionHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}.instDecisionHead h3{margin:0;font-size:14px}.instDecisionHead .horizon{font-size:10px;font-weight:900;color:#7dd3fc;border:1px solid #24566e;border-radius:999px;padding:4px 8px}.instGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.instCard{border:1px solid #26394b;background:#0b141d;border-radius:8px;padding:9px;min-height:76px}.instCard .k{font-size:8px;letter-spacing:.6px;color:#7f93a8;font-weight:900}.instCard .v{font-size:15px;font-weight:900;margin-top:5px}.instCard .d{font-size:9px;color:#9badbf;line-height:1.45;margin-top:4px}.instSection{margin-top:9px;border-top:1px solid #1d2d3b;padding-top:9px}.instSectionTitle{font-size:9px;font-weight:900;letter-spacing:.7px;color:#cbd5e1;margin-bottom:6px}.instLevelGrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.instLevel{padding:7px;border:1px solid #26394b;border-radius:7px;background:#09121a}.instLevel b{display:block;font-size:12px}.instLevel span{font-size:8px;color:#8193a6}.instFactors{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;margin-top:8px}.instFactor{border:1px solid #2a3e50;border-radius:6px;padding:6px;font-size:8px}.instFactor strong{display:block;font-size:11px;margin-top:2px}.instGood{color:#69e6a6}.instWarn{color:#f6c667}.instBad{color:#fb8d96}.topSetupInstitutional{margin-top:8px;border-top:1px solid #203141;padding-top:7px}.topSetupInstGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}.topSetupInstMetric{font-size:8px;color:#8294a6}.topSetupInstMetric b{display:block;color:#dbe7f2;font-size:10px;margin-top:2px}@media(max-width:900px){.instGrid{grid-template-columns:repeat(2,1fr)}.instLevelGrid{grid-template-columns:repeat(3,1fr)}.instFactors{grid-template-columns:repeat(2,1fr)}.topSetupInstGrid{grid-template-columns:repeat(2,1fr)}}
 </style>
@@ -4231,6 +4246,8 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
       </div>
       <div class="panel">
         <div class="dashTopline"><span class="dashTitle">BREADTH & RISK</span><span id="regimeSummary" class="note">Loading…</span></div>
+        <button type="button" id="riskSupportToggle" class="riskSupportToggle" aria-expanded="false">Risk support details <span>▾</span></button>
+        <div id="riskSupportBreakdown" class="riskSupportBreakdown" hidden></div>
         <div id="dashboardBreadth" class="breadthList"></div>
       </div>
       <div class="panel">
@@ -4576,6 +4593,15 @@ document.addEventListener("click",function(e){const el=e.target.closest(".glossT
 const SOURCE_LABELS={yfinance:"Yahoo (prices)",alpaca_stocks:"Alpaca (stocks)",alpaca_options:"Alpaca (options)",finnhub:"Finnhub",unusual_whales:"Unusual Whales",nasdaq_yahoo_calendar:"Earnings calendar"};
 function timeAgo(iso){if(!iso)return null;const x=Math.max(0,(Date.now()-new Date(iso).getTime())/1000);if(x<60)return "just now";if(x<3600)return Math.round(x/60)+"m ago";if(x<86400)return Math.round(x/3600)+"h ago";return Math.round(x/86400)+"d ago";}
 async function refreshSourceHealth(){const el=document.getElementById("sourceHealthStrip");if(!el)return;try{const r=await fetch("/api/source-health"),j=await r.json();if(!j?.ok||!Array.isArray(j.sources))return;el.innerHTML=j.sources.map(x=>{const label=SOURCE_LABELS[x.name]||x.name;const detail=x.status==="ok"?`Last success ${timeAgo(x.last_success)||"—"}`:x.status==="degraded"?`Falling back — last success ${timeAgo(x.last_success)||"never this session"}, last error ${timeAgo(x.last_error)}`:"Not called yet this session";return `<span class="src" title="${detail.replace(/"/g,'&quot;')}"><span class="dot ${x.status}"></span>${label}</span>`;}).join("");}catch(e){}}
+document.addEventListener("click",function(e){
+ const trigger=e.target.closest("#riskSupportToggle,#riskScoreInline");
+ if(!trigger)return;
+ const box=document.getElementById("riskSupportBreakdown"),btn=document.getElementById("riskSupportToggle");
+ if(!box)return;
+ const opening=box.hasAttribute("hidden");
+ if(opening)box.removeAttribute("hidden");else box.setAttribute("hidden","");
+ if(btn){btn.setAttribute("aria-expanded",opening?"true":"false");const a=btn.querySelector("span");if(a)a.textContent=opening?"▴":"▾";}
+});
 document.addEventListener("DOMContentLoaded",refreshSourceHealth);setInterval(refreshSourceHealth,5*60*1000);
 async function refreshMacroCalendar(){const el=document.getElementById("dashboardMacro");if(!el)return;try{const r=await fetch("/api/macro-calendar?within_days=90"),j=await r.json();if(!j?.ok||!Array.isArray(j.events))return;if(!j.events.length){el.innerHTML=`<div class="note">No confirmed major macro dates in the next 90 days.</div>`;return;}el.innerHTML=j.events.map(e=>{const high=e.importance==="HIGH",urgent=e.days_away<=1&&high,tag=high?"HIGH":(e.importance||"WATCH");return `<div class="breadthRow"><div class="name">${urgent?"⚠️ ":""}${e.label}<div class="tiny">${tag} · ${e.time||"time TBA"} · ${e.source||"official source"}</div></div><div class="val ${urgent?"neg":""}">${e.date}</div><div class="move ${urgent?"neg":""}">${e.days_away}d</div></div>`;}).join("");}catch(e){}}
 document.addEventListener("DOMContentLoaded",refreshMacroCalendar);setInterval(refreshMacroCalendar,60*60*1000);
@@ -5209,9 +5235,25 @@ function applyMarketPayload(j,fromCache=false){
  const valPct=v=>v==null?"—":pct(v);
 
  const regime=document.getElementById("regimeSummary");
+ const riskScoreDisplay=j.risk_score==null?"—":`${Math.max(0,Math.min(4,Math.round((j.risk_score+4)/2)))}/4`;
  if(regime){
-   const score=j.risk_score==null?"—":`${Math.max(0,Math.min(4,Math.round((j.risk_score+4)/2)))}/4`;
-   regime.innerHTML=`<b>${j.risk_appetite||"Mixed"}</b> · Participation: <b>${j.participation||"—"}</b> · Risk support ${score}`;
+   regime.innerHTML=`<b>${j.risk_appetite||"Mixed"}</b> · Participation: <b>${j.participation||"—"}</b> · <button type="button" class="riskScoreInline" id="riskScoreInline">Risk support <b>${riskScoreDisplay}</b></button>`;
+ }
+ const rb=document.getElementById("riskSupportBreakdown");
+ if(rb){
+   const riskParts=[
+     ["Breadth",i.RSP?.d5,"RSP / SPY"],
+     ["Small caps",i.IWM?.d5,"IWM / SPY"],
+     ["Growth",i.QQQ?.d5,"QQQ / SPY"],
+     ["Credit",i.CREDIT?.d5,"HYG / LQD"]
+   ];
+   rb.innerHTML=riskParts.map(([label,v,detail])=>{
+     const known=v!=null,good=known&&Number(v)>0,bad=known&&Number(v)<0;
+     const mark=!known?"—":good?"✓":"✕";
+     const state=!known?"neutral":good?"good":"bad";
+     const move=!known?"—":`${Number(v)>=0?"+":""}${fmt(Number(v),2)}% / 5d`;
+     return `<div class="riskPart ${state}"><span class="riskMark">${mark}</span><div><b>${label}</b><small>${detail}</small></div><strong>${move}</strong></div>`;
+   }).join("");
  }
 
  document.getElementById("internals").innerHTML=`
