@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "24.7"
+APP_VERSION = "24.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4090,6 +4090,73 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 #previewVPStatus{color:#8ea2b5}
 
 
+
+/* v24.8 mobile dashboard + sector summary */
+@media(max-width:760px){
+  html,body{width:100%;max-width:100%;overflow-x:hidden}
+  .wrap{width:100%;max-width:100%;padding:0 8px 18px}
+  .appHeader{display:grid!important;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"brand meta" "nav nav";align-items:center!important;gap:8px 10px;margin:0 -8px 10px;padding:8px 10px;overflow:hidden}
+  .brand{grid-area:brand;min-width:0!important;gap:8px;overflow:hidden}
+  .brandMark{width:34px;height:34px;flex:0 0 34px;font-size:17px}
+  .brandText{min-width:0;overflow:hidden}
+  .brandText b{font-size:13px!important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:.1px}
+  .brandText span{display:none!important}
+  .headerMeta{grid-area:meta;margin-left:0!important;gap:6px;white-space:nowrap}
+  .headerRefresh{padding:6px 8px;font-size:9px}
+  .versionPill{padding:5px 7px;font-size:9px}
+  .appNav{grid-area:nav;order:unset!important;width:100%;max-width:100%;min-width:0;overflow-x:auto;overflow-y:hidden;display:flex;justify-content:flex-start;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  .appNav::-webkit-scrollbar{display:none}
+  .appNav .tab,.navJump{flex:0 0 auto;min-width:74px!important;padding:6px 7px;font-size:9px}
+  .navIcon{font-size:13px}
+
+  .dashboardGrid,.dashCol,.rrgShell,.dashRight,.panel,.sideSection{width:100%;max-width:100%;min-width:0}
+  .dashboardGrid{gap:8px}
+  .rrgShell>.panel{padding:12px}
+  .rrgHeader{display:grid!important;grid-template-columns:1fr;gap:9px;align-items:start}
+  .rrgHeader h2{font-size:16px;line-height:1.2;margin:0}
+  .rrgControlStack{width:100%;align-items:stretch!important}
+  .rrgToggle{display:grid!important;grid-template-columns:1fr 1fr;width:100%}
+  .rrgToggle button{width:100%;min-height:42px}
+  .rrgFilterBar{display:block!important;margin-top:10px}
+  .rrgSelectFilters{display:grid!important;grid-template-columns:1fr!important;gap:8px;width:100%}
+  .rrgSelectFilters label{width:100%;max-width:none!important;min-width:0!important}
+  .rrgSelectFilters select{min-height:42px;font-size:12px;padding:8px 10px}
+  .rrgInlineFilters{width:100%;margin:10px 0 0!important}
+  .rrgInlineFilters .tiny{display:block;margin-bottom:6px}
+  .rrgInlineFilters .filterPills{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;width:100%}
+  .rrgInlineFilters .filterPill{width:100%;min-width:0;padding:7px 4px;font-size:9px;text-align:center}
+  #sectorChart{width:100%!important;height:auto!important;aspect-ratio:1/1.05!important;min-height:0}
+
+  .sectorSummaryPanel{height:auto!important;min-height:0!important;padding:10px!important;margin-top:8px!important}
+  .sectorSummaryPanel .scroll{max-height:none!important;overflow:visible!important}
+  .sectorSummaryPanel table,.sectorSummaryPanel tbody{display:block;width:100%}
+  .sectorSummaryPanel thead{display:none}
+  .sectorSummaryPanel tr.sectorTickerRow{display:grid;grid-template-columns:28px minmax(0,1fr);grid-template-areas:"rank sector" "rank fast" "rank trend" "rank signal";gap:5px 9px;padding:10px 2px;border-bottom:1px solid #1f3140;width:100%}
+  .sectorSummaryPanel tr.sectorTickerRow:last-child{border-bottom:0}
+  .sectorSummaryPanel tr.sectorTickerRow td{display:block!important;border:0!important;padding:0!important;min-width:0!important;width:auto!important}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(1){grid-area:rank;color:#9aa9b9;padding-top:2px!important}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(2){grid-area:sector}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(2)>b{font-size:14px}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(2) .tiny{font-size:10px;line-height:1.35;margin-top:2px}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(3){grid-area:fast;display:flex!important;align-items:center;gap:7px;flex-wrap:wrap}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(4){grid-area:trend;display:flex!important;align-items:center;gap:7px;flex-wrap:wrap}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(5){grid-area:signal;margin-top:1px}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(3)::before,.sectorSummaryPanel tr.sectorTickerRow td:nth-child(4)::before{font-size:8px;letter-spacing:.6px;color:#71859a;font-weight:900;min-width:48px}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(3)::before{content:"FAST 10/5"}
+  .sectorSummaryPanel tr.sectorTickerRow td:nth-child(4)::before{content:"TREND 25/12"}
+  .sectorSummaryPanel .badge{font-size:9px;padding:3px 7px}
+  .sectorSummaryPanel .flag{display:inline-block;font-size:9px}
+  .sectorSummaryPanel td:nth-child(3) .tiny,.sectorSummaryPanel td:nth-child(4) .tiny{display:inline-block;margin:0;font-size:9px}
+  .dashRight .sectorSummaryPanel .scroll{max-height:none!important}
+}
+
+@media(max-width:390px){
+  .brandText b{font-size:12px!important}
+  .headerRefresh{padding:6px 7px}
+  .appNav .tab,.navJump{min-width:68px!important}
+  .rrgInlineFilters .filterPills{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
 /* v24 Institutional Decision Layer */
 .instDecisionPanel{border:1px solid #31506c;background:linear-gradient(180deg,#0d1720,#0a1118);margin:12px 0}.instDecisionHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}.instDecisionHead h3{margin:0;font-size:14px}.instDecisionHead .horizon{font-size:10px;font-weight:900;color:#7dd3fc;border:1px solid #24566e;border-radius:999px;padding:4px 8px}.instGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.instCard{border:1px solid #26394b;background:#0b141d;border-radius:8px;padding:9px;min-height:76px}.instCard .k{font-size:8px;letter-spacing:.6px;color:#7f93a8;font-weight:900}.instCard .v{font-size:15px;font-weight:900;margin-top:5px}.instCard .d{font-size:9px;color:#9badbf;line-height:1.45;margin-top:4px}.instSection{margin-top:9px;border-top:1px solid #1d2d3b;padding-top:9px}.instSectionTitle{font-size:9px;font-weight:900;letter-spacing:.7px;color:#cbd5e1;margin-bottom:6px}.instLevelGrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.instLevel{padding:7px;border:1px solid #26394b;border-radius:7px;background:#09121a}.instLevel b{display:block;font-size:12px}.instLevel span{font-size:8px;color:#8193a6}.instFactors{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;margin-top:8px}.instFactor{border:1px solid #2a3e50;border-radius:6px;padding:6px;font-size:8px}.instFactor strong{display:block;font-size:11px;margin-top:2px}.instGood{color:#69e6a6}.instWarn{color:#f6c667}.instBad{color:#fb8d96}.topSetupInstitutional{margin-top:8px;border-top:1px solid #203141;padding-top:7px}.topSetupInstGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}.topSetupInstMetric{font-size:8px;color:#8294a6}.topSetupInstMetric b{display:block;color:#dbe7f2;font-size:10px;margin-top:2px}@media(max-width:900px){.instGrid{grid-template-columns:repeat(2,1fr)}.instLevelGrid{grid-template-columns:repeat(3,1fr)}.instFactors{grid-template-columns:repeat(2,1fr)}.topSetupInstGrid{grid-template-columns:repeat(2,1fr)}}
 </style>
@@ -4189,7 +4256,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     </main>
 
     <aside class="dashCol dashRight">
-      <div class="sideSection sectorSummaryPanel"><div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend</span></div><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
+      <div class="sideSection sectorSummaryPanel"><div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend</span></div><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Signal</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
     </aside>
   </div>
   <div class="legacyMarketBlock"><button class="primary" id="refreshMarket">Refresh market</button><div id="internals" class="cards"></div></div>
