@@ -40,8 +40,6 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
      lastErr=new Error(j?.error||`Request failed (${r.status})`);
      if(![429,502,503,504].includes(r.status))throw lastErr;
    }
-   // If this browser has a prior good response for the same URL, degrade to it
-   // rather than blanking the whole panel during a transient Render restart.
    const stale=tickerResponseCache.get(url);
    if(stale)return {...stale.value,_client_stale:true};
    throw lastErr||new Error("Request failed");
@@ -52,12 +50,23 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
 async function openSectorStockTicker'''
 s=s[:m.start()]+new+s[m.end():]
 
-# 2) Stop the automatic market-wide Top Setups sector burst on mobile. The
-# dashboard remains usable; Top Setups can be run from a non-mobile session.
-marker='async function runAutomaticTopSetups(){'
-if marker not in s:
-    raise SystemExit('runAutomaticTopSetups marker not found')
-s=s.replace(marker, marker+'''\n if(window.matchMedia&&window.matchMedia("(max-width: 760px)").matches){\n   const st=document.getElementById("topSetupStatus");\n   if(st)st.textContent="Top Setups auto-scan paused on mobile to keep ticker analysis fast.";\n   return;\n }''',1)
+# 2) Stop the automatic market-wide Top Setups burst on mobile. Match the
+# current function name rather than assuming an older exact spelling.
+fn_pat=re.compile(r'(?P<prefix>(?:async\s+)?function\s+(?P<name>[A-Za-z_$][\w$]*Top[A-Za-z_$\w]*Setup[A-Za-z_$\w]*)\s*\([^)]*\)\s*\{)',re.I)
+matches=list(fn_pat.finditer(s))
+if not matches:
+    raise SystemExit('No Top Setup function definition found')
+preferred=None
+for mm in matches:
+    nm=mm.group('name').lower()
+    if 'auto' in nm or 'run' in nm or 'scan' in nm:
+        preferred=mm; break
+if preferred is None:
+    preferred=matches[0]
+insert='''\n if(window.matchMedia&&window.matchMedia("(max-width: 760px)").matches){\n   const st=document.getElementById("topSetupStatus")||document.getElementById("topSetupsStatus");\n   if(st)st.textContent="Top Setups auto-scan paused on mobile to keep ticker analysis fast.";\n   return;\n }'''
+pos=preferred.end()
+s=s[:pos]+insert+s[pos:]
+print('guarded Top Setup function:',preferred.group('name'))
 
 if s==orig:
     raise SystemExit('no changes made')
