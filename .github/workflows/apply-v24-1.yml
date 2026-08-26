@@ -1,0 +1,30 @@
+name: Apply v24.1 swing reliability pass
+on:
+  push:
+    paths:
+      - 'scripts/apply_v24_1_swing_edge.py'
+      - 'scripts/apply_v24_1_frontend.py'
+      - '.github/workflows/apply-v24-1.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/apply_v24_1_swing_edge.py
+      - run: python scripts/apply_v24_1_frontend.py
+      - run: pip install -r requirements-dev.txt
+      - run: python -m py_compile app.py
+      - run: pytest tests/test_core_logic.py -q
+      - name: Commit v24.1
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Build v24.1 swing trader reliability pass"
+          git push
