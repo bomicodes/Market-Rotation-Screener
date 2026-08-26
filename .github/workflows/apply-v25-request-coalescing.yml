@@ -1,0 +1,42 @@
+name: Apply v25 request coalescing
+on:
+  push:
+    paths:
+      - 'scripts/patch_v25_request_coalescing.py'
+      - '.github/workflows/apply-v25-request-coalescing.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_v25_request_coalescing.py
+      - name: Syntax check
+        run: python -m py_compile app.py
+      - name: Verify request pipeline
+        run: |
+          grep -q 'APP_VERSION = "25.0"' app.py
+          grep -q 'yf-frame-v25' app.py
+          grep -q 'with _cache_lock(key)' app.py
+          grep -q 'abars=alpaca_chart_bars(ticker,"1h","3m")' app.py
+      - name: Run core regression tests
+        run: |
+          pip install -r requirements-dev.txt
+          pytest tests/test_core_logic.py -q
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '4189823+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Coalesce ticker data requests and serve stale cache on rate limits'
+          git push
