@@ -1,0 +1,37 @@
+name: Apply RRG v24.2 clarity fix
+on:
+  push:
+    paths:
+      - 'scripts/patch_rrg_composite_clarity.py'
+      - '.github/workflows/apply-rrg-v24-2.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python scripts/patch_rrg_composite_clarity.py
+      - name: Python syntax check
+        run: python -m py_compile app.py
+      - name: Verify expected markers
+        run: |
+          grep -q 'APP_VERSION = "24.2"' app.py
+          grep -q 'True relative composite' app.py
+          grep -q 'v24.2 RRG clarity' app.py
+      - name: Commit patched app
+        run: |
+          if git diff --quiet -- app.py; then
+            echo 'No app.py changes needed.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'Fix RRG composite scoring and canvas clarity'
+          git push
