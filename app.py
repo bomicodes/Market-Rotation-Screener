@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.2"
+APP_VERSION = "25.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4352,7 +4352,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 
 <div id="rotation" class="view active">
   <div class="panel topSetupsPanel">
-    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Automatic market-wide scan · click a setup to dive deeper</span></div><div style="display:flex;align-items:center;gap:8px"><button class="secondary" style="padding:5px 8px;font-size:9px" onclick="runAutomaticTopSetups(true)">↻ Scan all</button><span id="topSetupsStatus" class="note">Waiting for market data</span></div></div>
+    <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Automatic market-wide scan · click a setup to dive deeper</span></div><div style="display:flex;align-items:center;gap:8px"><button class="secondary" style="padding:5px 8px;font-size:9px" onclick="runAutomaticTopSetups(true)">↻ Scan all</button><span id="topSetupsStatus" class="note">Waiting for market data</span> <button class="secondary" id="loadTopSetups" type="button">Load Top Setups</button></div></div>
     <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Automatic scan starts after market data loads.</div></div>
   </div>
   <div class="dashboardGrid">
@@ -6816,9 +6816,12 @@ function preliminaryRRGScore(x){
 }
 
 async function runAutomaticTopSetups(force=false){
- if(window.matchMedia&&window.matchMedia("(max-width: 760px)").matches){
+ // On mobile, suppress only background/automatic scans. An explicit user tap
+ // (force=true) is allowed now that the Render service has more headroom.
+ const isMobile=!!(window.matchMedia&&window.matchMedia("(max-width: 760px)").matches);
+ if(isMobile&&!force){
    const st=document.getElementById("topSetupStatus")||document.getElementById("topSetupsStatus");
-   if(st)st.textContent="Top Setups auto-scan paused on mobile to keep ticker analysis fast.";
+   if(st)st.textContent="Top Setups ready · tap Load Top Setups to scan.";
    return;
  }
  const st=document.getElementById("topSetupsStatus");
@@ -6841,8 +6844,8 @@ async function runAutomaticTopSetups(force=false){
 
    const pool=[];
    // Fetch holdings without changing currentSector/UI selection.
-   for(let n=0;n<supportive.length;n+=4){
-     const batch=supportive.slice(n,n+4);
+   for(let n=0;n<supportive.length;n+=2){
+     const batch=supportive.slice(n,n+2);
      const results=await Promise.all(batch.map(async g=>{
        try{
          const key=cacheKeySector(g.ticker,"20");
@@ -6858,7 +6861,7 @@ async function runAutomaticTopSetups(force=false){
          pool.push({...x,_parentTicker:g.ticker,_parentGroup:g,_parentHeat:sectorHeatScore(g)});
        });
      });
-     if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+4,supportive.length)}/${supportive.length} supportive groups`;
+     if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+2,supportive.length)}/${supportive.length} supportive groups`;
    }
 
    // Deduplicate overlapping ETF holdings; keep the strongest parent-group context.
@@ -6867,7 +6870,7 @@ async function runAutomaticTopSetups(force=false){
      const old=dedupe.get(x.ticker);
      if(!old || Number(x._parentHeat||0)>Number(old._parentHeat||0))dedupe.set(x.ticker,x);
    });
-   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,100);
+   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,60);
    if(!candidates.length)throw Error("No stocks passed the market-wide RRG trajectory gate.");
 
    if(st)st.textContent=`Layer 3 · checking options on ${candidates.length} RRG candidates`;
@@ -7435,6 +7438,12 @@ document.getElementById("dashHeatComposite")?.addEventListener("click",()=>{dash
 document.getElementById("dashHeatFast")?.addEventListener("click",()=>{dashboardHeatMode="fast";document.getElementById("dashHeatFast")?.classList.add("active");document.getElementById("dashHeatComposite")?.classList.remove("active");document.getElementById("dashHeatTrend")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashHeatTrend")?.addEventListener("click",()=>{dashboardHeatMode="trend";document.getElementById("dashHeatTrend")?.classList.add("active");document.getElementById("dashHeatFast")?.classList.remove("active");document.getElementById("dashHeatComposite")?.classList.remove("active");renderDashboardHeat();});
 document.getElementById("dashRefreshMarket")?.addEventListener("click",()=>loadMarket(true));
+document.getElementById("loadTopSetups")?.addEventListener("click",async()=>{
+ const b=document.getElementById("loadTopSetups");
+ if(b)b.disabled=true;
+ try{await runAutomaticTopSetups(true)}finally{if(b)b.disabled=false}
+});
+
 function activateViewById(id){
  const wanted=String(id||"");
  document.querySelectorAll(".tab").forEach(x=>x.classList.toggle("active",String(x.dataset.view||"")===wanted));
