@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.4"
+APP_VERSION = "25.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2831,8 +2831,18 @@ def _context_structure(ticker):
         trigger=lo20;confirmation=trigger-.15*atr;invalidation=min(hi10,sma20+.35*atr);hard_fail=min(hi20,sma50+.5*atr);target1=min(trigger-1.5*atr,spot-1.25*atr);target2=min(trigger-3*atr,spot-2.5*atr);risk=max(.01,invalidation-trigger);reward=max(0,trigger-target2)
     else:
         trigger=confirmation=invalidation=hard_fail=target1=target2=None;risk=reward=None
+    # Integrity gate: directional plans must have levels in the correct order.
+    plan_valid=True;plan_error=None
+    if direction=="bullish" and trigger is not None:
+        plan_valid=(invalidation is not None and target1 is not None and target2 is not None and invalidation < trigger < target1 <= target2)
+        if not plan_valid: plan_error="Invalid bullish level ordering"
+    elif direction=="bearish" and trigger is not None:
+        plan_valid=(invalidation is not None and target1 is not None and target2 is not None and invalidation > trigger > target1 >= target2)
+        if not plan_valid: plan_error="Invalid bearish level ordering"
+    if not plan_valid:
+        trigger=confirmation=invalidation=hard_fail=target1=target2=None;risk=reward=None
     r20=_ctx_return(c,20);r50=_ctx_return(c,50);trend_strength=int(spot>sma20)+int(sma20>sma50)+int(r20 is not None and r20>0)+int(r50 is not None and r50>0)
-    return {"available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,"trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),"trigger":round(trigger,2) if trigger is not None else None,"confirmation":round(confirmation,2) if confirmation is not None else None,"invalidation":round(invalidation,2) if invalidation is not None else None,"hard_fail":round(hard_fail,2) if hard_fail is not None else None,"target1":round(target1,2) if target1 is not None else None,"target2":round(target2,2) if target2 is not None else None,"rr_to_target2":round(reward/risk,2) if risk else None,"return_20d":round(r20,2) if r20 is not None else None,"return_50d":round(r50,2) if r50 is not None else None}
+    return {"available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,"trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),"trigger":round(trigger,2) if trigger is not None else None,"confirmation":round(confirmation,2) if confirmation is not None else None,"invalidation":round(invalidation,2) if invalidation is not None else None,"hard_fail":round(hard_fail,2) if hard_fail is not None else None,"target1":round(target1,2) if target1 is not None else None,"target2":round(target2,2) if target2 is not None else None,"rr_to_target2":round(reward/risk,2) if risk else None,"plan_valid":plan_valid,"plan_error":plan_error,"return_20d":round(r20,2) if r20 is not None else None,"return_50d":round(r50,2) if r50 is not None else None}
 
 
 def institutional_context_payload(ticker,parent=None):
@@ -6781,9 +6791,11 @@ function topSetupEvaluation(x){
  // RRG gate is now trajectory based. A Lagging Trend quadrant is allowed when
  // its tail is rotating NE; a Trend rotating out is not.
  const rrgPass=(align==="FULL"||align==="EARLY");
+ const ctx=(typeof institutionalContextMap!=="undefined")?institutionalContextMap[x.ticker]:null;
+ const structureOk=ctx?.structure?.plan_valid!==false;
  const hardPass=rrgPass && !fOut && !tOut &&
    (liq==="Liquid"||liq==="Tradable") &&
-   va?.strength!=="REJECTION";
+   va?.strength!=="REJECTION" && structureOk;
 
  return {score,reasons,va,stratPass,hardPass,alignment:align};
 }
@@ -6979,7 +6991,9 @@ function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
 
 function setupCompleteness(x,e){
  const c=(typeof institutionalContextMap!=="undefined")?institutionalContextMap[x.ticker]:null,opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],st=stratSignalMap[x.ticker];
- const checks={RRG:!!(e?.alignment&&e.alignment!=="NONE"),Value:!!va,STRAT:!!st,Options:!!opt,Context:!!c,Catalyst:!!(c?.catalyst&&c.catalyst.risk!=="Unknown"),Macro:!!c?.macro_risk};
+ const structure=c?.structure||{};
+ const planOk=structure.plan_valid!==false && Number.isFinite(Number(structure.trigger)) && Number.isFinite(Number(structure.invalidation)) && Number.isFinite(Number(structure.target2));
+ const checks={RRG:!!(e?.alignment&&e.alignment!=="NONE"),Value:!!va,STRAT:!!st,Options:!!opt,Context:!!c,TradePlan:planOk,Catalyst:!!(c?.catalyst&&c.catalyst.risk!=="Unknown"),Macro:!!c?.macro_risk};
  const missing=Object.entries(checks).filter(([,v])=>!v).map(([k])=>k);return {complete:missing.length===0,missing};
 }
 function renderTopSetups(){
@@ -6999,10 +7013,13 @@ function renderTopSetups(){
  // Trigger must be actionable from CURRENT price. A historical VAH/VAL that price
  // has already cleared by a meaningful amount is context, not a fresh entry trigger.
  const opt=optionScanMap[x.ticker]||{};
- const spot=Number(opt.spot??va?.close);
+ const ctx=(typeof institutionalContextMap!=="undefined")?institutionalContextMap[x.ticker]:null;
+ const structure=ctx?.structure||{};
+ const spot=Number(opt.spot??va?.close??structure.spot);
  const vah=Number(va?.vah),val=Number(va?.val);
  let trigger="Load chart for VAH / VAL";
- if(va){
+ if(structure.plan_valid===false) trigger="Trade plan invalidated by level-integrity check · re-resolve structure";
+ if(va && structure.plan_valid!==false){
    if(va.direction==="bullish"&&Number.isFinite(vah)){
      const ext=Number.isFinite(spot)&&spot>0?(spot-vah)/vah*100:null;
      trigger=ext!=null&&ext>1.0
