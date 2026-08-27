@@ -1,3 +1,8 @@
+v25.10 — PREMIUM SCANNER VISIBILITY / FALLBACK
+- Premium Support no longer fails silently on Top Setup cards: every finalist now shows the selected premium setup or an explicit unavailable/not-evaluated diagnostic.
+- Historical option bars retry with Alpaca indicative feed if OPRA historical access is rejected.
+- Relaxed the candidate prefilter from OI>=75 + volume>=10 + spread<=22% to OI>=50 + spread<=25%; current-day volume no longer blocks a contract that has useful historical premium structure.
+
 v25.9 — PREMIUM SUPPORT / COMPRESSION SCANNER
 - Added contract-level historical premium analysis for Top Setup finalists using Alpaca historical daily option bars. The scanner looks for liquid 7–35 DTE OTM calls/puts whose premium is near a repeatedly-tested 20-day support zone, with range compression and prior expansion potential.
 - Premium Support Score combines distance to the premium floor, repeated support tests, range compression, reversal confirmation, prior-high expansion multiple, and execution quality. It is a confirmation layer rather than a hard gate because option premium support decays with theta/IV and is not equivalent to stock support.

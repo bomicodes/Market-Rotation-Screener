@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.9"
+APP_VERSION = "25.10"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2110,7 +2110,9 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
         if token:params["page_token"]=token
         elif "page_token" in params:params.pop("page_token",None)
         r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
-        if r.status_code in (401,403):raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} historical option-bar access was rejected.")
+        if r.status_code in (401,403) and params.get("feed")!="indicative":
+            params["feed"]="indicative"
+            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
         if r.status_code==429:
             time.sleep(.75);r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
         r.raise_for_status();j=r.json() or {};bars=j.get("bars") or {}
@@ -2164,7 +2166,7 @@ def premium_support_payload(ticker,direction="bullish",options_payload=None):
         if dte is None or dte<7 or dte>35:continue
         otm=((spot-strike)/spot*100) if want_put else ((strike-spot)/spot*100)
         if otm<=0 or otm>10:continue
-        if spread is None or spread>22 or oi<75 or vol<10:continue
+        if spread is None or spread>25 or oi<50:continue
         if delta and not (.15<=delta<=.55):continue
         exec_score=(20 if spread<=8 else 16 if spread<=12 else 11)+(8 if oi>=500 else 5 if oi>=200 else 2)+(6 if vol>=100 else 3 if vol>=25 else 1)
         shape_score=(10 if 2<=otm<=7 else 6)+(8 if .22<=delta<=.45 else 4)+(6 if mid<=3 else 4 if mid<=5 else 1)
@@ -7063,6 +7065,7 @@ async function runAutomaticTopSetups(force=false){
        try{
          const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=${encodeURIComponent(direction)}`),j=await r.json();
          if(r.ok&&j.ok)premiumSupportMap[x.ticker]=j;
+         else premiumSupportMap[x.ticker]={available:false,reason:j?.error||`HTTP ${r.status}`};
        }catch(e){console.warn("premium support",x.ticker,e)}
      }));
    }
@@ -7161,7 +7164,7 @@ function renderTopSetups(){
  g.innerHTML=rows.map(({x,e},i)=>{
  const va=e.va,complete=setupCompleteness(x,e),label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";
  const pc=e.premiumSupport?.best_contract;
- const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · ${pc.state}</b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:"";
+ const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · ${pc.state}</b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);
  // Trigger must be actionable from CURRENT price. A historical VAH/VAL that price
  // has already cleared by a meaningful amount is context, not a fresh entry trigger.
  const opt=optionScanMap[x.ticker]||{};
