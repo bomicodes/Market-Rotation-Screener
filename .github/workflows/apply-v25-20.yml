@@ -1,0 +1,35 @@
+name: Apply v25.20
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v25-20.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply feature patch
+        run: |
+          git apply --check .patches/v25.20.patch
+          git apply .patches/v25.20.patch
+          sed -i 's/APP_VERSION = "25.19"/APP_VERSION = "25.20"/' app.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          grep -q 'APP_VERSION = "25.20"' app.py
+          grep -q 'directionMismatch' app.py
+          grep -q 'AWAY FROM SUPPORT":"instBad' app.py
+          grep -q 'EARLY TURN WATCH' app.py
+          if [ -f requirements-dev.txt ]; then pip install -q -r requirements-dev.txt && pytest -q; fi
+      - name: Commit and cleanup
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git rm -f .patches/v25.20.patch .github/workflows/apply-v25-20.yml
+          git commit -m 'v25.20: guard direction mismatch and color premium state'
+          git push
