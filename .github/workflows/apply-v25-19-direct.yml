@@ -12,6 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Apply exact patch
         run: |
+          printf '\n' >> .patches/v25.19.patch
           git apply --check .patches/v25.19.patch
           git apply .patches/v25.19.patch
       - name: Validate
