@@ -1,0 +1,66 @@
+name: Apply v25.12 Alpaca option history fix
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v25-12.yml'
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Patch app.py
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app.py')
+          s=p.read_text()
+          s=s.replace('APP_VERSION = "25.11"','APP_VERSION = "25.12"',1)
+          old='params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.strftime("%Y-%m-%d"),"end":end.strftime("%Y-%m-%d"),"feed":ALPACA_OPTIONS_FEED,"limit":10000,"sort":"asc"}'
+          if old in s:
+              new='params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.strftime("%Y-%m-%d"),"end":end.strftime("%Y-%m-%d"),"limit":10000,"sort":"asc"}'
+              s=s.replace(old,new,1)
+          else:
+              # v25.11 uses RFC3339 timestamps; remove only the unsupported option-bars feed parameter.
+              s=s.replace(',"feed":ALPACA_OPTIONS_FEED,"limit":10000',',"limit":10000',1)
+          old_retry='''        if r.status_code in (401,403) and params.get("feed")!="indicative":
+            params["feed"]="indicative"
+            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
+'''
+          s=s.replace(old_retry,'',1)
+          # If v25.11 changed the diagnostic branch but retained the same fallback semantics,
+          # remove any remaining assignment of a feed query parameter in this function.
+          start_i=s.index('def alpaca_option_daily_bars(')
+          end_i=s.index('\ndef _premium_support_metrics', start_i)
+          block=s[start_i:end_i]
+          if 'params["feed"]' in block or '"feed":ALPACA_OPTIONS_FEED' in block:
+              raise SystemExit('unsupported feed parameter still present in alpaca_option_daily_bars')
+          p.write_text(s)
+          PY
+      - name: Update changelog
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('README.txt')
+          s=p.read_text()
+          note='''v25.12 — ALPACA OPTION HISTORY QUERY FIX
+- Removed the unsupported `feed` query parameter from `/v1beta1/options/bars`. Alpaca's option historical bars endpoint rejects it with HTTP 400 (`unexpected query parameter(s): feed`).
+- Removed the obsolete OPRA→indicative retry for historical option bars; access is determined by the account/data entitlement rather than a `feed` query parameter on this endpoint.
+- Premium Support scanning can now reach the historical-bars response instead of failing before analysis.
+
+'''
+          if not s.startswith('v25.12'):
+              p.write_text(note+s)
+          PY
+      - name: Remove one-shot workflow
+        run: git rm .github/workflows/apply-v25-12.yml
+      - name: Commit
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py README.txt
+          git commit -m 'Apply v25.12 Alpaca option history fix'
+          git push origin main
