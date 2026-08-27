@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.24"
+APP_VERSION = "25.25"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5340,9 +5340,9 @@ function renderLiveWatchlist(){
    document.querySelectorAll("[data-watch-open]").forEach(row=>row.addEventListener("click",evt=>{
      if(evt.target.closest("[data-live-watch-remove]"))return;
      const t=row.dataset.watchOpen;if(!t)return;
-     loadChartPreview(t);
-     loadStrat(t);
-     if(alpacaConfigured!==false)loadOptionsTicker(t,{scroll:false});
+     // Use the same isolated, stale-safe opener as RRG rows and heat-map tiles.
+     Promise.resolve(openSectorStockTicker(t,{scroll:true}))
+       .catch(e=>console.warn("Watchlist ticker open failed",e));
    }));
    document.querySelectorAll("[data-live-watch-remove]").forEach(btn=>btn.addEventListener("click",()=>{
      const ticker=btn.dataset.liveWatchRemove,key=liveWatchKey(ticker);
@@ -6099,12 +6099,12 @@ async function checkAlpacaStatus(){
 function safeScrollIntoView(el,{smooth=false}={}){
  if(!el)return false;
  try{
-   // Avoid the WebKit overload that can throw the opaque DOMException
-   // “The string did not match the expected pattern.”
-   el.scrollIntoView(smooth);
+   // Prefer standards-based top alignment. If an older WebKit build rejects
+   // the options overload, immediately fall back to the legacy Boolean form.
+   el.scrollIntoView({behavior:smooth?"smooth":"auto",block:"start"});
    return true;
  }catch(e){
-   try{el.scrollIntoView();return true;}catch(_e){return false;}
+   try{el.scrollIntoView(true);return true;}catch(_e){return false;}
  }
 }
 function focusOptionsPanel(){
@@ -7397,9 +7397,9 @@ function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
  if(target==="gex"){
    setTimeout(()=>{try{mountGexPage();safeScrollIntoView(document.getElementById("positioningSection"))}catch(e){}},250);
  }else if(target==="options"){
-   setTimeout(()=>{try{const el=document.getElementById("optionsPanel");if(el)el.scrollIntoView()}catch(e){}},100);
+   setTimeout(()=>{safeScrollIntoView(document.getElementById("optionsPanel"))},100);
  }else{
-   setTimeout(()=>{try{const el=document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart");if(el)el.scrollIntoView()}catch(e){}},100);
+   setTimeout(()=>{safeScrollIntoView(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"))},100);
  }
  if(status)status.textContent=`${sym} opened`;
 }
