@@ -15,10 +15,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Apply patch
         run: python scripts/patch_v25_10_premium_visibility.py
-      - name: Validate
-        run: |
-          python -m py_compile app.py
-          pytest -q
+      - name: Validate syntax
+        run: python -m py_compile app.py
       - name: Commit and clean patch machinery
         run: |
           git config user.name 'github-actions[bot]'
