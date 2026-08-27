@@ -1,0 +1,41 @@
+name: Fix premium history v25.11
+on:
+  push:
+    paths: ['.github/workflows/fix-premium-history-v25-11.yml']
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch request window and diagnostics
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('app.py'); s=p.read_text()
+          old='''    end=pd.Timestamp.now().normalize()+pd.Timedelta(days=1)\n    start=end-pd.Timedelta(days=max(25,int(lookback_days or 55)))\n    params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.strftime("%Y-%m-%d"),"end":end.strftime("%Y-%m-%d"),"feed":ALPACA_OPTIONS_FEED,"limit":10000,"sort":"asc"}'''
+          new='''    # Use an actual UTC timestamp as the end bound. The previous code\n    # normalized server time and then added a day; after UTC midnight this\n    # could send Alpaca an end date nearly two calendar days in the future,\n    # which the historical options endpoint rejects with HTTP 400.\n    end=pd.Timestamp.now(tz="UTC")-pd.Timedelta(minutes=1)\n    start=end-pd.Timedelta(days=max(25,int(lookback_days or 55)))\n    params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.isoformat().replace("+00:00","Z"),"end":end.isoformat().replace("+00:00","Z"),"feed":ALPACA_OPTIONS_FEED,"limit":10000,"sort":"asc"}'''
+          assert old in s, 'date-window anchor not found'
+          s=s.replace(old,new,1)
+          old='''        r.raise_for_status();j=r.json() or {};bars=j.get("bars") or {}'''
+          new='''        if not r.ok:\n            # Preserve Alpaca's response body so a bad parameter/entitlement\n            # is diagnosable from the Top Setups card instead of only showing\n            # the generic requests 400/403 message.\n            detail=(r.text or "").strip()[:500]\n            raise RuntimeError(f"Alpaca option history HTTP {r.status_code}: {detail or r.reason}")\n        j=r.json() or {};bars=j.get("bars") or {}'''
+          assert old in s, 'response anchor not found'
+          s=s.replace(old,new,1)
+          s=s.replace('APP_VERSION = "25.10"','APP_VERSION = "25.11"',1)
+          p.write_text(s)
+          r=Path('README.txt'); rs=r.read_text()
+          r.write_text('''v25.11 — PREMIUM HISTORY 400 FIX\n- Fixed Alpaca historical option-bar requests using a future calendar date as the end bound when the Render server had crossed UTC midnight. Requests now use the actual current UTC timestamp (minus one minute) in RFC-3339 form.\n- Alpaca option-history failures now preserve the API response body on the Top Setup diagnostic, so any remaining parameter or entitlement problem is explicit rather than a generic HTTP 400.\n\n'''+rs)
+          PY
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          if [ -f requirements-dev.txt ]; then pip install -q -r requirements-dev.txt && pytest -q; fi
+      - name: Commit and self-delete
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py README.txt
+          git rm .github/workflows/fix-premium-history-v25-11.yml
+          git commit -m 'v25.11: fix Alpaca premium history request window'
+          git push
