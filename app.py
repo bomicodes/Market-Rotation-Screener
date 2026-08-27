@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.20"
+APP_VERSION = "25.21"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -3740,8 +3740,8 @@ def api_postearnings_opportunities():
     terminate long synchronous requests with a 502. This endpoint discovers and
     ranks stock candidates first; the browser then hydrates options per row.
     """
-    try:
-        recent_days=max(3,min(10,int(request.args.get("days","5"))))
+    recent_days=max(3,min(10,int(request.args.get("days","5"))))
+    def _build():
         all_holdings={}; parent_map={}; sources=set()
         for etf in RRG_UNIVERSE:
             try:
@@ -3760,8 +3760,8 @@ def api_postearnings_opportunities():
         reporters=[s for s in tickers if s in recent_map]
         now=pd.Timestamp.now().normalize()
         if not reporters:
-            return jsonify({"ok":True,"results":[],"universe":len(tickers),
-                            "recent_reporters":0,"diagnostics":diag})
+            return {"results":[],"universe":len(tickers),
+                    "recent_reporters":0,"diagnostics":diag}
 
         # One batch price request supplies both RRG and current post-earnings move.
         prices=dl_prices(["SPY"]+reporters,"18mo")
@@ -3877,10 +3877,15 @@ def api_postearnings_opportunities():
                     if x:rows.append(x)
                 except Exception:pass
         rows.sort(key=lambda x:-x.get("opportunity_score",0))
-        return jsonify({"ok":True,"results":rows[:8],"universe":len(tickers),
-                        "recent_reporters":len(reporters),"recent_days":recent_days,
-                        "diagnostics":diag,"holdings_sources":sorted(sources),
-                        "options_deferred":True})
+        return {"results":rows[:8],"universe":len(tickers),
+                "recent_reporters":len(reporters),"recent_days":recent_days,
+                "diagnostics":diag,"holdings_sources":sorted(sources),
+                "options_deferred":True}
+
+    try:
+        key=f"postearnings-opportunities-v1:{recent_days}"
+        payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 

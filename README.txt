@@ -1,3 +1,7 @@
+v25.21 — POST-EARNINGS SCANNER 502 FIX
+- Wrapped /api/postearnings-opportunities in cached_refresh_safe with a 5-minute TTL so repeat requests do not rerun the full discovery pipeline.
+- A genuine refresh failure can now serve the last known-good result as stale, with the refresh error preserved, instead of returning a hard failure when cached data exists.
+
 v25.20 — DIRECTION MISMATCH GUARD + PREMIUM STATE COLOR CODING
 - Ported the v25.17 safety fixes onto the current v25.19 build without removing Early Turn Watch.
 - Top Setup premium states are now visually coded: REVERSAL CONFIRMED / AT SUPPORT green, NEAR SUPPORT / CHEAP-UNPROVEN yellow, AWAY FROM SUPPORT red.
