@@ -27,6 +27,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app.py README.txt
-          git rm .patches/v25.19.patch .github/workflows/apply-v25-19-direct.yml
+          git rm -f .patches/v25.19.patch .github/workflows/apply-v25-19-direct.yml
           git commit -m 'v25.19: add Early Turn Watch'
           git push
