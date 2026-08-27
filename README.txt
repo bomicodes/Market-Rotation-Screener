@@ -1,3 +1,8 @@
+v25.20 — DIRECTION MISMATCH GUARD + PREMIUM STATE COLOR CODING
+- Ported the v25.17 safety fixes onto the current v25.19 build without removing Early Turn Watch.
+- Top Setup premium states are now visually coded: REVERSAL CONFIRMED / AT SUPPORT green, NEAR SUPPORT / CHEAP-UNPROVEN yellow, AWAY FROM SUPPORT red.
+- If the institutional structure model direction conflicts with the setup thesis direction (value acceptance, then STRAT fallback), trigger/invalidation/target presentation is withheld and replaced with an explicit warning instead of showing a backwards ladder.
+
 v25.19 — EARLY TURN WATCH: SECTOR-LED PATH
 - Reported example (a trader's IGV/CRM call): the real trade thesis often operates one level up from any single stock's own RRG position — "IGV, the whole software sector ETF, has the strongest tail of any sector and is heading into Improving" — then picking a liquid holding within that sector (CRM) for options, regardless of CRM's own individual RRG state.
 - v25.18's Early Turn Watch only looked at stocks whose OWN tail was turning, inside sectors already passing groupTrajectoryPass — it would never have surfaced CRM off of IGV's move, since IGV itself was still Lagging and wouldn't pass that gate.

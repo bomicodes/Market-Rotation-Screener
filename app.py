@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.19"
+APP_VERSION = "25.20"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7364,7 +7364,8 @@ function renderTopSetups(){
  g.innerHTML=rows.map(({x,e},i)=>{
  const va=e.va,complete=setupCompleteness(x,e),label=usingPremiumWatch?"PREMIUM SUPPORT WATCH":(e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH"),alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";
  const pc=e.premiumSupport?.best_contract;
- const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · ${pc.state}</b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);
+ const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","CHEAP / UNPROVEN":"instWarn","AWAY FROM SUPPORT":"instBad"}[pc.state]||""):"";
+ const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);
  // Trigger must be actionable from CURRENT price. A historical VAH/VAL that price
  // has already cleared by a meaningful amount is context, not a fresh entry trigger.
  const opt=optionScanMap[x.ticker]||{};
@@ -7887,6 +7888,26 @@ const _topSetupEvaluationV23=topSetupEvaluation;topSetupEvaluation=function(x){c
 const _renderTopSetupsV23=renderTopSetups;renderTopSetups=function(){_renderTopSetupsV23();const g=document.getElementById("topSetupsGrid");if(!g)return;(globalTopSetupData||[]).forEach(x=>{});g.querySelectorAll('[data-top-setup]').forEach(card=>{const ticker=card.dataset.topSetup,x=(globalTopSetupData||[]).find(z=>z.ticker===ticker);if(!x)return;const e=topSetupEvaluation(x),c=e.context;if(!c)return;const s=c.structure||{},old=card.querySelector('.topSetupInstitutional');if(old)old.remove();const d=document.createElement('div');d.className='topSetupInstitutional';d.innerHTML=`<div class="topSetupInstGrid">${(e.factors||[]).map(z=>`<div class="topSetupInstMetric">${z[0]}<b>${z[1]}/10</b></div>`).join('')}</div><div class="tiny" style="margin-top:6px">${c.horizon} · trigger ${instMoney(s.trigger)} · invalidation ${instMoney(s.invalidation)} · T2 ${instMoney(s.target2)} · R:R ${s.rr_to_target2??'—'}×${c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=10?` · <span class="instWarn">earnings ${c.catalyst.days_to_earnings}d</span>`:''}</div>`;const actions=card.querySelector('.topSetupActions');card.insertBefore(d,actions||null);const score=card.querySelector('.topSetupScore');if(score)score.textContent=`${e.score}/100`})};
 const _runAutomaticTopSetupsV23=runAutomaticTopSetups;runAutomaticTopSetups=async function(force=false){await _runAutomaticTopSetupsV23(force);const rows=(globalTopSetupData||[]).slice(0,10);for(let n=0;n<rows.length;n+=3)await Promise.all(rows.slice(n,n+3).map(x=>loadInstitutionalContext(x.ticker,x._parentTicker||null,true)));renderTopSetups()};
 const _openSectorStockTickerV23=openSectorStockTicker;openSectorStockTicker=async function(rawTicker,opts={}){const ticker=normalizeStockTicker(rawTicker),parent=currentSector,out=await _openSectorStockTickerV23(rawTicker,opts);setTimeout(()=>loadInstitutionalContext(ticker,parent,false),350);return out};const _openTopSetupDeepDiveV23=openTopSetupDeepDive;openTopSetupDeepDive=function(ticker,parentTicker=null,target="chart"){const out=_openTopSetupDeepDiveV23(ticker,parentTicker,target);loadInstitutionalContext(ticker,parentTicker||currentSector,false);return out};const _renderFlowV23=renderFlow;renderFlow=function(x){const out=_renderFlowV23(x);if(x?.ticker&&institutionalContextMap[x.ticker])renderInstitutionalContext(x.ticker);return out};const _renderOptionsPanelV23=renderOptionsPanel;renderOptionsPanel=function(){const out=_renderOptionsPanelV23();if(activeOptionsData?.ticker&&institutionalContextMap[activeOptionsData.ticker])renderInstitutionalContext(activeOptionsData.ticker);return out};
+
+// v25.20: final presentation guard for structure/thesis direction mismatch.
+const _renderTopSetupsV25_20=renderTopSetups;
+renderTopSetups=function(){
+ const out=_renderTopSetupsV25_20();
+ const g=document.getElementById("topSetupsGrid");if(!g)return out;
+ g.querySelectorAll('[data-top-setup]').forEach(card=>{
+   const ticker=card.dataset.topSetup,x=(globalTopSetupData||[]).find(z=>z.ticker===ticker);if(!x)return;
+   const e=topSetupEvaluation(x),c=e.context||((typeof institutionalContextMap!=="undefined")?institutionalContextMap[ticker]:null);if(!c)return;
+   const s=c.structure||{},va=e.va,strat=(typeof stratSignalMap!=="undefined")?stratSignalMap[ticker]:null;
+   const thesisDirection=(va?.direction&&va.direction!=="neutral")?va.direction:((strat?.continuity==="bullish"||strat?.continuity==="bearish")?strat.continuity:null);
+   const structureDirection=s.direction&&s.direction!=="neutral"?s.direction:null;
+   const directionMismatch=!!(thesisDirection&&structureDirection&&thesisDirection!==structureDirection&&s.trigger!=null);
+   if(!directionMismatch)return;
+   const inst=card.querySelector('.topSetupInstitutional');if(!inst)return;
+   const details=inst.querySelectorAll('.tiny');const line=details.length?details[details.length-1]:null;if(!line)return;
+   line.innerHTML=`<span class="instBad">⚠ Structure model reads ${String(structureDirection).toUpperCase()} while this setup's thesis is ${String(thesisDirection).toUpperCase()} — trigger/invalidation levels withheld pending alignment.</span>`;
+ });
+ return out;
+};
 </script>
 """
 @app.errorhandler(500)
