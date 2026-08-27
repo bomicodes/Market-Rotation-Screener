@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.7"
+APP_VERSION = "25.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2831,14 +2831,27 @@ def _context_structure(ticker):
         trigger=lo20;confirmation=trigger-.15*atr;invalidation=min(hi10,sma20+.35*atr);hard_fail=min(hi20,sma50+.5*atr);target1=min(trigger-1.5*atr,spot-1.25*atr);target2=min(trigger-3*atr,spot-2.5*atr);risk=max(.01,invalidation-trigger);reward=max(0,trigger-target2)
     else:
         trigger=confirmation=invalidation=hard_fail=target1=target2=None;risk=reward=None
-    # Integrity gate: directional plans must have levels in the correct order.
+    # Integrity gate: directional plans must have levels in the correct order,
+    # AND the trigger must still be within a plausible distance of current
+    # price. A trigger can pass the ordering check yet be a stale relic of a
+    # large intra-window move (e.g. a rally from the 20-day low to a spike and
+    # back) that's left the 20-day extreme many ATRs away from where price
+    # actually is now — technically ordered, but not an actionable near-term
+    # level. Three ATRs matches this plan's own target2 convention (trigger
+    # +/- 3*atr) — a trigger already that far from spot describes a price
+    # regime the stock has since moved on from.
     plan_valid=True;plan_error=None
+    max_trigger_distance=3*atr if atr>0 else None
     if direction=="bullish" and trigger is not None:
         plan_valid=(invalidation is not None and target1 is not None and target2 is not None and invalidation < trigger < target1 <= target2)
         if not plan_valid: plan_error="Invalid bullish level ordering"
+        elif max_trigger_distance is not None and abs(spot-trigger)>max_trigger_distance:
+            plan_valid=False;plan_error="Trigger is too far from current price (stale 20-day level after a large move)"
     elif direction=="bearish" and trigger is not None:
         plan_valid=(invalidation is not None and target1 is not None and target2 is not None and invalidation > trigger > target1 >= target2)
         if not plan_valid: plan_error="Invalid bearish level ordering"
+        elif max_trigger_distance is not None and abs(spot-trigger)>max_trigger_distance:
+            plan_valid=False;plan_error="Trigger is too far from current price (stale 20-day level after a large move)"
     if not plan_valid:
         trigger=confirmation=invalidation=hard_fail=target1=target2=None;risk=reward=None
     r20=_ctx_return(c,20);r50=_ctx_return(c,50);trend_strength=int(spot>sma20)+int(sma20>sma50)+int(r20 is not None and r20>0)+int(r50 is not None and r50>0)
@@ -4502,6 +4515,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
           </div>
         </div>
       </div>
+      <div class="tiny" id="vpSessionLabel" style="color:#7f97a8;margin:2px 0 4px">Session: —</div>
       <div class="vpLevelStrip" id="vpLevelStrip">
         <div class="vpLevelItem"><span class="vpSwatch vah"></span><span class="glossTerm" data-gloss="VAH">VAH</span><strong id="vpVahTop">—</strong></div>
         <div class="vpLevelItem"><span class="vpSwatch poc"></span><span class="glossTerm" data-gloss="POC">POC</span><strong id="vpPocTop">—</strong></div>
@@ -4524,6 +4538,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
           <div><span class="vaEyebrow">VALUE ACCEPTANCE</span><strong id="valueAcceptanceState">Awaiting chart</strong></div>
           <span class="vaPill neutral" id="valueAcceptancePill">—</span>
         </div>
+        <div class="tiny" id="valueAcceptanceRefLabel" style="color:#7f97a8;margin-top:2px">Reference: —</div>
         <div class="valueAcceptanceLevels">
           <span>VAH <b id="analysisVah">—</b></span>
           <span>POC <b id="analysisPoc">—</b></span>
@@ -6232,12 +6247,14 @@ function classifyValueAcceptance(payload){
 
 function renderValueAcceptance(sig){
  const card=document.getElementById("valueAcceptanceCard"),state=document.getElementById("valueAcceptanceState"),
-       pill=document.getElementById("valueAcceptancePill"),detail=document.getElementById("valueAcceptanceDetail");
+       pill=document.getElementById("valueAcceptancePill"),detail=document.getElementById("valueAcceptanceDetail"),
+       refLabel=document.getElementById("valueAcceptanceRefLabel");
  if(!card||!state||!pill||!detail)return;
  const vah=document.getElementById("analysisVah"),poc=document.getElementById("analysisPoc"),val=document.getElementById("analysisVal");
  if(!sig){
    card.className="valueAcceptanceCard neutral";state.textContent="Profile unavailable";pill.className="vaPill neutral";pill.textContent="—";
    detail.textContent="Needs a completed prior-session/prior-week profile.";
+   if(refLabel)refLabel.textContent="Reference: —";
    if(vah)vah.textContent="—";if(poc)poc.textContent="—";if(val)val.textContent="—";return;
  }
  card.className=`valueAcceptanceCard ${sig.kind}`;
@@ -6245,6 +6262,11 @@ function renderValueAcceptance(sig){
  pill.className=`vaPill ${sig.kind}`;
  pill.textContent=sig.strength;
  detail.textContent=sig.detail;
+ // Explicit session label: this card intentionally compares price against the
+ // last COMPLETED reference session/week, not the latest one shown in the
+ // Chart Preview legend above — those are deliberately different reference
+ // points and were previously indistinguishable without reading the detail text.
+ if(refLabel)refLabel.textContent=`Reference: ${sig.referenceLabel||"—"}`;
  if(vah)vah.textContent=`$${sig.vah.toFixed(2)}`;
  if(poc)poc.textContent=`$${sig.poc.toFixed(2)}`;
  if(val)val.textContent=`$${sig.val.toFixed(2)}`;
@@ -6478,13 +6500,17 @@ function drawPricePreview(payload){
  }
 
  // Latest profile values used by header badges when Per Session is active.
- let activeLatest=null;
+ let activeLatest=null,activeLatestDate=null;
  if(previewVPMode==="auto"){
    if(previewTimeframe==="1w"){
-     const last=rows[rows.length-1];activeLatest=weekMap.get(weekKey(last))||null;
+     const last=rows[rows.length-1],wk=weekKey(last);activeLatest=weekMap.get(wk)||null;if(activeLatest)activeLatestDate=wk;
    }else{
-     for(let i=rows.length-1;i>=0&&!activeLatest;i--)activeLatest=sessionMap.get(rowDateKey(rows[i]))||null;
+     for(let i=rows.length-1;i>=0&&!activeLatest;i--){const dk=rowDateKey(rows[i]);const found=sessionMap.get(dk);if(found){activeLatest=found;activeLatestDate=dk;}}
    }
+ }else if(previewVPMode==="session"){
+   const sessions=visibleProfiles.sessions||[];if(sessions.length)activeLatestDate=sessions[sessions.length-1].date;
+ }else if(previewVPMode==="previous"){
+   const sessions=visibleProfiles.sessions||[];if(sessions.length>=2)activeLatestDate=sessions[sessions.length-2].date;
  }
 
  // Current price badge.
@@ -6506,6 +6532,7 @@ function drawPricePreview(payload){
 
  // Expose the last visible per-session profile for the top badges/stats.
  payload._activeSessionProfile=activeLatest||singleVp||null;
+ payload._activeSessionDate=activeLatestDate;
 }
 
 
@@ -6595,10 +6622,14 @@ async function loadChartPreview(ticker,period=previewPeriod){
    if(previewVPMode==="session")activeVp=p.session;
    else if(previewVPMode==="previous")activeVp=p.previous;
 
-   const topVah=document.getElementById("vpVahTop"),topPoc=document.getElementById("vpPocTop"),topVal=document.getElementById("vpValTop");
+   const topVah=document.getElementById("vpVahTop"),topPoc=document.getElementById("vpPocTop"),topVal=document.getElementById("vpValTop"),sessLabel=document.getElementById("vpSessionLabel");
    if(topVah)topVah.textContent=activeVp?`$${Number(activeVp.vah).toFixed(2)}`:"—";
    if(topPoc)topPoc.textContent=activeVp?`$${Number(activeVp.poc).toFixed(2)}`:"—";
    if(topVal)topVal.textContent=activeVp?`$${Number(activeVp.val).toFixed(2)}`:"—";
+   if(sessLabel){
+     const modeName=previewVPMode==="previous"?"Previous session":previewVPMode==="session"?"Session":"Latest available session";
+     sessLabel.textContent=activeVp?`Session: ${modeName}${j._activeSessionDate?` (${j._activeSessionDate})`:""} — may differ from the Value Acceptance card's prior-session reference`:"Session: —";
+   }
 
    if(activeVp?.bins?.length){
      const prices=activeVp.bins.map(b=>Number(b.price)).filter(Number.isFinite);
