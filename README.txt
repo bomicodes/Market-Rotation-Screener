@@ -1,3 +1,8 @@
+v25.15 — PREMIUM SUPPORT WATCH FALLBACK
+- Top Setups no longer goes completely blank when no stock passes the full A-quality hard gate but a finalist has a genuinely strong premium-floor setup.
+- A-quality gating is unchanged. When zero A-quality names exist, the UI may instead show up to six PREMIUM SUPPORT WATCH cards from the already-vetted finalist universe when the contract is REVERSAL CONFIRMED / AT SUPPORT / NEAR SUPPORT with Premium Support Score >=60.
+- Premium watches are explicitly labeled as stock-confirmation-pending scouting candidates, not trade calls.
+
 v25.14 — PREMIUM SUPPORT FULL 7–90 DTE CHAIN
 - Premium Support now builds its own complete 7–90 DTE Alpaca option chain instead of consuming the generic options-quality payload, which intentionally truncates its UI list to 120 contracts.
 - This guarantees 36–60 and 61–90 DTE contracts can actually reach the premium-support bucket selector even when a ticker has a very large front-month chain.

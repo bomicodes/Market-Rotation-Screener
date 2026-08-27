@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.14"
+APP_VERSION = "25.15"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7183,15 +7183,26 @@ function renderTopSetups(){
  const source=(globalTopSetupData&&globalTopSetupData.length)?globalTopSetupData:[];
  // Show a useful shortlist rather than only the top two. Keep the hard quality
  // gate, but surface up to six qualified names so the trader can compare setups.
- const qualified=source.map(x=>({x,e:topSetupEvaluation(x)})).filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score);
- const rows=qualified.slice(0,6);
- if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`:"No A-quality setup currently";
+ const evaluated=source.map(x=>({x,e:topSetupEvaluation(x)}));
+ const qualified=evaluated.filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score);
+ // Keep the full A-quality gate intact. If none pass, surface strong premium
+ // support candidates from the already-vetted finalist universe as WATCHES.
+ const premiumWatch=evaluated.filter(z=>{
+   const pc=z.e.premiumSupport?.best_contract;
+   if(!pc||z.e.hardPass)return false;
+   const state=String(pc.state||"");
+   const ps=Number(pc.premium_support_score||pc.score||0);
+   return ["REVERSAL CONFIRMED","AT SUPPORT","NEAR SUPPORT"].includes(state)&&ps>=60;
+ }).sort((a,b)=>Number(b.e.premiumSupport?.best_contract?.premium_support_score||0)-Number(a.e.premiumSupport?.best_contract?.premium_support_score||0));
+ const usingPremiumWatch=qualified.length===0&&premiumWatch.length>0;
+ const rows=(usingPremiumWatch?premiumWatch:qualified).slice(0,6);
+ if(st)st.textContent=rows.length?(usingPremiumWatch?`${rows.length} premium support watch${rows.length===1?"":"es"} · stock confirmation pending`:`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`):"No A-quality setup or premium-support watch currently";
  if(!rows.length){
-   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. The scanner will not force a pick.";
+   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup or qualified premium-support watch currently. The scanner will not force a pick.";
    g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>`;return
  }
  g.innerHTML=rows.map(({x,e},i)=>{
- const va=e.va,complete=setupCompleteness(x,e),label=e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH",alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";
+ const va=e.va,complete=setupCompleteness(x,e),label=usingPremiumWatch?"PREMIUM SUPPORT WATCH":(e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH"),alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";
  const pc=e.premiumSupport?.best_contract;
  const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · ${pc.state}</b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);
  // Trigger must be actionable from CURRENT price. A historical VAH/VAL that price
