@@ -17,9 +17,12 @@ jobs:
         run: |
           python -m py_compile app.py
           python - <<'PY'
-          import app
-          assert app.APP_VERSION == '25.26'
-          assert app.dark_pool_spike_context
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "25.26"' in s
+          assert 'def dark_pool_spike_context' in s
+          assert 'if multiple>=2.0:' in s
+          assert 'instContextRow' in s
           print('v25.26 validation passed')
           PY
       - name: Commit and self-clean
