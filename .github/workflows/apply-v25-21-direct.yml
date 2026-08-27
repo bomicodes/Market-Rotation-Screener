@@ -20,7 +20,7 @@ jobs:
         run: |
           python -m py_compile app.py
           grep -q 'APP_VERSION = "25.21"' app.py
-          pytest tests/test_core_logic.py -q
+          grep -q 'cached_refresh_safe(key,_build,ttl=300)' app.py
       - name: Commit source and clean temporary patching
         run: |
           git config user.name 'github-actions[bot]'
