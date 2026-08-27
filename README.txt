@@ -1,3 +1,9 @@
+v25.22 — ETF HOLDINGS RESILIENCE + POST-EARNINGS PROVIDER HARDENING
+- Fixed TAN/PBW-style Invesco holdings parsing by installing the HTML parser stack used by pandas.read_html (lxml + BeautifulSoup + html5lib) and explicitly falling back between parsers.
+- Official Invesco top-holdings tables with >=8 usable rows are now accepted as a clearly-labeled PARTIAL fallback instead of throwing the entire Stock Screen into Finnhub/Yahoo.
+- Added a persistent last-known-good ETF holdings cache backed by the existing Neon/Postgres (SQLite locally). Successful issuer/Finnhub/Yahoo holdings are saved; if every live provider later fails, Stock Screen and Post-Earnings use the cached universe instead of going blank.
+- This builds on v25.21's Post-Earnings 502 fix: the market-wide scan is already cached/stale-safe, and now its holdings-discovery stage is also resilient to provider outages.
+
 v25.21 — POST-EARNINGS SCANNER 502 FIX
 - Wrapped /api/postearnings-opportunities in cached_refresh_safe with a 5-minute TTL so repeat requests do not rerun the full discovery pipeline.
 - A genuine refresh failure can now serve the last known-good result as stale, with the refresh error preserved, instead of returning a hard failure when cached data exists.

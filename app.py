@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.21"
+APP_VERSION = "25.22"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1152,7 +1152,11 @@ def invesco_holdings(etf):
 
     # Invesco may render holdings as HTML tables. Try all tables and locate one
     # with a ticker/symbol column. If their page changes, caller falls back.
-    tables = pd.read_html(io.StringIO(resp.text))
+    
+    try:
+        tables = pd.read_html(io.StringIO(resp.text), flavor="lxml")
+    except Exception:
+        tables = pd.read_html(io.StringIO(resp.text), flavor="bs4")
     candidates = []
     for df in tables:
         cols = {str(c).strip().lower(): c for c in df.columns}
@@ -1367,7 +1371,7 @@ def finnhub_etf_holdings(etf):
     return all_rows
 
 
-def get_fund_holdings(etf):
+def _get_fund_holdings_live(etf):
     """
     Holdings source priority:
       1) Official issuer feed
@@ -1404,6 +1408,8 @@ def get_fund_holdings(etf):
             # Invesco pages can be role/cookie-gated. Only accept a meaningful list.
             if len(h) >= 15:
                 return h, "Invesco official product holdings"
+            if len(h) >= 8:
+                return h, "Invesco official top holdings fallback (PARTIAL)"
             attempts.append(f"Invesco: only {len(h)} usable rows")
         except Exception as e:
             attempts.append(f"Invesco: {e}")
@@ -1422,6 +1428,66 @@ def get_fund_holdings(etf):
     except Exception as e:
         attempts.append(f"Yahoo: {e}")
         raise RuntimeError(f"Could not retrieve holdings for {etf}. " + " | ".join(attempts))
+
+
+
+def _ensure_holdings_cache_table(con):
+    con.execute("""CREATE TABLE IF NOT EXISTS holdings_cache(
+      etf TEXT PRIMARY KEY, updated_at TEXT NOT NULL, source TEXT, raw_json TEXT NOT NULL)""")
+
+def _save_holdings_cache(etf, holdings, source):
+    if not holdings:
+        return
+    try:
+        backend=_setup_storage_backend(); now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+        raw=json.dumps(holdings,separators=(",",":"),default=str)
+        with _setup_db() as con:
+            _ensure_holdings_cache_table(con)
+            if backend=="postgresql":
+                con.execute("""INSERT INTO holdings_cache(etf,updated_at,source,raw_json) VALUES(%s,%s,%s,%s)
+                  ON CONFLICT(etf) DO UPDATE SET updated_at=EXCLUDED.updated_at, source=EXCLUDED.source, raw_json=EXCLUDED.raw_json""",
+                  (etf,now,source,raw))
+            else:
+                con.execute("INSERT OR REPLACE INTO holdings_cache(etf,updated_at,source,raw_json) VALUES(?,?,?,?)",
+                  (etf,now,source,raw))
+            con.commit()
+    except Exception:
+        pass
+
+def _load_holdings_cache(etf):
+    try:
+        backend=_setup_storage_backend()
+        with _setup_db() as con:
+            _ensure_holdings_cache_table(con)
+            q="SELECT updated_at,source,raw_json FROM holdings_cache WHERE etf=%s" if backend=="postgresql" else "SELECT updated_at,source,raw_json FROM holdings_cache WHERE etf=?"
+            row=con.execute(q,(etf,)).fetchone()
+            if not row:
+                return None
+            row=dict(row); holdings=json.loads(row.get("raw_json") or "[]")
+            if not isinstance(holdings,list) or len(holdings)<5:
+                return None
+            return holdings,row.get("source"),row.get("updated_at")
+    except Exception:
+        return None
+
+def get_fund_holdings(etf):
+    """Live issuer-first holdings with a persistent last-known-good safety net.
+
+    A temporary issuer/Finnhub/Yahoo outage must not blank the stock screen or
+    force a market-wide Post-Earnings scan to retry the same broken providers.
+    """
+    etf=str(etf or "").upper().strip()
+    try:
+        holdings,source=_get_fund_holdings_live(etf)
+        if holdings:
+            _save_holdings_cache(etf,holdings,source)
+        return holdings,source
+    except Exception as live_err:
+        cached_row=_load_holdings_cache(etf)
+        if cached_row:
+            holdings,source,updated_at=cached_row
+            return holdings,f"Cached holdings · {source or 'last known good'} · {updated_at}"
+        raise live_err
 
 
 
