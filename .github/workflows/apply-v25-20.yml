@@ -12,11 +12,50 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Apply feature patch
+      - name: Apply v25.20 on current v25.19
+        shell: python
         run: |
-          git apply --check .patches/v25.20.patch
-          git apply .patches/v25.20.patch
-          sed -i 's/APP_VERSION = "25.19"/APP_VERSION = "25.20"/' app.py
+          from pathlib import Path
+          p=Path('app.py'); s=p.read_text()
+          assert 'APP_VERSION = "25.19"' in s
+          s=s.replace('APP_VERSION = "25.19"','APP_VERSION = "25.20"',1)
+
+          old=''' const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · ${pc.state}</b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);'''
+          new=''' const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","CHEAP / UNPROVEN":"instWarn","AWAY FROM SUPPORT":"instBad"}[pc.state]||""):"";
+ const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);'''
+          assert old in s, 'premium render anchor missing'
+          s=s.replace(old,new,1)
+
+          guard=r'''
+// v25.20: final presentation guard for structure/thesis direction mismatch.
+// The institutional structure model computes direction independently from the
+// setup thesis. If they disagree, keep the card but withhold the backwards
+// trigger/invalidation/target ladder until the two models align.
+const _renderTopSetupsV25_20=renderTopSetups;
+renderTopSetups=function(){
+ const out=_renderTopSetupsV25_20();
+ const g=document.getElementById("topSetupsGrid");if(!g)return out;
+ g.querySelectorAll('[data-top-setup]').forEach(card=>{
+   const ticker=card.dataset.topSetup,x=(globalTopSetupData||[]).find(z=>z.ticker===ticker);if(!x)return;
+   const e=topSetupEvaluation(x),c=e.context||((typeof institutionalContextMap!=="undefined")?institutionalContextMap[ticker]:null);if(!c)return;
+   const s=c.structure||{},va=e.va,strat=(typeof stratSignalMap!=="undefined")?stratSignalMap[ticker]:null;
+   const thesisDirection=(va?.direction&&va.direction!=="neutral")?va.direction:((strat?.continuity==="bullish"||strat?.continuity==="bearish")?strat.continuity:null);
+   const structureDirection=s.direction&&s.direction!=="neutral"?s.direction:null;
+   const directionMismatch=!!(thesisDirection&&structureDirection&&thesisDirection!==structureDirection&&s.trigger!=null);
+   if(!directionMismatch)return;
+   const inst=card.querySelector('.topSetupInstitutional');if(!inst)return;
+   const details=inst.querySelectorAll('.tiny');const line=details.length?details[details.length-1]:null;if(!line)return;
+   line.innerHTML=`<span class="instBad">⚠ Structure model reads ${String(structureDirection).toUpperCase()} while this setup's thesis is ${String(thesisDirection).toUpperCase()} — trigger/invalidation levels withheld pending alignment.</span>`;
+ });
+ return out;
+};
+'''
+          idx=s.rfind('</script>'); assert idx!=-1, 'closing script not found'
+          s=s[:idx]+guard+s[idx:]
+          p.write_text(s)
+
+          r=Path('README.txt'); rs=r.read_text()
+          r.write_text('''v25.20 — DIRECTION MISMATCH GUARD + PREMIUM STATE COLOR CODING\n- Ported the v25.17 safety fixes onto the current v25.19 build without removing Early Turn Watch.\n- Top Setup premium states are now visually coded: REVERSAL CONFIRMED / AT SUPPORT green, NEAR SUPPORT / CHEAP-UNPROVEN yellow, AWAY FROM SUPPORT red.\n- If the institutional structure model direction conflicts with the setup thesis direction (value acceptance, then STRAT fallback), trigger/invalidation/target presentation is withheld and replaced with an explicit warning instead of showing a backwards ladder.\n\n'''+rs)
       - name: Validate
         run: |
           python -m py_compile app.py
@@ -24,12 +63,13 @@ jobs:
           grep -q 'directionMismatch' app.py
           grep -q 'AWAY FROM SUPPORT":"instBad' app.py
           grep -q 'EARLY TURN WATCH' app.py
+          grep -q 'strongestLaggingSectors' app.py
           if [ -f requirements-dev.txt ]; then pip install -q -r requirements-dev.txt && pytest -q; fi
       - name: Commit and cleanup
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add app.py
+          git add app.py README.txt
           git rm -f .patches/v25.20.patch .github/workflows/apply-v25-20.yml
           git commit -m 'v25.20: guard direction mismatch and color premium state'
           git push
