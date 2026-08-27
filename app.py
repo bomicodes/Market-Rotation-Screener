@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.15"
+APP_VERSION = "25.16"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4191,7 +4191,11 @@ body{background:radial-gradient(circle at 50% -20%,#12202a 0,#0b0e11 38%,#080b0f
 .topSetupAction.primaryDive{border-color:#2d7b59;color:#79e4ad;background:#0d2119}
 .topSetupAction.gexDive{border-color:#65458e;color:#c6a8ff;background:#181022}
 .topSetupAction.optionsDive{border-color:#315c87;color:#83c5ff;background:#0d1926}
-.topSetupsEmpty{grid-column:1/-1;padding:13px;border:1px dashed #2b3b4b;border-radius:8px;color:#8092a4;font-size:10px}@media(max-width:900px){.topSetupsGrid{grid-template-columns:1fr}}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
+.topSetupsEmpty{grid-column:1/-1;padding:13px;border:1px dashed #2b3b4b;border-radius:8px;color:#8092a4;font-size:10px}
+.nearestMisses{grid-column:1/-1}
+.nearestMissRow{padding:6px 0;border-bottom:1px solid #1b2835;display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}
+.nearestMissRow b{font-size:11px}
+@media(max-width:900px){.topSetupsGrid{grid-template-columns:1fr}}.dashCol .panel{margin:0 0 12px}.dashTitle{font-size:13px;font-weight:800;letter-spacing:.25px}.dashTopline{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}.dashTopline .note{font-size:10px}
 .marketOverviewGrid{display:grid;grid-template-columns:repeat(4,1fr);gap:0;border:1px solid #1b2a38;border-radius:9px;overflow:hidden}.marketQuote{padding:10px 8px;border-right:1px solid #1b2a38;background:#0b1219}.marketQuote:last-child{border-right:0}.marketQuote .sym{font-size:11px;color:#c9d3df}.marketQuote .px{font-size:17px;font-weight:750;margin-top:3px}.marketQuote .chg{font-size:11px;margin-top:2px}
 .dashHeatGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}.dashHeatTile{min-height:90px;border-radius:7px;padding:8px;border:1px solid #263548;cursor:pointer;display:flex;flex-direction:column;justify-content:space-between;transition:.15s}.dashHeatTile:hover{transform:translateY(-1px);filter:brightness(1.08)}.dashHeatTile.selected{outline:2px solid #60a5fa}.dashHeatTile.h0,.dashHeatTile.h1{background:linear-gradient(145deg,#5b171a,#b3262c)}.dashHeatTile.h2,.dashHeatTile.h3{background:linear-gradient(145deg,#3f1b1f,#71252a)}.dashHeatTile.h4,.dashHeatTile.h5{background:linear-gradient(145deg,#1a242f,#253444)}.dashHeatTile.h6,.dashHeatTile.h7{background:linear-gradient(145deg,#153029,#1d4d3c)}.dashHeatTile.h8,.dashHeatTile.h9,.dashHeatTile.h10{background:linear-gradient(145deg,#114029,#18733d)}
 .dashHeatTile .sym{font-weight:850;font-size:13px}.dashHeatTile .score{font-size:19px;font-weight:850}.dashHeatTile .state{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:#d8e1ea}.miniSpark{height:17px;width:100%;opacity:.75}
@@ -6963,7 +6967,15 @@ function topSetupEvaluation(x){
    (liq==="Liquid"||liq==="Tradable") &&
    va?.strength!=="REJECTION" && structureOk;
 
- return {score,reasons,va,stratPass,hardPass,alignment:align,premiumSupport:premium};
+ const gateFailures=[];
+ if(!rrgPass)gateFailures.push("RRG not aligned");
+ if(fOut||tOut)gateFailures.push("Tail rotating out");
+ if(!(liq==="Liquid"||liq==="Tradable"))gateFailures.push("Options not liquid/tradable");
+ if(va?.strength==="REJECTION")gateFailures.push("Value acceptance rejected");
+ if(!structureOk)gateFailures.push(ctx?.structure?.plan_error||"Invalid trade-plan structure");
+ if(hardPass&&score<55)gateFailures.push(`Score ${score}/100 below the 55 A-quality bar`);
+
+ return {score,reasons,va,stratPass,hardPass,alignment:align,premiumSupport:premium,gateFailures};
 }
 function groupTrajectoryPass(g){
  const f=g?.fast||g||{},t=g?.trend||{};
@@ -7199,7 +7211,14 @@ function renderTopSetups(){
  if(st)st.textContent=rows.length?(usingPremiumWatch?`${rows.length} premium support watch${rows.length===1?"":"es"} · stock confirmation pending`:`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`):"No A-quality setup or premium-support watch currently";
  if(!rows.length){
    const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup or qualified premium-support watch currently. The scanner will not force a pick.";
-   g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>`;return
+   // True worst case: nothing qualifies and no premium-support watch exists either.
+   // Show the nearest misses by raw score so it's clear whether this is a
+   // genuinely quiet market or something is actually broken.
+   const nearest=evaluated.sort((a,b)=>b.e.score-a.e.score).slice(0,5);
+   const nearestHTML=nearest.length?`<div class="nearestMisses"><div class="tiny" style="margin-top:10px;color:#7f97a8">NEAREST MISSES · why they didn't qualify</div>${
+     nearest.map(({x,e})=>`<div class="nearestMissRow"><b>${x.ticker}</b> <span class="tiny">${e.score}/100</span><div class="tiny" style="color:#c98a3a">${(e.gateFailures||[]).join(" · ")||"—"}</div></div>`).join("")
+   }</div>`:"";
+   g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>${nearestHTML}`;return
  }
  g.innerHTML=rows.map(({x,e},i)=>{
  const va=e.va,complete=setupCompleteness(x,e),label=usingPremiumWatch?"PREMIUM SUPPORT WATCH":(e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH"),alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";

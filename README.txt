@@ -1,3 +1,8 @@
+v25.16 — TOP SETUPS DIAGNOSTIC: NEAREST MISSES
+- Complements v25.15's premium-support-watch fallback: when even the watch tier is empty (true worst case — no A-quality setup and no qualifying premium watch), there was previously no way to tell "the scanner correctly found nothing today" apart from "something is silently broken."
+- topSetupEvaluation() now returns gateFailures: a plain-language list of which specific gate(s) a candidate failed (RRG not aligned, tail rotating out, options not liquid/tradable, value acceptance rejected, invalid trade-plan structure, or a below-threshold score with the actual number shown).
+- The empty-state Top Setups panel now shows a "Nearest misses" list in that true-worst-case scenario: the top 5 candidates by raw score regardless of hardPass, each with its score and specific failure reason(s).
+
 v25.15 — PREMIUM SUPPORT WATCH FALLBACK
 - Top Setups no longer goes completely blank when no stock passes the full A-quality hard gate but a finalist has a genuinely strong premium-floor setup.
 - A-quality gating is unchanged. When zero A-quality names exist, the UI may instead show up to six PREMIUM SUPPORT WATCH cards from the already-vetted finalist universe when the contract is REVERSAL CONFIRMED / AT SUPPORT / NEAR SUPPORT with Premium Support Score >=60.
