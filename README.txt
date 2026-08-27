@@ -1,3 +1,7 @@
+v25.11 — PREMIUM HISTORY 400 FIX
+- Fixed Alpaca historical option-bar requests using a future calendar date as the end bound when the Render server had crossed UTC midnight. Requests now use the actual current UTC timestamp (minus one minute) in RFC-3339 form.
+- Alpaca option-history failures now preserve the API response body on the Top Setup diagnostic, so any remaining parameter or entitlement problem is explicit rather than a generic HTTP 400.
+
 v25.10 — PREMIUM SCANNER VISIBILITY / FALLBACK
 - Premium Support no longer fails silently on Top Setup cards: every finalist now shows the selected premium setup or an explicit unavailable/not-evaluated diagnostic.
 - Historical option bars retry with Alpaca indicative feed if OPRA historical access is rejected.

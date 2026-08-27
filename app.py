@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.10"
+APP_VERSION = "25.11"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2102,9 +2102,13 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
     """Historical OPRA/indicative daily option bars for a small candidate set."""
     symbols=[str(x).strip() for x in (symbols or []) if str(x).strip()][:20]
     if not symbols:return {}
-    end=pd.Timestamp.now().normalize()+pd.Timedelta(days=1)
+    # Use an actual UTC timestamp as the end bound. The previous code
+    # normalized server time and then added a day; after UTC midnight this
+    # could send Alpaca an end date nearly two calendar days in the future,
+    # which the historical options endpoint rejects with HTTP 400.
+    end=pd.Timestamp.now(tz="UTC")-pd.Timedelta(minutes=1)
     start=end-pd.Timedelta(days=max(25,int(lookback_days or 55)))
-    params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.strftime("%Y-%m-%d"),"end":end.strftime("%Y-%m-%d"),"feed":ALPACA_OPTIONS_FEED,"limit":10000,"sort":"asc"}
+    params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.isoformat().replace("+00:00","Z"),"end":end.isoformat().replace("+00:00","Z"),"feed":ALPACA_OPTIONS_FEED,"limit":10000,"sort":"asc"}
     out={sym:[] for sym in symbols}; token=None
     for _ in range(4):
         if token:params["page_token"]=token
@@ -2115,7 +2119,13 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
             r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
         if r.status_code==429:
             time.sleep(.75);r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
-        r.raise_for_status();j=r.json() or {};bars=j.get("bars") or {}
+        if not r.ok:
+            # Preserve Alpaca's response body so a bad parameter/entitlement
+            # is diagnosable from the Top Setups card instead of only showing
+            # the generic requests 400/403 message.
+            detail=(r.text or "").strip()[:500]
+            raise RuntimeError(f"Alpaca option history HTTP {r.status_code}: {detail or r.reason}")
+        j=r.json() or {};bars=j.get("bars") or {}
         if isinstance(bars,dict):
             for sym,arr in bars.items():out.setdefault(sym,[]).extend(arr or [])
         token=j.get("next_page_token")
