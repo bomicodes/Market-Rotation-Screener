@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.11"
+APP_VERSION = "25.12"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2108,15 +2108,12 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
     # which the historical options endpoint rejects with HTTP 400.
     end=pd.Timestamp.now(tz="UTC")-pd.Timedelta(minutes=1)
     start=end-pd.Timedelta(days=max(25,int(lookback_days or 55)))
-    params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.isoformat().replace("+00:00","Z"),"end":end.isoformat().replace("+00:00","Z"),"feed":ALPACA_OPTIONS_FEED,"limit":10000,"sort":"asc"}
+    params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.isoformat().replace("+00:00","Z"),"end":end.isoformat().replace("+00:00","Z"),"limit":10000,"sort":"asc"}
     out={sym:[] for sym in symbols}; token=None
     for _ in range(4):
         if token:params["page_token"]=token
         elif "page_token" in params:params.pop("page_token",None)
         r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
-        if r.status_code in (401,403) and params.get("feed")!="indicative":
-            params["feed"]="indicative"
-            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
         if r.status_code==429:
             time.sleep(.75);r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
         if not r.ok:
@@ -2131,7 +2128,6 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
         token=j.get("next_page_token")
         if not token:break
     return out
-
 
 def _premium_support_metrics(bars,current_mid=None):
     """Score premium support as a decaying option-specific zone, not stock support."""

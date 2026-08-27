@@ -1,3 +1,8 @@
+v25.12 — ALPACA OPTION HISTORY QUERY FIX
+- Removed the unsupported `feed` query parameter from `/v1beta1/options/bars`; Alpaca rejects it with HTTP 400.
+- Removed the obsolete OPRA-to-indicative retry for historical option bars.
+- Premium Support can now reach the historical-bars response instead of failing on request validation.
+
 v25.11 — PREMIUM HISTORY 400 FIX
 - Fixed Alpaca historical option-bar requests using a future calendar date as the end bound when the Render server had crossed UTC midnight. Requests now use the actual current UTC timestamp (minus one minute) in RFC-3339 form.
 - Alpaca option-history failures now preserve the API response body on the Top Setup diagnostic, so any remaining parameter or entitlement problem is explicit rather than a generic HTTP 400.
