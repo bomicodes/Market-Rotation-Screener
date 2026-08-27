@@ -1,3 +1,18 @@
+v25.19 — EARLY TURN WATCH: SECTOR-LED PATH
+- Reported example (a trader's IGV/CRM call): the real trade thesis often operates one level up from any single stock's own RRG position — "IGV, the whole software sector ETF, has the strongest tail of any sector and is heading into Improving" — then picking a liquid holding within that sector (CRM) for options, regardless of CRM's own individual RRG state.
+- v25.18's Early Turn Watch only looked at stocks whose OWN tail was turning, inside sectors already passing groupTrajectoryPass — it would never have surfaced CRM off of IGV's move, since IGV itself was still Lagging and wouldn't pass that gate.
+- Added strongestLaggingSectors(): ranks Lagging-quadrant sectors by tail strength using the existing peer-relative sectorHeatScore composite, independent of groupTrajectoryPass. Verified against a reconstruction of the actual IGV scenario — correctly ranks IGV top, excludes a Lagging-but-not-turning sector and an already-Improving one (which belongs in Top Setups instead).
+- Early Turn Watch now runs both paths together: STOCK-LED (a stock's own tail turning from Lagging) and SECTOR-LED (the single strongest Lagging-turning sector's top 8 holdings by weight, screened for options liquidity), each checked for premium support and clearly labeled by which path found them. A sector-context line ("Sector signal: IGV is the strongest Lagging sector...") appears above the list when a qualifying sector exists.
+
+v25.18 — EARLY TURN WATCH (LAGGING + TURNING TAIL + PREMIUM NEAR SUPPORT)
+- New, separate list distinct from Top Setups: finds stocks still reading Lagging on at least one RRG horizon whose own tail has just turned NE (RS-Ratio and RS-Momentum both rising) — the earliest possible "catch it before the crowd" signal, deliberately excluded from Top Setups since that gate requires an already-favorable (Improving/Leading) quadrant.
+- Explicitly excludes anything that already qualifies for Top Setups' Full/Early alignment, so the two lists never duplicate each other. Verified against the target pattern (Lagging both horizons, fast tail turning NE), an already-Improving case, an already-EARLY-aligned case, and a still-rotating-out case — all four behave as intended.
+- Reuses the candidate pool already fetched by the Top Setups scan (persisted via window.allSupportiveCandidates right after the liquidity filter) rather than re-scanning sectors/RRG/options from scratch — no additional network cost beyond the premium-support check itself, which only runs on the shortlisted top 10 by a dedicated early-turn score (RRG trajectory + option liquidity/IV).
+- Requires the contract's premium to be REVERSAL CONFIRMED / AT SUPPORT / NEAR SUPPORT (not away from support or unproven) via the existing /api/premium-support endpoint.
+- Each card is explicitly labeled "Speculative — has not yet met the Full/Early RRG alignment bar" so it isn't mistaken for a confirmed setup.
+
+(v25.17, a direction-mismatch guard + premium state color coding fix, was prepared but not yet applied at the time of this version — apply both patches in either order, they don't conflict.)
+
 v25.16 — TOP SETUPS DIAGNOSTIC: NEAREST MISSES
 - Complements v25.15's premium-support-watch fallback: when even the watch tier is empty (true worst case — no A-quality setup and no qualifying premium watch), there was previously no way to tell "the scanner correctly found nothing today" apart from "something is silently broken."
 - topSetupEvaluation() now returns gateFailures: a plain-language list of which specific gate(s) a candidate failed (RRG not aligned, tail rotating out, options not liquid/tradable, value acceptance rejected, invalid trade-plan structure, or a below-threshold score with the actual number shown).

@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.16"
+APP_VERSION = "25.19"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4507,6 +4507,10 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
     <div class="dashTopline"><div><span class="dashTitle">★ TOP SETUPS</span><span class="note" style="margin-left:8px">Automatic market-wide scan · click a setup to dive deeper</span></div><div style="display:flex;align-items:center;gap:8px"><button class="secondary" style="padding:5px 8px;font-size:9px" onclick="runAutomaticTopSetups(true)">↻ Scan all</button><span id="topSetupsStatus" class="note">Waiting for market data</span> <button class="secondary" id="loadTopSetups" type="button">Load Top Setups</button></div></div>
     <div id="topSetupsGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Automatic scan starts after market data loads.</div></div>
   </div>
+  <div class="panel topSetupsPanel">
+    <div class="dashTopline"><div><span class="dashTitle">◔ EARLY TURN WATCH</span><span class="note" style="margin-left:8px">Still Lagging, tail turning NE, premium near its own floor — speculative, unconfirmed</span></div><div style="display:flex;align-items:center;gap:8px"><span id="earlyTurnStatus" class="note">Run Top Setups first</span> <button class="secondary" id="runEarlyTurn" type="button" onclick="runEarlyTurnWatch()">Check early turns</button></div></div>
+    <div id="earlyTurnGrid" class="topSetupsGrid"><div class="topSetupsEmpty">Run Top Setups, then tap "Check early turns" to scan the same candidate pool for names that haven't been confirmed yet.</div></div>
+  </div>
   <div class="dashboardGrid">
     <aside class="dashCol dashLeft">
       <div class="panel">
@@ -7070,6 +7074,12 @@ async function runAutomaticTopSetups(force=false){
 
    candidates=candidates.filter(x=>["Liquid","Tradable"].includes(optionScanMap[x.ticker]?.liquidity));
    if(!candidates.length)throw Error("No RRG candidates passed the Liquid / Tradable options gate.");
+   // Persisted for the Early Turn Watch scanner: preliminaryRRGScore actively
+   // deprioritizes Lagging-quadrant names, so they rarely survive into the
+   // top-16 finalists below even though "still Lagging but the tail just
+   // turned NE" is exactly the earlier, more speculative signal that scan
+   // wants. Reuse this already-fetched pool instead of a second network pass.
+   window.allSupportiveCandidates=candidates;
 
    // Only the best inexpensive candidates get chart/VP + STRAT resolution.
    const finalists=candidates.sort((a,b)=>{
@@ -7189,6 +7199,137 @@ function setupCompleteness(x,e){
  const planOk=structure.plan_valid!==false && Number.isFinite(Number(structure.trigger)) && Number.isFinite(Number(structure.invalidation)) && Number.isFinite(Number(structure.target2));
  const checks={RRG:!!(e?.alignment&&e.alignment!=="NONE"),Value:!!va,STRAT:!!st,Options:!!opt,Context:!!c,TradePlan:planOk,Catalyst:!!(c?.catalyst&&c.catalyst.risk!=="Unknown"),Macro:!!c?.macro_risk};
  const missing=Object.entries(checks).filter(([,v])=>!v).map(([k])=>k);return {complete:missing.length===0,missing};
+}
+function strongestLaggingSectors(n=3){
+ // Sector-level equivalent of earlyTurnQualifies: still reads Lagging, but
+ // ranked by how strongly its tail is curling toward Improving relative to
+ // peers (sectorHeatScore is already a peer-relative RS-Ratio/Momentum
+ // composite). This is the "IGV has the strongest tail of any sector and is
+ // heading into Improving" read — a sector-wide rotation signal, distinct
+ // from any single stock's own RRG position, and specifically NOT required
+ // to already pass groupTrajectoryPass (that gate requires both tails in,
+ // which a sector still Lagging on one horizon may not yet satisfy).
+ const groups=(sectorData||[]).filter(g=>["Core Sector","Industry / Theme"].includes(g.group));
+ return groups.filter(g=>{
+   const f=g?.fast||g||{};
+   const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
+   return String(f?.quadrant||"")==="Lagging" && fIn;
+ }).sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a)).slice(0,n);
+}
+function earlyTurnQualifies(x){
+ const f=x.fast||x,t=x.trend||{};
+ const fq=String(f?.quadrant||""),tq=String(t?.quadrant||"");
+ const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
+ const tIn=(t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up===true&&t?.mom_up===true));
+ const fOut=(f?.tail_trajectory ? f.tail_trajectory==="Rotating Out" : (f?.rs_up===false&&f?.mom_up===false));
+ const tOut=(t?.tail_trajectory ? t.tail_trajectory==="Rotating Out" : (t?.rs_up===false&&t?.mom_up===false));
+ // Still reads Lagging on at least one horizon, but that horizon's own tail
+ // has turned NE (RS-Ratio and RS-Momentum both rising) — the earliest
+ // possible "catch it before the crowd" signal. Deliberately not required to
+ // pass Top Setups' Full/Early alignment gate, since that gate specifically
+ // requires an already-favorable quadrant — this list exists to catch the
+ // turn a step before that confirmation.
+ const lagTurning=(fq==="Lagging"&&fIn)||(tq==="Lagging"&&tIn);
+ if(!lagTurning)return false;
+ // Avoid duplicating Top Setups: if this candidate already earns Full/Early
+ // alignment it belongs there, not in a "still lagging" list.
+ const fGood=["Improving","Leading"].includes(fq),tGood=["Improving","Leading"].includes(tq);
+ const rrgPass=(fGood&&tGood&&fIn&&!tOut)||(fIn&&(fGood||fq==="Lagging")&&tIn&&!tOut)||(fGood&&tGood&&!fOut&&!tOut);
+ return !rrgPass;
+}
+function earlyTurnScore(x){
+ const opt=optionScanMap[x.ticker];let s=preliminaryRRGScore(x);
+ if(opt?.liquidity==="Liquid")s+=2;
+ if(opt?.iv_state==="Cheap / Crushed")s+=2;
+ return s;
+}
+let earlyTurnWatchData=[],earlyTurnWatchRunning=false,earlyTurnSectorContext=null;
+async function runEarlyTurnWatch(){
+ const st=document.getElementById("earlyTurnStatus");
+ if(earlyTurnWatchRunning)return;
+ earlyTurnWatchRunning=true;
+ earlyTurnSectorContext=null;
+ const results=[];
+
+ // --- Stock-led: candidates whose OWN tail is turning NE from Lagging. ---
+ const stockPool=(window.allSupportiveCandidates||[]).filter(earlyTurnQualifies);
+ const stockShortlist=stockPool.sort((a,b)=>earlyTurnScore(b)-earlyTurnScore(a)).slice(0,8);
+
+ // --- Sector-led: the single strongest Lagging-but-turning sector's top
+ // holdings, regardless of each stock's own RRG state — this matches the
+ // real trade thesis of "the sector itself is the signal" (e.g. IGV turning
+ // toward Improving, then picking a liquid name from within it like CRM).
+ let sectorShortlist=[];
+ const topLaggingSector=strongestLaggingSectors(1)[0]||null;
+ if(topLaggingSector){
+   earlyTurnSectorContext=topLaggingSector;
+   if(st)st.textContent=`Sector signal: ${topLaggingSector.ticker} is the strongest Lagging sector turning toward Improving — checking its top holdings…`;
+   try{
+     const key=cacheKeySector(topLaggingSector.ticker,"10");
+     let sj=clientCache.sectors.has(key)?clientCache.sectors.get(key):null;
+     if(!sj){
+       const sr=await fetch(`/api/sector/${encodeURIComponent(topLaggingSector.ticker)}?limit=10`);
+       sj=await sr.json();
+       if(sr.ok&&sj.ok)clientCache.sectors.set(key,sj);
+     }
+     if(sj?.ok){
+       const holdings=(sj.results||[]).filter(h=>h.weight!=null).sort((a,b)=>Number(b.weight)-Number(a.weight)).slice(0,8);
+       if(holdings.length){
+         const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:holdings.map(h=>h.ticker)})});
+         const oj=await or.json();
+         if(or.ok&&oj.ok)(oj.results||[]).forEach(o=>{if(o?.ticker&&o.ok!==false)optionScanMap[o.ticker]=o});
+         sectorShortlist=holdings.filter(h=>["Liquid","Tradable"].includes(optionScanMap[h.ticker]?.liquidity))
+           .map(h=>({...h,_parentTicker:topLaggingSector.ticker}));
+       }
+     }
+   }catch(e){}
+ }
+
+ const shortlist=[...stockShortlist.map(x=>({x,source:"stock"})),...sectorShortlist.map(x=>({x,source:"sector"}))];
+ if(!shortlist.length){
+   if(st)st.textContent="No Lagging-with-turning-tail candidates in the last scan. Run Top Setups first.";
+   earlyTurnWatchData=[];earlyTurnWatchRunning=false;renderEarlyTurnWatch();return;
+ }
+ if(st)st.textContent=`Checking premium support on ${shortlist.length} early-turn candidates…`;
+ for(let n=0;n<shortlist.length;n+=3){
+   const batch=shortlist.slice(n,n+3);
+   await Promise.all(batch.map(async({x,source})=>{
+     const f=x.fast||x,t=x.trend||{};
+     const fq=String(f?.quadrant||""),tq=String(t?.quadrant||"");
+     const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
+     const tIn=(t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up===true&&t?.mom_up===true));
+     try{
+       const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=bullish`);
+       const j=await r.json();
+       if(!r.ok||!j.ok)return;
+       const pc=j.best_contract;if(!pc)return;
+       if(!["REVERSAL CONFIRMED","AT SUPPORT","NEAR SUPPORT"].includes(String(pc.state||"")))return;
+       results.push({x,pc,fq,tq,fIn,tIn,source});
+     }catch(e){}
+   }));
+ }
+ earlyTurnWatchData=results.sort((a,b)=>Number(b.pc.premium_support_score||0)-Number(a.pc.premium_support_score||0));
+ earlyTurnWatchRunning=false;
+ if(st)st.textContent=earlyTurnWatchData.length?`${earlyTurnWatchData.length} early-turn watch${earlyTurnWatchData.length===1?"":"es"}`:"No early-turn candidates currently have a supportive premium base.";
+ renderEarlyTurnWatch();
+}
+function renderEarlyTurnWatch(){
+ const g=document.getElementById("earlyTurnGrid");if(!g)return;
+ const sectorNote=earlyTurnSectorContext?`<div class="tiny" style="margin-bottom:8px;color:#7dd3fc">Sector signal: <b>${earlyTurnSectorContext.ticker}</b> is the strongest Lagging sector currently turning toward Improving.</div>`:"";
+ if(!earlyTurnWatchData.length){
+   g.innerHTML=`${sectorNote}<div class="topSetupsEmpty">No qualifying early-turn / premium-base candidates right now. This list is intentionally speculative — it looks for names (or whole sectors) still reading Lagging whose RRG tail has just turned NE, with an option premium sitting near its own historical floor. Run "Check early turns" after Top Setups has scanned.</div>`;
+   return;
+ }
+ g.innerHTML=sectorNote+earlyTurnWatchData.map(({x,pc,fq,tq,fIn,source})=>{
+   const tailNote=source==="sector"?`Held in ${x._parentTicker} (sector turning)`:((fq==="Lagging"&&fIn)?"Fast tail turning NE from Lagging":"Trend tail turning NE from Lagging");
+   const sourceLabel=source==="sector"?"SECTOR-LED":"STOCK-LED";
+   const premiumStateClass={"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn"}[pc.state]||"";
+   return `<div class="topSetupCard" data-early-turn="${x.ticker}">
+     <div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus">${sourceLabel} · ${tailNote}${source!=="sector"&&x._parentTicker?` · ${x._parentTicker}`:""}</div></div></div>
+     <div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>
+     <div class="tiny" style="margin-top:6px;color:#8092a4">Speculative — ${source==="sector"?"the sector, not necessarily this stock, is the confirmed signal":"has not yet met the Full/Early RRG alignment bar used for Top Setups"}. Confirmation may still fail.</div>
+   </div>`;
+ }).join("");
 }
 function renderTopSetups(){
  const g=document.getElementById("topSetupsGrid"),st=document.getElementById("topSetupsStatus");if(!g)return;
