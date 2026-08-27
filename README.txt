@@ -1,3 +1,9 @@
+v25.26 — DETERMINISTIC CONTEXT FOR INSTITUTIONAL ACTIVITY TOP SETUPS
+- Rather than shipping a second, standalone "Dark Pool Prints" panel that would have overlapped with the already-built, more deeply-integrated "Institutional Activity Top Setups" scanner (multi-ticker, blended into rotation scoring), grafted the deterministic (non-AI) context piece onto that existing feature instead.
+- Added dark_pool_spike_context(): reuses the app's own earnings-calendar merge and macro calendar to report "Xd after/before known earnings" and "nearby macro events" for a flagged large-print day — zero LLM calls, zero web search, zero new ongoing cost. Wired into _institutional_trade_sample() so context is only computed for genuine spikes (largest_multiple >= 2.0), not every row.
+- Frontend: a compact context sub-row now appears beneath any flagged ticker's row in the Institutional Activity table when context exists.
+- NOTE: versions between 25.22 and 25.25 are not yet documented here despite shipping real changes; worth a dedicated backfill pass.
+
 v25.22 — ETF HOLDINGS RESILIENCE + POST-EARNINGS PROVIDER HARDENING
 - Fixed TAN/PBW-style Invesco holdings parsing by installing the HTML parser stack used by pandas.read_html (lxml + BeautifulSoup + html5lib) and explicitly falling back between parsers.
 - Official Invesco top-holdings tables with >=8 usable rows are now accepted as a clearly-labeled PARTIAL fallback instead of throwing the entire Stock Screen into Finnhub/Yahoo.
