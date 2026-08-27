@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - 'apply_v25_21.py'
+      - '.github/workflows/apply-v25-21-direct.yml'
 permissions:
   contents: write
 jobs:
