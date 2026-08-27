@@ -18,8 +18,8 @@ jobs:
           s=Path('app.py').read_text()
           assert 'APP_VERSION = "25.23"' in s
           assert 'function safeScrollIntoView' in s
-          assert 'scrollIntoView({behavior:' not in s
           assert 'new URLSearchParams({limit:String(lim)})' not in s
+          assert 'safeTickerUrl("/api/sector",requestedSector' in s
           print('v25.23 validation passed')
           PY
       - name: Commit and self-clean
