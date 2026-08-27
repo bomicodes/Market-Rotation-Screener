@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.22"
+APP_VERSION = "25.23"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5122,7 +5122,7 @@ async function openSectorStockTicker(rawTicker,{scroll=true}={}){
    if(scroll){
      setTimeout(()=>{
        const el=document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart");
-       try{if(el)el.scrollIntoView()}catch(e){}
+       safeScrollIntoView(el)
      },25);
    }
    await Promise.allSettled(tasks);
@@ -5729,9 +5729,8 @@ async function loadSector(force=false,throwOnError=false){
 
  st.textContent=`Updating ${requestedSector}…`;
  try{
-   const params=new URLSearchParams({limit:String(lim)});
-   const url=`/api/sector/${encodeURIComponent(requestedSector)}?${params.toString()}`;
-   const r=await fetch(url,{headers:{"Accept":"application/json"}});
+   const url=safeTickerUrl("/api/sector",requestedSector,{limit:String(lim)});
+   const r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{"Accept":"application/json"}});
    const j=await r.json();
    if(!j.ok)throw Error(j.error);
 
@@ -5768,7 +5767,7 @@ async function selectSector(ticker,{source="ui",scrollToStocks=false,force=false
  if(ok){
    renderHeatMap();
    if(source==="heat"&&hs)hs.textContent=`${t} loaded · click a stock tile to open its chart/positioning`;
-   if(scrollToStocks)setTimeout(()=>{try{document.getElementById("stockHeatTitle")?.scrollIntoView()}catch(e){}},50);
+   if(scrollToStocks)setTimeout(()=>{safeScrollIntoView(document.getElementById("stockHeatTitle"))},50);
  }
  return ok;
 }
@@ -5895,7 +5894,7 @@ async function ensureLiveSearchUniverse(){
    const key=cacheKeySector(currentSector,"all");
    let j=clientCache.sectors.get(key);
    if(!j){
-     const r=await fetch(`/api/sector/${currentSector}?limit=all`);
+     const r=await window.fetch(safeTickerUrl("/api/sector",currentSector,{limit:"all"}),{method:"GET",credentials:"same-origin",headers:{"Accept":"application/json"}});
      j=await r.json();
      if(!r.ok||!j.ok)throw Error(j.error||"Search lookup failed");
      clientCache.sectors.set(key,j);
@@ -5966,9 +5965,20 @@ async function checkAlpacaStatus(){
  }
 }
 
+function safeScrollIntoView(el,{smooth=false}={}){
+ if(!el)return false;
+ try{
+   // Avoid the WebKit overload that can throw the opaque DOMException
+   // “The string did not match the expected pattern.”
+   el.scrollIntoView(smooth);
+   return true;
+ }catch(e){
+   try{el.scrollIntoView();return true;}catch(_e){return false;}
+ }
+}
 function focusOptionsPanel(){
  const panel=document.getElementById("optionsPanel");
- if(panel)panel.scrollIntoView({behavior:"smooth",block:"start"});
+ safeScrollIntoView(panel,{smooth:true});
 }
 
 let optionScanMap={},activeOptionsData=null;
@@ -7222,7 +7232,7 @@ function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
      const el=target==="options"
        ?document.getElementById("optionsPanel")
        :(document.getElementById("stockDeepDiveAnchor")||document.getElementById("pricePreviewChart"));
-     if(el)el.scrollIntoView();
+     safeScrollIntoView(el);
    }
  }catch(navErr){
    console.warn("Immediate navigation warning",navErr);
@@ -7254,7 +7264,7 @@ function openTopSetupDeepDive(ticker,parentTicker=null,target="chart"){
  }
 
  if(target==="gex"){
-   setTimeout(()=>{try{mountGexPage();const el=document.getElementById("positioningSection");if(el)el.scrollIntoView()}catch(e){}},250);
+   setTimeout(()=>{try{mountGexPage();safeScrollIntoView(document.getElementById("positioningSection"))}catch(e){}},250);
  }else if(target==="options"){
    setTimeout(()=>{try{const el=document.getElementById("optionsPanel");if(el)el.scrollIntoView()}catch(e){}},100);
  }else{
