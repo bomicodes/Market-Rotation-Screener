@@ -24,3 +24,4 @@ jobs:
           git rm .tmp/apply_v25_15.py .github/workflows/apply-v25-15.yml
           git commit -m 'v25.15: surface premium support watches without weakening A-quality gate'
           git push
+# retry 2
