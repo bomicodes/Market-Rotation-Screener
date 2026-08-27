@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.12"
+APP_VERSION = "25.13"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2136,7 +2136,7 @@ def _premium_support_metrics(bars,current_mid=None):
         o=_safe_float(b.get("o",b.get("open")));h=_safe_float(b.get("h",b.get("high")));l=_safe_float(b.get("l",b.get("low")));c=_safe_float(b.get("c",b.get("close")))
         if None in (h,l,c) or h<=0 or l<=0 or c<=0:continue
         clean.append({"o":o if o and o>0 else c,"h":h,"l":l,"c":c,"v":_safe_float(b.get("v",b.get("volume"))) or 0,"t":b.get("t",b.get("timestamp"))})
-    clean=clean[-20:]
+    clean=clean[-30:]
     if len(clean)<5:return {"available":False,"reason":"Need at least 5 daily premium bars."}
     lows=np.array([x["l"] for x in clean],dtype=float);highs=np.array([x["h"] for x in clean],dtype=float);closes=np.array([x["c"] for x in clean],dtype=float)
     floor=float(np.min(lows));q25=float(np.percentile(lows,25));support_hi=min(max(floor*1.12,q25),floor*1.35)
@@ -2161,7 +2161,10 @@ def _premium_support_metrics(bars,current_mid=None):
 
 def premium_support_payload(ticker,direction="bullish",options_payload=None):
     ticker=ticker.upper().strip();direction=str(direction or "bullish").lower();want_put=direction.startswith("bear")
-    base=options_payload or options_quality_payload(ticker,"0-30",35,7);spot=_safe_float(base.get("spot"))
+    # Premium Support deliberately uses a wider expiration universe than the
+    # normal swing selector. Longer-dated contracts have time to form the
+    # multi-week premium bases this layer is designed to detect.
+    base=options_quality_payload(ticker,"0-30",90,7);spot=_safe_float(base.get("spot"))
     if not spot:return {"ticker":ticker,"direction":direction,"available":False,"reason":"Spot unavailable."}
     candidates=[]
     for r in base.get("contracts") or []:
@@ -2169,7 +2172,7 @@ def premium_support_payload(ticker,direction="bullish",options_payload=None):
         if is_put!=want_put:continue
         strike=_safe_float(r.get("strike"));mid=_safe_float(r.get("mid"));bid=_safe_float(r.get("bid"));ask=_safe_float(r.get("ask"));spread=_safe_float(r.get("spread_pct"));delta=abs(_safe_float(r.get("delta")) or 0);oi=int(_safe_float(r.get("open_interest")) or 0);vol=int(_safe_float(r.get("volume")) or 0);dte=r.get("dte")
         if not strike or not mid or mid<=0 or not bid or bid<=0 or not ask or ask<=bid:continue
-        if dte is None or dte<7 or dte>35:continue
+        if dte is None or dte<7 or dte>90:continue
         otm=((spot-strike)/spot*100) if want_put else ((strike-spot)/spot*100)
         if otm<=0 or otm>10:continue
         if spread is None or spread>25 or oi<50:continue
@@ -2177,9 +2180,22 @@ def premium_support_payload(ticker,direction="bullish",options_payload=None):
         exec_score=(20 if spread<=8 else 16 if spread<=12 else 11)+(8 if oi>=500 else 5 if oi>=200 else 2)+(6 if vol>=100 else 3 if vol>=25 else 1)
         shape_score=(10 if 2<=otm<=7 else 6)+(8 if .22<=delta<=.45 else 4)+(6 if mid<=3 else 4 if mid<=5 else 1)
         candidates.append((exec_score+shape_score,dict(r,otm_pct=round(otm,2))))
-    candidates.sort(key=lambda z:z[0],reverse=True);selected=[x[1] for x in candidates[:8]]
+    candidates.sort(key=lambda z:z[0],reverse=True)
+    # Preserve representation across expiration horizons instead of letting the
+    # front month monopolize the finalists. Take up to four from each bucket,
+    # then fill any remaining slots with the best unused candidates overall.
+    selected=[];seen=set()
+    for lo,hi in ((7,35),(36,60),(61,90)):
+        bucket=[x[1] for x in candidates if x[1].get("dte") is not None and lo<=x[1]["dte"]<=hi]
+        for r in bucket[:4]:
+            if r.get("symbol") and r["symbol"] not in seen:
+                selected.append(r);seen.add(r["symbol"])
+    for _,r in candidates:
+        if len(selected)>=12:break
+        if r.get("symbol") and r["symbol"] not in seen:
+            selected.append(r);seen.add(r["symbol"])
     if not selected:return {"ticker":ticker,"direction":direction,"available":False,"reason":"No liquid OTM candidate passed the premium-history prefilter."}
-    histories=alpaca_option_daily_bars([r["symbol"] for r in selected],55);scored=[];rank_by_symbol={r["symbol"]:rank for rank,r in candidates}
+    histories=alpaca_option_daily_bars([r["symbol"] for r in selected],100);scored=[];rank_by_symbol={r["symbol"]:rank for rank,r in candidates}
     for r in selected:
         m=_premium_support_metrics(histories.get(r["symbol"]) or [],r.get("mid"))
         if not m.get("available"):continue
@@ -2187,7 +2203,7 @@ def premium_support_payload(ticker,direction="bullish",options_payload=None):
         rr=dict(r);rr.update(m);rr["premium_support_score"]=round(combined,1);scored.append(rr)
     if not scored:return {"ticker":ticker,"direction":direction,"available":False,"reason":"Historical premium bars were unavailable for the candidate contracts."}
     scored.sort(key=lambda r:(-r["premium_support_score"],r.get("distance_from_support_pct") if r.get("distance_from_support_pct") is not None else 999,r.get("mid") or 999))
-    return {"ticker":ticker,"direction":direction,"available":True,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}","best_contract":scored[0],"candidates":scored[:5],"contracts_screened":len(selected),"note":"Premium support is contract-specific and decays with time/IV; it is a confirmation layer, not a static stock-like floor."}
+    return {"ticker":ticker,"direction":direction,"available":True,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}","best_contract":scored[0],"candidates":scored[:8],"contracts_screened":len(selected),"dte_universe":"7-90","expiration_buckets":["7-35","36-60","61-90"],"history_lookback_days":100,"premium_bars_window":30,"note":"Premium support is contract-specific and decays with time/IV; it is a confirmation layer, not a static stock-like floor."}
 
 
 def modeled_dealer_positioning(rows, spot):

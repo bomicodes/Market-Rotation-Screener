@@ -1,3 +1,8 @@
+v25.13 — PREMIUM SUPPORT LONGER-DATED CONTRACTS
+- Premium Support now searches its own 7–90 DTE option universe instead of inheriting the regular 7–35 DTE swing-selector chain. The regular options scanner remains unchanged.
+- Candidate history is balanced across 7–35, 36–60, and 61–90 DTE buckets so front-month contracts cannot crowd out further-dated premium bases. Up to 12 contracts are inspected per ticker.
+- Historical premium lookback expanded to 100 calendar days and the support/compression calculation now uses up to the latest 30 daily premium bars, improving detection of multi-week bases.
+
 v25.12 — ALPACA OPTION HISTORY QUERY FIX
 - Removed the unsupported `feed` query parameter from `/v1beta1/options/bars`; Alpaca rejects it with HTTP 400.
 - Removed the obsolete OPRA-to-indicative retry for historical option bars.
