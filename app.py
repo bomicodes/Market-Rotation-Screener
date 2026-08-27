@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.13"
+APP_VERSION = "25.14"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2161,13 +2161,20 @@ def _premium_support_metrics(bars,current_mid=None):
 
 def premium_support_payload(ticker,direction="bullish",options_payload=None):
     ticker=ticker.upper().strip();direction=str(direction or "bullish").lower();want_put=direction.startswith("bear")
-    # Premium Support deliberately uses a wider expiration universe than the
-    # normal swing selector. Longer-dated contracts have time to form the
-    # multi-week premium bases this layer is designed to detect.
-    base=options_quality_payload(ticker,"0-30",90,7);spot=_safe_float(base.get("spot"))
+    # Premium Support deliberately builds its own 7-90 DTE chain rather than
+    # inheriting options_quality_payload(), whose UI-oriented contract list is
+    # truncated. This ensures farther-dated contracts are genuinely searched.
+    today=pd.Timestamp.now().normalize(); start=(today+pd.Timedelta(days=7)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+    _,spot=realized_vol_20d(ticker)
     if not spot:return {"ticker":ticker,"direction":direction,"available":False,"reason":"Spot unavailable."}
+    contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+    snaps=alpaca_option_chain(ticker,start,end,spot); premium_rows=[]
+    for sym,snap in snaps.items():
+        if sym not in meta:continue
+        rr=option_contract_row(sym,snap,meta[sym],spot)
+        if rr.get("expiration") and rr.get("moneyness_pct") is not None and abs(rr["moneyness_pct"])<=20:premium_rows.append(rr)
     candidates=[]
-    for r in base.get("contracts") or []:
+    for r in premium_rows:
         typ=str(r.get("type") or "").lower();is_put=typ.startswith("p")
         if is_put!=want_put:continue
         strike=_safe_float(r.get("strike"));mid=_safe_float(r.get("mid"));bid=_safe_float(r.get("bid"));ask=_safe_float(r.get("ask"));spread=_safe_float(r.get("spread_pct"));delta=abs(_safe_float(r.get("delta")) or 0);oi=int(_safe_float(r.get("open_interest")) or 0);vol=int(_safe_float(r.get("volume")) or 0);dte=r.get("dte")
@@ -2203,7 +2210,7 @@ def premium_support_payload(ticker,direction="bullish",options_payload=None):
         rr=dict(r);rr.update(m);rr["premium_support_score"]=round(combined,1);scored.append(rr)
     if not scored:return {"ticker":ticker,"direction":direction,"available":False,"reason":"Historical premium bars were unavailable for the candidate contracts."}
     scored.sort(key=lambda r:(-r["premium_support_score"],r.get("distance_from_support_pct") if r.get("distance_from_support_pct") is not None else 999,r.get("mid") or 999))
-    return {"ticker":ticker,"direction":direction,"available":True,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}","best_contract":scored[0],"candidates":scored[:8],"contracts_screened":len(selected),"dte_universe":"7-90","expiration_buckets":["7-35","36-60","61-90"],"history_lookback_days":100,"premium_bars_window":30,"note":"Premium support is contract-specific and decays with time/IV; it is a confirmation layer, not a static stock-like floor."}
+    return {"ticker":ticker,"direction":direction,"available":True,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}","best_contract":scored[0],"candidates":scored[:8],"contracts_considered":len(premium_rows),"contracts_screened":len(selected),"dte_universe":"7-90","expiration_buckets":["7-35","36-60","61-90"],"history_lookback_days":100,"premium_bars_window":30,"note":"Premium support is contract-specific and decays with time/IV; it is a confirmation layer, not a static stock-like floor."}
 
 
 def modeled_dealer_positioning(rows, spot):

@@ -1,3 +1,8 @@
+v25.14 — PREMIUM SUPPORT FULL 7–90 DTE CHAIN
+- Premium Support now builds its own complete 7–90 DTE Alpaca option chain instead of consuming the generic options-quality payload, which intentionally truncates its UI list to 120 contracts.
+- This guarantees 36–60 and 61–90 DTE contracts can actually reach the premium-support bucket selector even when a ticker has a very large front-month chain.
+- Response diagnostics now include contracts_considered as well as contracts_screened.
+
 v25.13 — PREMIUM SUPPORT LONGER-DATED CONTRACTS
 - Premium Support now searches its own 7–90 DTE option universe instead of inheriting the regular 7–35 DTE swing-selector chain. The regular options scanner remains unchanged.
 - Candidate history is balanced across 7–35, 36–60, and 61–90 DTE buckets so front-month contracts cannot crowd out further-dated premium bases. Up to 12 contracts are inspected per ticker.
