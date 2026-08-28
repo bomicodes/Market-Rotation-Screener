@@ -1,0 +1,40 @@
+name: Apply v25.28 speculative signals consolidation
+on:
+  push:
+    paths: ['.github/workflows/apply-v25-28.yml']
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: |
+          git apply --check .patches/v25_28.patch
+          git apply .patches/v25_28.patch
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "25.28"' in s
+          assert 'id="speculativeSignalsPanel"' in s
+          assert 'async function runSpeculativeSignals()' in s
+          assert 'window.allSupportiveCandidates' in s
+          assert 'updateSpeculativeSignalsVisibility(qualified.length)' in s
+          assert s.count('id="feedCompPanel"') == 1
+          assert 'id="institutionalRadarPanel"' not in s
+          print('v25.28 validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f .patches/v25_28.patch .github/workflows/apply-v25-28.yml
+          git add app.py README.txt
+          git commit -m 'v25.28 consolidate speculative signals'
+          git push
