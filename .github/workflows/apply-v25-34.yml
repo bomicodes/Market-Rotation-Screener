@@ -1,0 +1,34 @@
+name: Apply v25.34 post-earnings restart resilience
+on:
+  push:
+    paths: ['.github/workflows/apply-v25-34.yml']
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - name: Apply patch
+        run: python .patches/apply_v25_34.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "25.34"' in s
+          assert 'const waits=[0,2500,6000,12000];' in s
+          assert '[429,502,503,504].includes(response.status)' in s
+          assert 'Earnings service restarted or is busy' in s
+          print('v25.34 validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f .patches/apply_v25_34.py .github/workflows/apply-v25-34.yml
+          git add app.py README.txt
+          git commit -m 'v25.34 retry earnings scan across Render restarts'
+          git push
