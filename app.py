@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.33"
+APP_VERSION = "25.34"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -8070,10 +8070,27 @@ async function runEarnings(){
  st.textContent="Scanning all sectors/themes for recent earnings opportunities…";
  try{
    const days=document.getElementById("earnDays").value||"5";
-   const response=await fetch(`/api/postearnings-opportunities?days=${encodeURIComponent(days)}`,{headers:{"Accept":"application/json"}});
-   const raw=await response.text();let j;
-   try{j=JSON.parse(raw)}catch(e){throw Error(`Unreadable earnings response (${response.status})`)}
-   if(!response.ok||!j.ok)throw Error(j.error||`Scan failed (${response.status})`);
+   let response=null,raw="",j=null,lastErr=null;
+   const waits=[0,2500,6000,12000];
+   for(let attempt=0;attempt<waits.length;attempt++){
+     if(waits[attempt]){st.textContent=`Earnings service restarted or is busy · retrying ${attempt}/${waits.length-1}…`;await new Promise(r=>setTimeout(r,waits[attempt]));}
+     try{
+       response=await window.fetch(`/api/postearnings-opportunities?days=${encodeURIComponent(days)}`,{method:"GET",credentials:"same-origin",headers:{"Accept":"application/json"}});
+       raw=await response.text();j=null;
+       try{j=raw?JSON.parse(raw):null}catch(_e){}
+       if(response.ok&&j?.ok)break;
+       lastErr=new Error(j?.error||`Scan failed (${response.status})`);
+       if(![429,502,503,504].includes(response.status))throw lastErr;
+     }catch(e){
+       lastErr=e;
+       if(attempt===waits.length-1)throw e;
+       continue;
+     }
+   }
+   if(!response||!response.ok||!j?.ok){
+     if(response&&!j)throw Error(`Earnings service returned an unreadable response (${response.status})`);
+     throw lastErr||new Error("Earnings scan failed");
+   }
    earnResults=j.results||[];
    st.textContent=`${j.recent_reporters||0} recent reporters · ${j.universe||0} unique holdings scanned · showing ${earnResults.length} curated opportunities`;
    renderEarnings();

@@ -1,3 +1,8 @@
+v25.34 — POST-EARNINGS 502 / INSTANCE-RESTART RESILIENCE
+- Render logs showed the earnings 502 coinciding with the web service restarting: health checks stopped, Gunicorn relaunched, then health recovered. The browser previously surfaced that transient restart as a terminal “Unreadable earnings response (502)” error.
+- Earnings Movers now automatically retries transient 429/502/503/504 responses with bounded backoff (2.5s, 6s, 12s) and tells the user the service is restarting/busy rather than failing immediately.
+- Successful JSON behavior and existing server-side cached/stale-safe earnings logic are unchanged. Non-transient application errors still fail immediately.
+
 v25.33 — IOS SAFARI NEWS CONTEXT DOMEXCEPTION HARDENING
 - Moved News + Catalyst Context refresh from a JSON POST RequestInit path to a plain same-origin GET with a bounded encoded ticker list, matching the simpler Safari-safe request pattern used elsewhere.
 - Added GET support to /api/news-context while retaining POST compatibility.
