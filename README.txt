@@ -1,3 +1,8 @@
+v25.32 — IOS SAFARI STOCK SCREEN DOMEXCEPTION HARDENING
+- Removed the scrollIntoView options-object overload again. iOS Safari/WebKit can throw the opaque “The string did not match the expected pattern” DOMException from this overload; all app scrolling now uses the legacy Boolean overload only.
+- Simplified Stock Screen sector requests to plain same-origin relative fetch URLs with default Request options, removing another WebKit URL/Request construction surface from the PBW/ETF load path.
+- Applied the same plain-fetch construction to the all-holdings ticker-search expansion path.
+
 v25.31 — FIX TOP SETUPS AFTER PREMIUM DECOUPLING
 - Fixed the regression where reducing premium-support weight caused previously valid XLK/IGV setups to fall below the same 55-point total-score bar and disappear.
 - Added a separate qualificationScore that explicitly removes the premium adjustment. Top Setups now qualifies on the underlying setup only (RRG/sector alignment, options liquidity, value/structure, STRAT/GEX context), using a 45-point underlying bar.

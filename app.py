@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.31"
+APP_VERSION = "25.32"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6070,8 +6070,10 @@ async function loadSector(force=false,throwOnError=false){
 
  st.textContent=`Updating ${requestedSector}…`;
  try{
-   const url=safeTickerUrl("/api/sector",requestedSector,{limit:String(lim)});
-   const r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{"Accept":"application/json"}});
+   // Keep this high-frequency Safari path maximally boring: a relative ASCII URL
+   // and default fetch options. Avoid WebKit URL/Request overload edge cases.
+   const url=`/api/sector/${encodeURIComponent(requestedSector)}?limit=${encodeURIComponent(String(lim))}`;
+   const r=await fetch(url);
    const j=await r.json();
    if(!j.ok)throw Error(j.error);
 
@@ -6235,7 +6237,9 @@ async function ensureLiveSearchUniverse(){
    const key=cacheKeySector(currentSector,"all");
    let j=clientCache.sectors.get(key);
    if(!j){
-     const r=await window.fetch(safeTickerUrl("/api/sector",currentSector,{limit:"all"}),{method:"GET",credentials:"same-origin",headers:{"Accept":"application/json"}});
+     const sectorSym=normalizeStockTicker(currentSector);
+     if(!isSafeStockTicker(sectorSym))throw Error(`Invalid sector symbol: ${sectorSym}`);
+     const r=await fetch(`/api/sector/${encodeURIComponent(sectorSym)}?limit=all`);
      j=await r.json();
      if(!r.ok||!j.ok)throw Error(j.error||"Search lookup failed");
      clientCache.sectors.set(key,j);
@@ -6309,13 +6313,12 @@ async function checkAlpacaStatus(){
 function safeScrollIntoView(el,{smooth=false}={}){
  if(!el)return false;
  try{
-   // Prefer standards-based top alignment. If an older WebKit build rejects
-   // the options overload, immediately fall back to the legacy Boolean form.
-   el.scrollIntoView({behavior:smooth?"smooth":"auto",block:"start"});
+   // iOS Safari/WebKit has repeatedly thrown the opaque DOMException
+   // “The string did not match the expected pattern” on the options overload.
+   // Use only the legacy Boolean overload; CSS handles scroll behavior.
+   el.scrollIntoView(true);
    return true;
- }catch(e){
-   try{el.scrollIntoView(true);return true;}catch(_e){return false;}
- }
+ }catch(e){return false}
 }
 function focusOptionsPanel(){
  const panel=document.getElementById("optionsPanel");
