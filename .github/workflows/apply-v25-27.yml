@@ -1,0 +1,35 @@
+name: Apply v25.27 PBW TAN holdings hardening
+on:
+  push:
+    paths: ['.github/workflows/apply-v25-27.yml']
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .patches/apply_v25_27.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "25.27"' in s
+          assert 'def public_full_holdings_fallback' in s
+          assert 'Public full holdings fallback' in s
+          assert 'Live providers are temporarily unavailable' in s
+          print('v25.27 validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f .patches/apply_v25_27.py .github/workflows/apply-v25-27.yml
+          git add app.py README.txt
+          git commit -m 'v25.27 harden PBW TAN holdings fallback'
+          git push
