@@ -1,3 +1,9 @@
+v25.30 — PREMIUM SUPPORT BECOMES ENTRY-QUALITY OVERLAY
+- Removed premium-near-support as a qualification requirement/fallback gate. Top Setups qualification remains driven by RRG trajectory, liquid/tradable options, value/structure, STRAT and the broader confluence score.
+- Reduced premium-support scoring weight so an attractive premium improves ranking but cannot dominate a strong underlying setup; being away from support is a small entry-quality penalty rather than automatic exclusion.
+- Early Turn / Speculative Signals no longer require AT SUPPORT / NEAR SUPPORT to appear. Premium history is fetched opportunistically and displayed as entry context; the early RRG/sector signal survives when premium is normal, extended, or unavailable.
+- Kept liquidity/tradability and genuinely adverse setup conditions as hard gates.
+
 v25.29 — NEWS + CATALYST CONTEXT
 - Added a Dashboard News + Catalyst Context panel inspired by the requested market-news / why-it-matters layout.
 - Market News loads current general headlines from the existing Finnhub connection; ticker-specific news is fetched only for the strongest current Top Setup / Speculative Signal candidates.

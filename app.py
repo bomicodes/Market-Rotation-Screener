@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.29"
+APP_VERSION = "25.30"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7333,10 +7333,10 @@ function topSetupEvaluation(x){
  // Contract-level premium support/compression: independent confirmation from the option itself.
  const pc=premium?.best_contract,ps=Number(pc?.premium_support_score);
  if(Number.isFinite(ps)){
-   if(ps>=80){raw+=15;reasons.push([`Premium ${pc.state||"support"} · ${ps.toFixed(0)}`,"good"]);}
-   else if(ps>=65){raw+=10;reasons.push([`Premium near support · ${ps.toFixed(0)}`,"good"]);}
-   else if(ps>=50){raw+=5;reasons.push([`Premium base developing · ${ps.toFixed(0)}`,"warn"]);}
-   else if(pc?.state==="AWAY FROM SUPPORT"){raw-=4;reasons.push(["Premium away from support","warn"]);}
+   if(ps>=80){raw+=6;reasons.push([`Premium entry attractive · ${ps.toFixed(0)}`,"good"]);}
+   else if(ps>=65){raw+=4;reasons.push([`Premium near support · ${ps.toFixed(0)}`,"good"]);}
+   else if(ps>=50){raw+=2;reasons.push([`Premium entry fair · ${ps.toFixed(0)}`,"warn"]);}
+   else if(pc?.state==="AWAY FROM SUPPORT"){raw-=2;reasons.push(["Premium extended vs support","warn"]);}
  }
 
  // Value acceptance.
@@ -7729,7 +7729,7 @@ async function runEarlyTurnWatch(){
    if(st)st.textContent="No Lagging-with-turning-tail candidates in the last scan. Run Top Setups first.";
    earlyTurnWatchData=[];earlyTurnWatchRunning=false;renderEarlyTurnWatch();return;
  }
- if(st)st.textContent=`Checking premium support on ${shortlist.length} early-turn candidates…`;
+ if(st)st.textContent=`Adding premium entry context to ${shortlist.length} early-turn candidates…`;
  for(let n=0;n<shortlist.length;n+=3){
    const batch=shortlist.slice(n,n+3);
    await Promise.all(batch.map(async({x,source})=>{
@@ -7740,32 +7740,31 @@ async function runEarlyTurnWatch(){
      try{
        const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=bullish`);
        const j=await r.json();
-       if(!r.ok||!j.ok)return;
-       const pc=j.best_contract;if(!pc)return;
-       if(!["REVERSAL CONFIRMED","AT SUPPORT","NEAR SUPPORT"].includes(String(pc.state||"")))return;
+       const pc=(r.ok&&j.ok)?j.best_contract:null;
        results.push({x,pc,fq,tq,fIn,tIn,source});
-     }catch(e){}
+     }catch(e){results.push({x,pc:null,fq,tq,fIn,tIn,source})}
    }));
  }
- earlyTurnWatchData=results.sort((a,b)=>Number(b.pc.premium_support_score||0)-Number(a.pc.premium_support_score||0));
+ earlyTurnWatchData=results.sort((a,b)=>earlyTurnScore(b.x)-earlyTurnScore(a.x));
  earlyTurnWatchRunning=false;
- if(st)st.textContent=earlyTurnWatchData.length?`${earlyTurnWatchData.length} early-turn watch${earlyTurnWatchData.length===1?"":"es"}`:"No early-turn candidates currently have a supportive premium base.";
+ if(st)st.textContent=earlyTurnWatchData.length?`${earlyTurnWatchData.length} early-turn watch${earlyTurnWatchData.length===1?"":"es"}`:"No early-turn candidates currently meet the RRG/sector-turn criteria.";
  renderEarlyTurnWatch();
 }
 function renderEarlyTurnWatch(){
  const g=document.getElementById("earlyTurnGrid");if(!g)return;
  const sectorNote=earlyTurnSectorContext?`<div class="tiny" style="margin-bottom:8px;color:#7dd3fc">Sector signal: <b>${earlyTurnSectorContext.ticker}</b> is the strongest Lagging sector currently turning toward Improving.</div>`:"";
  if(!earlyTurnWatchData.length){
-   g.innerHTML=`${sectorNote}<div class="topSetupsEmpty">No qualifying early-turn / premium-base candidates right now. This list is intentionally speculative — it looks for names (or whole sectors) still reading Lagging whose RRG tail has just turned NE, with an option premium sitting near its own historical floor. Run "Check early turns" after Top Setups has scanned.</div>`;
+   g.innerHTML=`${sectorNote}<div class="topSetupsEmpty">No qualifying early-turn candidates right now. This list is intentionally speculative — it looks for names (or whole sectors) still reading Lagging whose RRG tail has just turned NE. Premium support is shown only as entry-quality context and is not required. Run "Check early turns" after Top Setups has scanned.</div>`;
    return;
  }
  g.innerHTML=sectorNote+earlyTurnWatchData.map(({x,pc,fq,tq,fIn,source})=>{
    const tailNote=source==="sector"?`Held in ${x._parentTicker} (sector turning)`:((fq==="Lagging"&&fIn)?"Fast tail turning NE from Lagging":"Trend tail turning NE from Lagging");
    const sourceLabel=source==="sector"?"SECTOR-LED":"STOCK-LED";
-   const premiumStateClass={"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn"}[pc.state]||"";
+   const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","AWAY FROM SUPPORT":"instBad"}[pc.state]||""):"";
+   const premiumLine=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM ENTRY · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">Entry-quality overlay · support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM ENTRY · <b>not required for signal</b></div>`;
    return `<div class="topSetupCard" data-early-turn="${x.ticker}">
      <div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus">${sourceLabel} · ${tailNote}${source!=="sector"&&x._parentTicker?` · ${x._parentTicker}`:""}</div></div></div>
-     <div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>
+${premiumLine}
      <div class="tiny" style="margin-top:6px;color:#8092a4">Speculative — ${source==="sector"?"the sector, not necessarily this stock, is the confirmed signal":"has not yet met the Full/Early RRG alignment bar used for Top Setups"}. Confirmation may still fail.</div>
    </div>`;
  }).join("");
@@ -7777,21 +7776,15 @@ function renderTopSetups(){
  // gate, but surface up to six qualified names so the trader can compare setups.
  const evaluated=source.map(x=>({x,e:topSetupEvaluation(x)}));
  const qualified=evaluated.filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score);
- // Keep the full A-quality gate intact. If none pass, surface strong premium
- // support candidates from the already-vetted finalist universe as WATCHES.
- const premiumWatch=evaluated.filter(z=>{
-   const pc=z.e.premiumSupport?.best_contract;
-   if(!pc||z.e.hardPass)return false;
-   const state=String(pc.state||"");
-   const ps=Number(pc.premium_support_score||pc.score||0);
-   return ["REVERSAL CONFIRMED","AT SUPPORT","NEAR SUPPORT"].includes(state)&&ps>=60;
- }).sort((a,b)=>Number(b.e.premiumSupport?.best_contract?.premium_support_score||0)-Number(a.e.premiumSupport?.best_contract?.premium_support_score||0));
- const usingPremiumWatch=qualified.length===0&&premiumWatch.length>0;
+ // Premium support is an entry-quality overlay, not a setup gate. A strong
+ // underlying setup remains visible even when its option premium is not near
+ // a historical floor. Liquidity/Tradable status remains a hard contract gate.
+ const usingPremiumWatch=false;
  updateSpeculativeSignalsVisibility(qualified.length);
- const rows=(usingPremiumWatch?premiumWatch:qualified).slice(0,6);
- if(st)st.textContent=rows.length?(usingPremiumWatch?`${rows.length} premium support watch${rows.length===1?"":"es"} · stock confirmation pending`:`${rows.length} candidate${rows.length===1?"":"s"} · click to validate`):"No A-quality setup or premium-support watch currently";
+ const rows=qualified.slice(0,6);
+ if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · premium shown as entry quality` : "No A-quality setup currently";
  if(!rows.length){
-   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup or qualified premium-support watch currently. The scanner will not force a pick.";
+   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. Premium state does not determine qualification.";
    // True worst case: nothing qualifies and no premium-support watch exists either.
    // Show the nearest misses by raw score so it's clear whether this is a
    // genuinely quiet market or something is actually broken.
