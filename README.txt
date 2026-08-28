@@ -1,3 +1,9 @@
+v25.29 — NEWS + CATALYST CONTEXT
+- Added a Dashboard News + Catalyst Context panel inspired by the requested market-news / why-it-matters layout.
+- Market News loads current general headlines from the existing Finnhub connection; ticker-specific news is fetched only for the strongest current Top Setup / Speculative Signal candidates.
+- Each ticker headline gets a deterministic catalyst category (earnings, analyst, M&A, product, legal/regulatory, macro, company) and a concise "Why it matters" explanation. No LLM calls and no speculative claim about causality or direction.
+- News is bounded (8 candidate tickers, 2 displayed headlines each), parallelized, and cached for 10 minutes to protect the small Render instance.
+
 v25.28 — CONSOLIDATE SPECULATIVE SIGNALS + BROADEN INSTITUTIONAL ACTIVITY TO ALL SECTORS
 - Site-wide audit found real redundancy: Early Turn Watch and Institutional Activity Top Setups were two separate, always-visible panels serving the same underlying purpose ("something to watch when Top Setups doesn't have a clean pick") via different detection methods, each requiring its own manual button click, neither aware of the other or of Top Setups' own Premium Support Watch / Nearest Misses fallback chain.
 - Merged both into one panel ("SPECULATIVE SIGNALS") with a single "Scan speculative signals" button (runSpeculativeSignals) that runs both underlying detections together. Both original detection functions (earlyTurnQualifies/strongestLaggingSectors, _institutional_trade_sample) are unchanged — this is a UI/orchestration consolidation, not a rewrite of working detection logic.
