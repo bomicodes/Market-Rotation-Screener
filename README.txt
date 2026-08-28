@@ -1,3 +1,9 @@
+v25.33 — IOS SAFARI NEWS CONTEXT DOMEXCEPTION HARDENING
+- Moved News + Catalyst Context refresh from a JSON POST RequestInit path to a plain same-origin GET with a bounded encoded ticker list, matching the simpler Safari-safe request pattern used elsewhere.
+- Added GET support to /api/news-context while retaining POST compatibility.
+- Removed locale/Intl formatting from headline timestamps and only emits clickable links for valid http(s) URLs, reducing additional WebKit parsing surfaces.
+- News errors now distinguish request-dispatch failures from unreadable/server responses instead of surfacing only the opaque DOMException.
+
 v25.32 — IOS SAFARI STOCK SCREEN DOMEXCEPTION HARDENING
 - Removed the scrollIntoView options-object overload again. iOS Safari/WebKit can throw the opaque “The string did not match the expected pattern” DOMException from this overload; all app scrolling now uses the legacy Boolean overload only.
 - Simplified Stock Screen sector requests to plain same-origin relative fetch URLs with default Request options, removing another WebKit URL/Request construction surface from the PBW/ETF load path.
