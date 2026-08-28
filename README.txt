@@ -1,3 +1,9 @@
+v25.31 — FIX TOP SETUPS AFTER PREMIUM DECOUPLING
+- Fixed the regression where reducing premium-support weight caused previously valid XLK/IGV setups to fall below the same 55-point total-score bar and disappear.
+- Added a separate qualificationScore that explicitly removes the premium adjustment. Top Setups now qualifies on the underlying setup only (RRG/sector alignment, options liquidity, value/structure, STRAT/GEX context), using a 45-point underlying bar.
+- Premium still modifies the displayed/ranking score by a small amount, so AT SUPPORT can improve entry preference and AWAY FROM SUPPORT can slightly reduce rank, but neither can make or break qualification.
+- Nearest Misses now shows both the underlying setup score and ranked score for easier debugging.
+
 v25.30 — PREMIUM SUPPORT BECOMES ENTRY-QUALITY OVERLAY
 - Removed premium-near-support as a qualification requirement/fallback gate. Top Setups qualification remains driven by RRG trajectory, liquid/tradable options, value/structure, STRAT and the broader confluence score.
 - Reduced premium-support scoring weight so an attractive premium improves ranking but cannot dominate a strong underlying setup; being away from support is a small entry-quality penalty rather than automatic exclusion.

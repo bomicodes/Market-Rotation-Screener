@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.30"
+APP_VERSION = "25.31"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7279,7 +7279,7 @@ function renderHeatMap(){
 const premiumSupportMap=window.premiumSupportMap||(window.premiumSupportMap={});
 function topSetupEvaluation(x){
  const reasons=[],f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker],premium=premiumSupportMap[x.ticker];
- let raw=0;
+ let raw=0,premiumAdjustment=0;
 
  const parent=x._parentGroup||null;
  if(parent){
@@ -7333,10 +7333,10 @@ function topSetupEvaluation(x){
  // Contract-level premium support/compression: independent confirmation from the option itself.
  const pc=premium?.best_contract,ps=Number(pc?.premium_support_score);
  if(Number.isFinite(ps)){
-   if(ps>=80){raw+=6;reasons.push([`Premium entry attractive · ${ps.toFixed(0)}`,"good"]);}
-   else if(ps>=65){raw+=4;reasons.push([`Premium near support · ${ps.toFixed(0)}`,"good"]);}
-   else if(ps>=50){raw+=2;reasons.push([`Premium entry fair · ${ps.toFixed(0)}`,"warn"]);}
-   else if(pc?.state==="AWAY FROM SUPPORT"){raw-=2;reasons.push(["Premium extended vs support","warn"]);}
+   if(ps>=80){premiumAdjustment=6;raw+=premiumAdjustment;reasons.push([`Premium entry attractive · ${ps.toFixed(0)}`,"good"]);}
+   else if(ps>=65){premiumAdjustment=4;raw+=premiumAdjustment;reasons.push([`Premium near support · ${ps.toFixed(0)}`,"good"]);}
+   else if(ps>=50){premiumAdjustment=2;raw+=premiumAdjustment;reasons.push([`Premium entry fair · ${ps.toFixed(0)}`,"warn"]);}
+   else if(pc?.state==="AWAY FROM SUPPORT"){premiumAdjustment=-2;raw+=premiumAdjustment;reasons.push(["Premium extended vs support","warn"]);}
  }
 
  // Value acceptance.
@@ -7383,6 +7383,10 @@ function topSetupEvaluation(x){
  if(Number.isFinite(mom)&&mom>105){raw-=7;reasons.push(["Extended","warn"]);}
 
  const score=Math.max(0,Math.min(100,Math.round(raw)));
+ // Qualification intentionally ignores premium location. Premium can improve or
+ // worsen the displayed/ranking score, but it cannot decide whether the
+ // underlying setup is allowed to appear.
+ const qualificationScore=Math.max(0,Math.min(100,Math.round(raw-premiumAdjustment)));
 
  // RRG gate is now trajectory based. A Lagging Trend quadrant is allowed when
  // its tail is rotating NE; a Trend rotating out is not.
@@ -7399,9 +7403,9 @@ function topSetupEvaluation(x){
  if(!(liq==="Liquid"||liq==="Tradable"))gateFailures.push("Options not liquid/tradable");
  if(va?.strength==="REJECTION")gateFailures.push("Value acceptance rejected");
  if(!structureOk)gateFailures.push(ctx?.structure?.plan_error||"Invalid trade-plan structure");
- if(hardPass&&score<55)gateFailures.push(`Score ${score}/100 below the 55 A-quality bar`);
+ if(hardPass&&qualificationScore<45)gateFailures.push(`Underlying setup ${qualificationScore}/100 below the 45 qualification bar`);
 
- return {score,reasons,va,stratPass,hardPass,alignment:align,premiumSupport:premium,gateFailures};
+ return {score,qualificationScore,reasons,va,stratPass,hardPass,alignment:align,premiumSupport:premium,gateFailures};
 }
 function groupTrajectoryPass(g){
  const f=g?.fast||g||{},t=g?.trend||{};
@@ -7775,14 +7779,14 @@ function renderTopSetups(){
  // Show a useful shortlist rather than only the top two. Keep the hard quality
  // gate, but surface up to six qualified names so the trader can compare setups.
  const evaluated=source.map(x=>({x,e:topSetupEvaluation(x)}));
- const qualified=evaluated.filter(z=>z.e.hardPass&&z.e.score>=55).sort((a,b)=>b.e.score-a.e.score);
+ const qualified=evaluated.filter(z=>z.e.hardPass&&z.e.qualificationScore>=45).sort((a,b)=>b.e.score-a.e.score);
  // Premium support is an entry-quality overlay, not a setup gate. A strong
  // underlying setup remains visible even when its option premium is not near
  // a historical floor. Liquidity/Tradable status remains a hard contract gate.
  const usingPremiumWatch=false;
  updateSpeculativeSignalsVisibility(qualified.length);
  const rows=qualified.slice(0,6);
- if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · premium shown as entry quality` : "No A-quality setup currently";
+ if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · qualified on underlying setup · premium is entry quality` : "No A-quality setup currently";
  if(!rows.length){
    const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. Premium state does not determine qualification.";
    // True worst case: nothing qualifies and no premium-support watch exists either.
@@ -7790,7 +7794,7 @@ function renderTopSetups(){
    // genuinely quiet market or something is actually broken.
    const nearest=evaluated.sort((a,b)=>b.e.score-a.e.score).slice(0,5);
    const nearestHTML=nearest.length?`<div class="nearestMisses"><div class="tiny" style="margin-top:10px;color:#7f97a8">NEAREST MISSES · why they didn't qualify</div>${
-     nearest.map(({x,e})=>`<div class="nearestMissRow"><b>${x.ticker}</b> <span class="tiny">${e.score}/100</span><div class="tiny" style="color:#c98a3a">${(e.gateFailures||[]).join(" · ")||"—"}</div></div>`).join("")
+     nearest.map(({x,e})=>`<div class="nearestMissRow"><b>${x.ticker}</b> <span class="tiny">setup ${e.qualificationScore}/100 · ranked ${e.score}/100</span><div class="tiny" style="color:#c98a3a">${(e.gateFailures||[]).join(" · ")||"—"}</div></div>`).join("")
    }</div>`:"";
    g.innerHTML=`<div class="topSetupsEmpty">${msg}</div>${nearestHTML}`;return
  }
