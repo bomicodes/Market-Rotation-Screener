@@ -1,3 +1,8 @@
+v25.27 — PBW/TAN HOLDINGS FALLBACK HARDENING
+- Invesco product pages can reject Render/server requests with HTTP 406 even when the same page works interactively in a browser. Added a full-list public holdings fallback for PBW/TAN before Finnhub/Yahoo so the Stock Screen remains usable when that happens.
+- The fallback is still subordinate to the official issuer feed and feeds the existing persistent last-known-good cache after a successful retrieval.
+- Sanitized terminal holdings errors so provider URLs/API tokens and raw upstream exception chains are no longer exposed in the UI.
+
 v25.26 — DETERMINISTIC CONTEXT FOR INSTITUTIONAL ACTIVITY TOP SETUPS
 - Rather than shipping a second, standalone "Dark Pool Prints" panel that would have overlapped with the already-built, more deeply-integrated "Institutional Activity Top Setups" scanner (multi-ticker, blended into rotation scoring), grafted the deterministic (non-AI) context piece onto that existing feature instead.
 - Added dark_pool_spike_context(): reuses the app's own earnings-calendar merge and macro calendar to report "Xd after/before known earnings" and "nearby macro events" for a flagged large-print day — zero LLM calls, zero web search, zero new ongoing cost. Wired into _institutional_trade_sample() so context is only computed for genuine spikes (largest_multiple >= 2.0), not every row.

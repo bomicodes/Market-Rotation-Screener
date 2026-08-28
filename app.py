@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.26"
+APP_VERSION = "25.27"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1257,6 +1257,47 @@ def vaneck_holdings(etf):
     return rows
 
 
+def public_full_holdings_fallback(etf):
+    """Full-list public fallback for issuer pages that reject server requests.
+
+    This is deliberately below official issuer feeds and above paid/auth-gated
+    fallbacks. It keeps theme universes usable when an issuer returns 406/403.
+    """
+    etf=str(etf or "").upper().strip()
+    slugs={
+        "PBW":"invesco-wilderhill-clean-energy-etf",
+        "TAN":"invesco-solar-etf",
+    }
+    slug=slugs.get(etf)
+    if not slug:
+        raise RuntimeError(f"No public full-holdings fallback configured for {etf}.")
+    url=f"https://companiesmarketcap.com/{slug}/holdings/"
+    resp=requests.get(url,timeout=25,headers={
+        "User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept":"text/html,application/xhtml+xml",
+    })
+    resp.raise_for_status()
+    tables=pd.read_html(io.StringIO(resp.text),flavor="lxml")
+    best=[]
+    for df in tables:
+        cols={str(c).strip().lower():c for c in df.columns}
+        tcol=next((orig for low,orig in cols.items() if low=="ticker" or "ticker" in low),None)
+        if tcol is None: continue
+        ncol=next((orig for low,orig in cols.items() if low=="name" or "name" in low),None)
+        wcol=next((orig for low,orig in cols.items() if "weight" in low),None)
+        rows=[]
+        for _,row in df.iterrows():
+            weight=None
+            if wcol is not None:
+                try: weight=float(str(row.get(wcol,"")).replace("%","").replace(",","").strip())
+                except Exception: pass
+            rows.append({"ticker":row.get(tcol,""),"name":row.get(ncol,row.get(tcol,"")) if ncol is not None else row.get(tcol,""),"weight":weight})
+        rows=clean_equity_holdings(rows)
+        if len(rows)>len(best): best=rows
+    if len(best)<15:
+        raise RuntimeError(f"Public full-holdings fallback returned only {len(best)} usable rows for {etf}.")
+    return best
+
 def yahoo_fund_holdings(etf):
     """Generic fallback using yfinance/Yahoo fund top-holdings data."""
     try:
@@ -1414,6 +1455,16 @@ def _get_fund_holdings_live(etf):
         except Exception as e:
             attempts.append(f"Invesco: {e}")
 
+    # Public full-list fallback for Invesco theme funds whose product pages may
+    # reject Render/server traffic with HTTP 406. Prefer this to auth-gated
+    # Finnhub and Yahoo top-holdings so PBW/TAN keep a broad stock universe.
+    if etf in INVESCO_FUNDS:
+        try:
+            h = public_full_holdings_fallback(etf)
+            return h, "Public full holdings fallback"
+        except Exception as e:
+            attempts.append(f"Public full holdings: {e}")
+
     # Universal full-universe fallback. This is preferred over Yahoo's top 10.
     try:
         h = finnhub_etf_holdings(etf)
@@ -1427,7 +1478,7 @@ def _get_fund_holdings_live(etf):
         return holdings, "Yahoo Finance TOP holdings fallback (PARTIAL)"
     except Exception as e:
         attempts.append(f"Yahoo: {e}")
-        raise RuntimeError(f"Could not retrieve holdings for {etf}. " + " | ".join(attempts))
+        raise RuntimeError(f"Could not retrieve holdings for {etf}. Live providers are temporarily unavailable and no cached holdings are available yet.")
 
 
 
