@@ -1,0 +1,36 @@
+name: Apply v25.36 stock summary focus-only fix
+on:
+  push:
+    paths: ['.github/workflows/apply-v25-36.yml']
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python apply_v25_36.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "25.36"' in s
+          assert 'function installStockSummaryFocusOnly()' in s
+          assert 'target.closest("[data-live-ticker]")' in s
+          assert 'evt.stopImmediatePropagation();' in s
+          assert 'toggleRRGFocus("stockChart",ticker);' in s
+          print('v25.36 validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -f apply_v25_36.py .github/workflows/apply-v25-36.yml
+          git add app.py README.txt
+          git commit -m 'v25.36 stock RRG summary focuses tail in place'
+          git push
