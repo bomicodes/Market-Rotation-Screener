@@ -1,0 +1,36 @@
+name: Apply v26.5 stable Top Setups persistence
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v26-5.yml'
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .patches/apply_v26_5_top_setup_persistence.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "26.5"' in s
+          assert 'directionAgrees=va?.direction&&st?.continuity&&va.direction===st.continuity' in s
+          assert "V265_TOP_SETUP_CACHE='top-setups-last-nonempty-v265'" in s
+          assert 'v265RestoreTopSetups' in s
+          assert '96*60*60*1000' in s
+          assert 'carried from' not in s.lower()
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git commit -m "v26.5 keep Top Setups from disappearing on empty refreshes"
+          git rm .patches/apply_v26_5_top_setup_persistence.py .github/workflows/apply-v26-5.yml
+          git commit --amend --no-edit
+          git push
