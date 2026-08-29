@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.34"
+APP_VERSION = "25.35"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4898,7 +4898,7 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
   <div class="legacyMarketBlock"><button class="primary" id="refreshMarket">Refresh market</button><div id="internals" class="cards"></div></div>
   <div class="rotationLower">
   <div class="panel">
-    <div class="row"><strong>Stock screen</strong><span class="note">Tip: click a ticker row or chart label to focus it. All displayed tails stay visible; the others dim. Click the selected ticker again to clear. Search/filters use loaded data and cached universes repopulate instantly.</span>
+    <div class="row"><strong>Stock screen</strong><span class="note">Tip: click an RRG ticker label to focus its tail in place; other tails dim. Click again to clear. Use a stock table row to open the chart / volume-profile deep dive. Search/filters use loaded data and cached universes repopulate instantly.</span>
       <label class="note">ETF / group</label>
       <select id="coreSectorSelect">
         <option value="">Choose ETF…</option>
@@ -5875,9 +5875,10 @@ function installRRGInteractions(id){
    const ticker=hitTicker(evt);
    if(!ticker)return;
    toggleRRGFocus(id,ticker);
-   if(id==="stockChart"){
-     openSectorStockTicker(ticker,{scroll:true});
-   }
+   // Stock RRG clicks are inspection-only: focus the selected tail and dim the
+   // others in place. Opening the chart/volume-profile deep dive remains a
+   // separate action via the stock table/watchlist, so clicking the RRG no
+   // longer yanks the user away from the tail they are trying to inspect.
    if(id==="sectorChart"){
      syncSectorRowSelection();
      selectSector(ticker,{source:"rrg"});
