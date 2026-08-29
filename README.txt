@@ -1,3 +1,8 @@
+v26.2b — TRADER BOARD DISPLAY FIXES
+- Labels total option cost explicitly as /contract.
+- Missing trigger/invalidation now render as — rather than JavaScript null -> $0 coercion.
+- One-touch premium floors are labeled unreliable rather than showing misleading huge distance percentages.
+
 v26.2 — EARLIER MOVE DETECTION
 - Top Setups now considers Lagging-but-turning sectors before they fully graduate into Improving/Leading, reducing confirmation lag.
 - Added daily failed-2D reversal detection: a 2-down that trades below the prior low but reclaims it, with extra priority when followed by a second green day/follow-through.
