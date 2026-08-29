@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "26.7"
+APP_VERSION = "26.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5423,12 +5423,20 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
  if(tickerRequestInflight.has(url))return tickerRequestInflight.get(url);
  const promise=(async()=>{
    const waits=[0,1000,3000,7000,12000];
+   const requestTimeoutMs=Number(opts.timeoutMs)||12000;
    let lastErr=null;
    for(let attempt=0;attempt<waits.length;attempt++){
      if(waits[attempt])await new Promise(r=>setTimeout(r,waits[attempt]));
      let r;
-     try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"}})}
-     catch(e){lastErr=new Error(`Request could not be dispatched: ${e?.message||e}`);continue;}
+     const ac=new AbortController();
+     const timer=setTimeout(()=>ac.abort(),requestTimeoutMs);
+     try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"},signal:ac.signal})}
+     catch(e){
+       const timedOut=e?.name==="AbortError";
+       lastErr=new Error(timedOut?`Request timed out after ${requestTimeoutMs}ms`:`Request could not be dispatched: ${e?.message||e}`);
+       continue;
+     }
+     finally{clearTimeout(timer)}
      let raw="",j={};
      try{raw=await r.text();j=raw?JSON.parse(raw):{};}
      catch(e){
