@@ -1,3 +1,9 @@
+v26.7 — FIX LAYER 2.5 SCAN STALL (INDEPENDENT OF THE PENDING v26.6 PATCH)
+- Reported bug: on web (not mobile), a Top Setups scan that had genuinely started would stall indefinitely at "Layer 2.5 · checking early daily reversals..." and never complete. Root cause confirmed: this step fetches /api/chart-preview/<ticker> for up to 90 candidates in batches of 6, with no timeout on any individual request. Promise.all waits for every request in a batch to settle, so a single slow/hanging request (a stuck Alpaca response, a dropped connection) froze the entire batch, and therefore the entire scan, forever.
+- Fixed: each fetch now runs under an 8-second AbortController timeout. A timed-out or failed request for one ticker is caught and simply skipped (that ticker just doesn't get an early-reversal signal), instead of blocking the other 5 requests in its batch and every batch after it.
+- Verified by directly simulating the exact stall scenario: a batch containing one request that never resolves on its own now completes in bounded time instead of hanging indefinitely, with the other 5 tickers in the batch completing normally.
+- Note: safeTickerFetchJson (used by several other endpoints — flow, options, strat, institutional-context) has retry logic for HTTP error codes but also has no request timeout — the same class of stall is theoretically possible there too. Not touched in this fix since it's a broader, shared helper across several call sites that would want separate, careful testing; worth a dedicated follow-up.
+
 v26.5 — STABILIZE TOP SETUPS ACROSS EMPTY REFRESHES
 - Preserves the last non-empty Top Setups board in browser storage and silently restores it when a later scan unexpectedly returns zero or throws, so overnight/weekend refreshes do not make valid setups disappear at random.
 - No card UI changes: no carried/ready labels, timestamps, or extra status text were added. A normal non-empty scan immediately replaces the saved board.
