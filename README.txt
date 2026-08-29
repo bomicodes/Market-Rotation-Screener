@@ -1,3 +1,9 @@
+v27.1 — SAFARI-SAFE LAYER 2.5 BULK REQUEST
+- v27.0 successfully moved Layer 2.5 to a single bulk server endpoint, but its browser call used a JSON POST with a complex fetch RequestInit object. That request pattern has previously produced opaque iOS Safari/WebKit DOMException failures elsewhere in this app.
+- Render logs after v27.0 showed no /api/early-reversal-scan request reaching the server during the reported failure, confirming the failure was occurring client-side before dispatch rather than inside the bulk endpoint.
+- Layer 2.5 now uses a plain same-origin GET with one URL-encoded comma-separated ticker list. The server accepts GET while retaining POST compatibility. No JSON body, custom headers, spread RequestInit, or AbortController is required for dispatch.
+- A 60-second Promise.race still prevents the UI from waiting forever, and failure remains optional enrichment: Top Setups continues without early-price bonuses.
+
 v27.0 — REBUILD LAYER 2.5 AS ONE BULK SERVER SCAN
 - Replaces up to 90 browser-side /api/chart-preview requests with one /api/early-reversal-scan request. Layer 2.5 no longer downloads full chart-preview payloads just to inspect the last few daily bars.
 - The server computes the existing failed-2D / continuation logic directly from cached daily OHLC using dl_ohlc, with controlled concurrency of 3 workers and per-ticker failure isolation.

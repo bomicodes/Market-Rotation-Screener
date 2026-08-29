@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.0"
+APP_VERSION = "27.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -3514,10 +3514,13 @@ def _early_reversal_signal_from_ohlc(df):
         return {"kind":"TREND CONTINUATION","phase":"CONTINUATION","score":3,"detail":"Two green daily bars with higher close and strong close location"}
     return None
 
-@app.post("/api/early-reversal-scan")
+@app.route("/api/early-reversal-scan",methods=["GET","POST"])
 def api_early_reversal_scan():
-    body=request.get_json(silent=True) or {}
-    raw=body.get("tickers") or []
+    if request.method=="GET":
+        raw=(request.args.get("tickers") or "").split(",")
+    else:
+        body=request.get_json(silent=True) or {}
+        raw=body.get("tickers") or []
     tickers=[]; seen=set()
     for value in raw:
         t=str(value or "").upper().strip()
@@ -7694,10 +7697,11 @@ async function runAutomaticTopSetups(force=false){
 
    if(st)st.textContent=`Layer 2.5 · checking early daily reversals on ${candidates.length} candidates`;
    try{
-     const ac=(typeof AbortController!=="undefined")?new AbortController():null;
-     const timer=ac?setTimeout(()=>ac.abort(),60000):null;
-     const resp=await fetch("/api/early-reversal-scan",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json",Accept:"application/json"},body:JSON.stringify({tickers:candidates.map(x=>x.ticker)}),...(ac?{signal:ac.signal}:{})});
-     if(timer)clearTimeout(timer);
+     const tickerList=candidates.map(x=>String(x.ticker||"").toUpperCase()).filter(Boolean).join(",");
+     const url=`/api/early-reversal-scan?tickers=${encodeURIComponent(tickerList)}`;
+     const request=fetch(url);
+     const timeout=new Promise((_,reject)=>setTimeout(()=>reject(new Error("Layer 2.5 bulk scan timeout")),60000));
+     const resp=await Promise.race([request,timeout]);
      const j=await resp.json();
      if(!resp.ok||!j?.ok)throw new Error(j?.error||`Layer 2.5 bulk scan failed (${resp.status})`);
      const signals=j.signals||{};
