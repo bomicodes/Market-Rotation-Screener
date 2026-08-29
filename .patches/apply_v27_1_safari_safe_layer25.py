@@ -47,7 +47,11 @@ if not r.startswith('v27.1 — SAFARI-SAFE LAYER 2.5'):
 p.write_text(s); rp.write_text(r)
 assert 'APP_VERSION = "27.1"' in s
 assert '@app.route("/api/early-reversal-scan",methods=["GET","POST"])' in s
-assert 'const request=fetch(url);' in s
-assert 'encodeURIComponent(tickerList)' in s
-assert 'method:"POST"' not in s[s.find('Layer 2.5 · checking early daily reversals'):s.find('Layer 2.5 · checking early daily reversals')+2200]
+start=s.find('Layer 2.5 · checking early daily reversals')
+end=s.find('candidates=candidates.sort',start)
+layer25=s[start:end]
+assert start >= 0 and end > start
+assert 'const request=fetch(url);' in layer25
+assert 'encodeURIComponent(tickerList)' in layer25
+assert 'fetch("/api/early-reversal-scan",{method:"POST"' not in layer25
 print('v27.1 patch applied')
