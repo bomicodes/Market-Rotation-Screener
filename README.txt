@@ -1,3 +1,10 @@
+v26.3 — TEMPORAL OPPORTUNITY LANES + CONTINUATION PRESERVATION
+- Top Setups now distinguishes EARLY, CONTINUATION, CONFIRMED, and DEVELOPING opportunities instead of treating maximum confirmation as automatically best.
+- EARLY includes failed daily 2-down/reclaim patterns such as the SLB/NOW examples, with extra weight for the second green follow-through day.
+- CONTINUATION detects two-green-day higher-close breakouts, close-near-high behavior, and optional volume expansion so an already-started move is not discarded simply for being underway.
+- The old blanket momentum-extension penalty is reduced for validated continuation plays; extension remains an execution warning rather than a reason to erase a strong continuation setup.
+- Cards now explicitly explain whether the timing edge is early, continuation, or confirmed so the trader can choose between catching the turn and joining a healthy move.
+
 v26.2b — TRADER BOARD DISPLAY FIXES
 - Labels total option cost explicitly as /contract.
 - Missing trigger/invalidation now render as — rather than JavaScript null -> $0 coercion.
