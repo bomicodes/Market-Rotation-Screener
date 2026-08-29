@@ -1,0 +1,44 @@
+name: Apply v27.0 bulk Layer 2.5 redesign
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v27-0.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .patches/apply_v27_0_bulk_layer25.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          r=Path('README.txt').read_text()
+          assert 'APP_VERSION = "27.0"' in s
+          assert '@app.post("/api/early-reversal-scan")' in s
+          assert 'ThreadPoolExecutor(max_workers=workers)' in s
+          assert 'fetch("/api/early-reversal-scan"' in s
+          assert r.startswith('v27.0 — REBUILD LAYER 2.5')
+          start=s.find('Layer 2.5 · checking early daily reversals')
+          block=s[start:start+2500]
+          assert '/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d' not in block
+          print('validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git rm .patches/apply_v27_0_bulk_layer25.py .github/workflows/apply-v27-0.yml
+          git commit -m "v27.0 rebuild Layer 2.5 as bulk OHLC scan"
+          git push
