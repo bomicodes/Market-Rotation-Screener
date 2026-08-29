@@ -1,0 +1,32 @@
+name: Apply v26.2 early-move detection
+on: workflow_dispatch
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .patches/apply_v26_2_early_move.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "26.2"' in s
+          assert 'FAILED 2D + 2 GREEN' in s
+          assert 'v262DailyReversalSignal' in s
+          assert 'Layer 2.5 · checking early daily reversals' in s
+          assert 'v262EarlyMoveScore(b)+bq' in s
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git commit -m "v26.2 catch failed-2D reversals before confirmation lag"
+          git rm .patches/apply_v26_2_early_move.py .github/workflows/apply-v26-2.yml
+          git commit --amend --no-edit
+          git push
