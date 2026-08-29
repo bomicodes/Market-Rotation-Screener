@@ -1,3 +1,9 @@
+v25.37 — MOBILE TOP SETUP PREMIUM RELIABILITY
+- Premium Support results are now cached server-side for 30 minutes by ticker/direction so a result completed on desktop can be reused by mobile without repeating the expensive Alpaca history work immediately.
+- Added bounded retries for transient 429/502/503/504/network failures in the Top Setups premium layer.
+- Failed mobile requests are now explicitly stored as retryable failures instead of silently disappearing into console-only errors / showing as not evaluated.
+- Added a delayed rehydration pass that retries only missing/transient premium rows and re-renders Top Setups when results arrive.
+
 v25.36 — STOCK RRG SUMMARY CLICK = FOCUS ONLY
 - Extended the v25.35 focus-only behavior to the Stock RRG summary rows themselves. Clicking a stock in the summary now only highlights that ticker on the Stock RRG and dims the others; it no longer bubbles into the deep-dive/Volume Profile navigation handler.
 - Interactive controls inside the row (buttons/links/inputs) are left alone. Clicking the selected stock again still clears the RRG focus.

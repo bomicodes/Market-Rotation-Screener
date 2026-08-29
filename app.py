@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.36"
+APP_VERSION = "25.37"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -3410,7 +3410,7 @@ def api_premium_support(ticker):
         direction=(request.args.get("direction") or "bullish").lower()
         if direction not in ("bullish","bearish"):direction="bullish"
         base,_,_=cached_refresh_safe(f"options-v24-1:{ticker.upper()}:0-30:7:35",lambda:options_quality_payload(ticker,"0-30",35,7),ttl=600)
-        payload,stale,err=cached_refresh_safe(f"premium-support-v25-9:{ticker.upper()}:{direction}",lambda:premium_support_payload(ticker,direction,base),ttl=300)
+        payload,stale,err=cached_refresh_safe(f"premium-support-v25-9:{ticker.upper()}:{direction}",lambda:premium_support_payload(ticker,direction,base),ttl=1800)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7310,6 +7310,44 @@ function renderHeatMap(){
 }));
 }
 const premiumSupportMap=window.premiumSupportMap||(window.premiumSupportMap={});
+function premiumDirectionFor(x){
+ const va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
+ return (va?.direction&&va.direction!=="neutral")?va.direction:((strat?.continuity==="bullish"||strat?.continuity==="bearish")?strat.continuity:null);
+}
+function sleepMs(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function fetchPremiumSupportReliable(ticker,direction,attempts=3){
+ const delays=[0,1200,3500];let lastErr=null;
+ for(let i=0;i<attempts;i++){
+   if(delays[i])await sleepMs(delays[i]);
+   try{
+     const url=`/api/premium-support/${encodeURIComponent(ticker)}?direction=${encodeURIComponent(direction)}`;
+     const r=await fetch(url,{headers:{"Accept":"application/json"},cache:"no-store"});
+     const raw=await r.text();let j={};
+     try{j=raw?JSON.parse(raw):{}}catch(_e){throw new Error(`Unreadable premium response (${r.status})`)}
+     if(r.ok&&j.ok)return j;
+     const msg=j?.error||`HTTP ${r.status}`;
+     if(![429,502,503,504].includes(r.status))throw new Error(msg);
+     lastErr=new Error(msg);
+   }catch(e){lastErr=e}
+ }
+ throw lastErr||new Error("Premium support request failed");
+}
+async function rehydrateMissingPremiumSupport(rows){
+ const missing=(rows||[]).filter(x=>{
+   const p=premiumSupportMap[x.ticker];
+   return !p || p.retryable===true;
+ }).slice(0,10);
+ if(!missing.length)return;
+ for(let n=0;n<missing.length;n+=2){
+   await Promise.all(missing.slice(n,n+2).map(async x=>{
+     const direction=premiumDirectionFor(x);if(!direction)return;
+     try{
+       premiumSupportMap[x.ticker]=await fetchPremiumSupportReliable(x.ticker,direction,2);
+     }catch(e){premiumSupportMap[x.ticker]={available:false,retryable:true,direction,reason:`Temporary request failure · ${e.message}`};}
+   }));
+ }
+ renderTopSetups();
+}
 function topSetupEvaluation(x){
  const reasons=[],f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker],premium=premiumSupportMap[x.ticker];
  let raw=0,premiumAdjustment=0;
@@ -7569,19 +7607,20 @@ async function runAutomaticTopSetups(force=false){
    for(let n=0;n<finalists.length;n+=3){
      const batch=finalists.slice(n,n+3);
      await Promise.all(batch.map(async x=>{
-       const va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker];
-       const direction=(va?.direction&&va.direction!=="neutral")?va.direction:((strat?.continuity==="bullish"||strat?.continuity==="bearish")?strat.continuity:null);
+       const direction=premiumDirectionFor(x);
        if(!direction)return;
        try{
-         const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=${encodeURIComponent(direction)}`),j=await r.json();
-         if(r.ok&&j.ok)premiumSupportMap[x.ticker]=j;
-         else premiumSupportMap[x.ticker]={available:false,reason:j?.error||`HTTP ${r.status}`};
-       }catch(e){console.warn("premium support",x.ticker,e)}
+         premiumSupportMap[x.ticker]=await fetchPremiumSupportReliable(x.ticker,direction,3);
+       }catch(e){
+         premiumSupportMap[x.ticker]={available:false,retryable:true,direction,reason:`Temporary request failure · ${e.message}`};
+         console.warn("premium support",x.ticker,e);
+       }
      }));
    }
 
    globalTopSetupData=finalists;
    automaticTopSetupsLastRun=Date.now();
+   setTimeout(()=>rehydrateMissingPremiumSupport(finalists),1800);
    if(st)st.textContent=`Market-wide scan complete · ${groups.length} groups considered · ${finalists.length} finalists`;
  }catch(e){
    globalTopSetupData=[];
