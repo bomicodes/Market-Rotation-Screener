@@ -1,3 +1,9 @@
+v26.9 — HARDEN LAYER 2.5 SO ONE TICKER CANNOT FAIL THE SCAN
+- Fixes the new Layer 2.5 failure mode introduced by v26.7: AbortController construction occurred outside the per-ticker try/catch and batches still used Promise.all, so an unexpected client-side exception could reject the entire batch and terminate Top Setups at Layer 2.5.
+- Each chart-preview enrichment is now fully isolated. AbortController is feature-detected, the 8-second bound is enforced with Promise.race, and batches use Promise.allSettled so a timeout, network failure, JSON error, browser compatibility issue, or other single-ticker exception cannot reject the Layer 2.5 batch.
+- If AbortController is unavailable, the scan still advances after 8 seconds; the underlying browser request may finish later, but it no longer blocks Top Setups.
+- This changes only Layer 2.5 resilience. Candidate ranking, early-reversal logic, v26.5 persistence, and the v26.8 shared safeTickerFetchJson retry behavior are unchanged.
+
 v26.8 — TIMEOUT FOR safeTickerFetchJson (FOLLOW-UP TO THE v26.7 LAYER 2.5 FIX)
 - safeTickerFetchJson (shared by flow, options, STRAT, institutional-context, and single-stock chart-preview) had retry logic for HTTP error codes (429/502/503/504) but no actual request timeout — a request that hung with no response and no error would block forever, the same class of stall fixed for Layer 2.5's bulk scan in v26.7, just for these single-ticker deep-dive calls instead.
 - Fixed: each attempt now runs under a 12-second AbortController timeout (configurable per call via opts.timeoutMs). A timeout is treated as retryable, same as the existing dispatch-failure handling, so it flows through the same backoff schedule and stale-cache fallback that already existed — no change to that behavior, just closing the "hangs forever with no timeout at all" gap.

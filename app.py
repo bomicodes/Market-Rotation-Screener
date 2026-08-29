@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "26.8"
+APP_VERSION = "26.9"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7630,14 +7630,24 @@ async function runAutomaticTopSetups(force=false){
 
    if(st)st.textContent=`Layer 2.5 · checking early daily reversals on ${candidates.length} candidates`;
    for(let n=0;n<candidates.length;n+=6){
-     await Promise.all(candidates.slice(n,n+6).map(async x=>{
-       const ac=new AbortController();
-       const timer=setTimeout(()=>ac.abort(),8000);
+     await Promise.allSettled(candidates.slice(n,n+6).map(async x=>{
+       let ac=null,timer=null;
        try{
-         const r=await fetch(`/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d`,{signal:ac.signal}),j=await r.json();
-         if(r.ok&&j.ok)x._earlyPriceSignal=v262DailyReversalSignal(j);
-       }catch(e){ /* timeout or network error on one ticker should not block the rest of the scan */ }
-       finally{clearTimeout(timer)}
+         const url=`/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d`;
+         const hasAbort=typeof AbortController!=="undefined";
+         if(hasAbort)ac=new AbortController();
+         const request=fetch(url,hasAbort?{signal:ac.signal}:{});
+         const timeout=new Promise((_,reject)=>{
+           timer=setTimeout(()=>{
+             try{if(ac)ac.abort()}catch(_e){}
+             reject(new Error("Layer 2.5 chart-preview timeout"));
+           },8000);
+         });
+         const resp=await Promise.race([request,timeout]);
+         const j=await resp.json();
+         if(resp.ok&&j.ok)x._earlyPriceSignal=v262DailyReversalSignal(j);
+       }catch(e){ /* one ticker is optional enrichment; never fail the scan */ }
+       finally{if(timer)clearTimeout(timer)}
      }));
    }
    candidates=candidates.sort((a,b)=>v262EarlyMoveScore(b)-v262EarlyMoveScore(a)).slice(0,60);
