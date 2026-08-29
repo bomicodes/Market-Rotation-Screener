@@ -1,3 +1,11 @@
+v26.2 — EARLIER MOVE DETECTION
+- Top Setups now considers Lagging-but-turning sectors before they fully graduate into Improving/Leading, reducing confirmation lag.
+- Added daily failed-2D reversal detection: a 2-down that trades below the prior low but reclaims it, with extra priority when followed by a second green day/follow-through.
+- Early price reversal strength now promotes candidates before the expensive Top-16 STRAT/value/premium stage instead of waiting for RRG confirmation after the move.
+- Broadened the preliminary pool and allows turning-tail stocks to survive the first stock gate even before favorable-quadrant confirmation.
+- Early Turn / speculative signals stay visible alongside confirmed Top Setups so the dashboard shows both EARLY and CONFIRMED opportunities.
+- v26.1 display fixes are retained separately in the next patch if not already merged.
+
 v25.37 — MOBILE TOP SETUP PREMIUM RELIABILITY
 - Premium Support results are now cached server-side for 30 minutes by ticker/direction so a result completed on desktop can be reused by mobile without repeating the expensive Alpaca history work immediately.
 - Added bounded retries for transient 429/502/503/504/network failures in the Top Setups premium layer.

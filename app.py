@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "26.0"
+APP_VERSION = "26.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7351,6 +7351,7 @@ async function rehydrateMissingPremiumSupport(rows){
 function topSetupEvaluation(x){
  const reasons=[],f=x.fast||x,t=x.trend||{},opt=optionScanMap[x.ticker],va=valueAcceptanceMap[x.ticker],strat=stratSignalMap[x.ticker],premium=premiumSupportMap[x.ticker];
  let raw=0,premiumAdjustment=0;
+ if(x?._earlyPriceSignal){raw+=x._earlyPriceSignal.score||0;reasons.push([x._earlyPriceSignal.kind,"instGood"]);}
 
  const parent=x._parentGroup||null;
  if(parent){
@@ -7506,6 +7507,28 @@ function preliminaryRRGScore(x){
  return s;
 }
 
+function v262DailyReversalSignal(payload){
+ const b=(payload?.bars||[]).filter(x=>Number.isFinite(Number(x.close))&&Number.isFinite(Number(x.open))&&Number.isFinite(Number(x.high))&&Number.isFinite(Number(x.low)));
+ if(b.length<4)return null;
+ const a=b[b.length-3],d1=b[b.length-2],d2=b[b.length-1];
+ const aLow=Number(a.low),aHigh=Number(a.high),d1Low=Number(d1.low),d1Close=Number(d1.close),d1Open=Number(d1.open),d2Close=Number(d2.close),d2Open=Number(d2.open),d2High=Number(d2.high);
+ // Failed 2-down: prior bar trades below the preceding low but closes back above it.
+ const failed2d=d1Low<aLow && d1Close>aLow;
+ const green1=d1Close>d1Open,green2=d2Close>d2Open;
+ const followThrough=d2Close>d1Close || d2High>Number(d1.high);
+ if(failed2d&&green1&&green2&&followThrough)return {kind:'FAILED 2D + 2 GREEN',score:5,detail:'Failed daily 2-down reclaimed the prior low, followed by two green daily bars'};
+ if(failed2d&&green1)return {kind:'FAILED 2D REVERSAL',score:3,detail:'Daily 2-down failed and reclaimed the prior low'};
+ return null;
+}
+function v262EarlyMoveScore(x){
+ const sig=x?._earlyPriceSignal;let s=preliminaryRRGScore(x);
+ if(sig)s+=Number(sig.score||0);
+ const f=x?.fast||x||{},t=x?.trend||{};
+ const fIn=(f?.tail_trajectory?f.tail_trajectory==='Rotating In':(f?.rs_up===true&&f?.mom_up===true));
+ const tIn=(t?.tail_trajectory?t.tail_trajectory==='Rotating In':(t?.rs_up===true&&t?.mom_up===true));
+ if(fIn)s+=2;if(tIn)s+=1;
+ return s;
+}
 async function runAutomaticTopSetups(force=false){
  // On mobile, suppress only background/automatic scans. An explicit user tap
  // (force=true) is allowed now that the Render service has more headroom.
@@ -7530,7 +7553,7 @@ async function runAutomaticTopSetups(force=false){
    // Every sector/theme is considered at Layer 1. Only supportive groups move
    // into the more expensive holdings/options/chart stages.
    const groups=(sectorData||[]).filter(g=>["Core Sector","Industry / Theme"].includes(g.group));
-   const supportive=groups.filter(groupTrajectoryPass).sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a));
+   const supportive=groups.filter(g=>groupTrajectoryPass(g)||strongestLaggingSectors(Math.max(3,groups.length)).some(z=>z.ticker===g.ticker)).sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a));
    if(st)st.textContent=`Layer 1 · ${supportive.length}/${groups.length} supportive groups`;
 
    const pool=[];
@@ -7548,7 +7571,10 @@ async function runAutomaticTopSetups(force=false){
      }));
      results.filter(Boolean).forEach(({g,j})=>{
        (j.results||[]).forEach(x=>{
-         if(!stockTrajectoryPrefilter(x))return;
+         const f=x?.fast||x||{},t=x?.trend||{};
+         const fIn=(f?.tail_trajectory?f.tail_trajectory==="Rotating In":(f?.rs_up===true&&f?.mom_up===true));
+         const tIn=(t?.tail_trajectory?t.tail_trajectory==="Rotating In":(t?.rs_up===true&&t?.mom_up===true));
+         if(!stockTrajectoryPrefilter(x)&&!fIn&&!tIn)return;
          pool.push({...x,_parentTicker:g.ticker,_parentGroup:g,_parentHeat:sectorHeatScore(g)});
        });
      });
@@ -7561,8 +7587,19 @@ async function runAutomaticTopSetups(force=false){
      const old=dedupe.get(x.ticker);
      if(!old || Number(x._parentHeat||0)>Number(old._parentHeat||0))dedupe.set(x.ticker,x);
    });
-   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,60);
+   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,90);
    if(!candidates.length)throw Error("No stocks passed the market-wide RRG trajectory gate.");
+
+   if(st)st.textContent=`Layer 2.5 · checking early daily reversals on ${candidates.length} candidates`;
+   for(let n=0;n<candidates.length;n+=6){
+     await Promise.all(candidates.slice(n,n+6).map(async x=>{
+       try{
+         const r=await fetch(`/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d`),j=await r.json();
+         if(r.ok&&j.ok)x._earlyPriceSignal=v262DailyReversalSignal(j);
+       }catch(e){}
+     }));
+   }
+   candidates=candidates.sort((a,b)=>v262EarlyMoveScore(b)-v262EarlyMoveScore(a)).slice(0,60);
 
    if(st)st.textContent=`Layer 3 · checking options on ${candidates.length} RRG candidates`;
    const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)})});
@@ -7583,7 +7620,7 @@ async function runAutomaticTopSetups(force=false){
      const ao=optionScanMap[a.ticker],bo=optionScanMap[b.ticker];
      const aq=(ao?.liquidity==="Liquid"?2:1)+(ao?.iv_state==="Cheap / Crushed"?2:ao?.iv_state==="Normal"?1:0);
      const bq=(bo?.liquidity==="Liquid"?2:1)+(bo?.iv_state==="Cheap / Crushed"?2:bo?.iv_state==="Normal"?1:0);
-     return (preliminaryRRGScore(b)+bq)-(preliminaryRRGScore(a)+aq);
+     return (v262EarlyMoveScore(b)+bq)-(v262EarlyMoveScore(a)+aq);
    }).slice(0,16);
 
    if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;
@@ -7755,8 +7792,7 @@ async function runSpeculativeSignals(){
 function updateSpeculativeSignalsVisibility(qualifiedCount){
  const el=document.getElementById("speculativeSignalsPanel");
  if(!el)return;
- if(qualifiedCount>0)el.removeAttribute("open");
- else el.setAttribute("open","");
+ el.setAttribute("open","");
 }
 let earlyTurnWatchData=[],earlyTurnWatchRunning=false,earlyTurnSectorContext=null;
 async function runEarlyTurnWatch(){
