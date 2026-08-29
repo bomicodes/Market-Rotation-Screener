@@ -1,3 +1,7 @@
+v25.36 — STOCK RRG SUMMARY CLICK = FOCUS ONLY
+- Extended the v25.35 focus-only behavior to the Stock RRG summary rows themselves. Clicking a stock in the summary now only highlights that ticker on the Stock RRG and dims the others; it no longer bubbles into the deep-dive/Volume Profile navigation handler.
+- Interactive controls inside the row (buttons/links/inputs) are left alone. Clicking the selected stock again still clears the RRG focus.
+
 v25.35 — STOCK RRG CLICK = FOCUS ONLY
 - Fixed Stock RRG interaction so clicking a ticker label/endpoint now only highlights that stock's tail and dims the others in place.
 - Removed the automatic jump into the chart / Volume Profile from Stock RRG clicks. The stock table/watchlist remains the explicit path into the deep-dive panels.

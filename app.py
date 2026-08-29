@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "25.35"
+APP_VERSION = "25.36"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5897,6 +5897,21 @@ function installRRGInteractions(id){
 installRRGInteractions("sectorChart");
 installRRGInteractions("stockChart");
 installRRGInteractions("historyChart");
+
+function installStockSummaryFocusOnly(){
+ document.addEventListener("click",evt=>{
+   const target=evt.target;
+   if(!target||!target.closest)return;
+   if(target.closest("button,a,input,select,textarea"))return;
+   const row=target.closest("[data-live-ticker]");
+   if(!row)return;
+   evt.preventDefault();
+   evt.stopImmediatePropagation();
+   const ticker=row.dataset.liveTicker;
+   if(ticker)toggleRRGFocus("stockChart",ticker);
+ },true);
+}
+installStockSummaryFocusOnly();
 const MACRO_BASKETS={
  rate:new Set(["XLK","XLC","XLU","XLRE","XLP"]),
  cyclical:new Set(["XLY","XLI","XLF","XLB"]),
