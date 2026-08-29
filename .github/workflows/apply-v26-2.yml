@@ -1,5 +1,8 @@
 name: Apply v26.2 early-move detection
-on: workflow_dispatch
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v26-2.yml'
 permissions:
   contents: write
 jobs:
