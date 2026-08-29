@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/apply-v27-4.yml'
+      - '.patches/apply_v27_4_scan_speed.py'
 
 permissions:
   contents: write
