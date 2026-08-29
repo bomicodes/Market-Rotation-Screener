@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "26.3"
+APP_VERSION = "26.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7551,7 +7551,10 @@ function v263OpportunityLane(x){
  const tIn=(t?.tail_trajectory?t.tail_trajectory==='Rotating In':(t?.rs_up===true&&t?.mom_up===true));
  if(sig?.phase==='EARLY')return {lane:'EARLY',detail:sig.kind};
  if(sig?.phase==='CONTINUATION')return {lane:'CONTINUATION',detail:sig.kind};
- const confirmed=(va?.strength==='CONFIRMED')&&(st?.continuity==='bullish'||st?.continuity==='bearish')&&(fIn||tIn);
+ // Value Acceptance and STRAT must agree on direction. Merely having a
+ // bullish/bearish STRAT continuity value is not enough for CONFIRMED.
+ const directionAgrees=va?.direction&&st?.continuity&&va.direction===st.continuity;
+ const confirmed=(va?.strength==='CONFIRMED')&&directionAgrees&&(fIn||tIn);
  if(confirmed)return {lane:'CONFIRMED',detail:'Value + STRAT + rotation aligned'};
  return {lane:'DEVELOPING',detail:'Setup building'};
 }
@@ -8587,6 +8590,47 @@ renderTopSetups=function(){
    }
  });
  return out;
+};
+
+// v26.5: keep the existing Top Setups presentation stable across transient
+// empty refreshes / overnight and weekend rescans. This intentionally adds no
+// card labels or status UI; it only preserves the last non-empty rendered board.
+const V265_TOP_SETUP_CACHE='top-setups-last-nonempty-v265';
+function v265CacheTopSetups(){
+ try{
+   const rows=Array.isArray(globalTopSetupData)?globalTopSetupData:[];
+   const grid=document.getElementById('topSetupsGrid');
+   if(!rows.length||!grid||!grid.innerHTML.trim())return;
+   localStorage.setItem(V265_TOP_SETUP_CACHE,JSON.stringify({savedAt:Date.now(),rows:rows,html:grid.innerHTML}));
+ }catch(e){}
+}
+function v265RestoreTopSetups(){
+ try{
+   if(Array.isArray(globalTopSetupData)&&globalTopSetupData.length)return false;
+   const raw=localStorage.getItem(V265_TOP_SETUP_CACHE);if(!raw)return false;
+   const saved=JSON.parse(raw),age=Date.now()-Number(saved?.savedAt||0);
+   // Four calendar days safely spans a Fri-close -> Mon-premarket gap while
+   // preventing an old board from lingering indefinitely.
+   if(!Array.isArray(saved?.rows)||!saved.rows.length||!saved.html||age<0||age>96*60*60*1000){
+     localStorage.removeItem(V265_TOP_SETUP_CACHE);return false;
+   }
+   const grid=document.getElementById('topSetupsGrid');if(!grid)return false;
+   globalTopSetupData=saved.rows;
+   grid.innerHTML=saved.html;
+   return true;
+ }catch(e){return false;}
+}
+const _runAutomaticTopSetupsV265=runAutomaticTopSetups;
+runAutomaticTopSetups=async function(force=false){
+ try{
+   const out=await _runAutomaticTopSetupsV265(force);
+   if(Array.isArray(globalTopSetupData)&&globalTopSetupData.length){setTimeout(v265CacheTopSetups,0);}
+   else{v265RestoreTopSetups();}
+   return out;
+ }catch(e){
+   if(v265RestoreTopSetups())return null;
+   throw e;
+ }
 };
 
 </script>

@@ -1,3 +1,9 @@
+v26.5 — STABILIZE TOP SETUPS ACROSS EMPTY REFRESHES
+- Preserves the last non-empty Top Setups board in browser storage and silently restores it when a later scan unexpectedly returns zero or throws, so overnight/weekend refreshes do not make valid setups disappear at random.
+- No card UI changes: no carried/ready labels, timestamps, or extra status text were added. A normal non-empty scan immediately replaces the saved board.
+- Saved boards expire after four calendar days so stale setups cannot linger indefinitely across multiple sessions.
+- Includes the v26.4 direction-agreement fix: CONFIRMED now requires Value Acceptance direction to equal STRAT continuity direction before receiving confirmed-lane rank weight.
+
 v26.3 — TEMPORAL OPPORTUNITY LANES + CONTINUATION PRESERVATION
 - Top Setups now distinguishes EARLY, CONTINUATION, CONFIRMED, and DEVELOPING opportunities instead of treating maximum confirmation as automatically best.
 - EARLY includes failed daily 2-down/reclaim patterns such as the SLB/NOW examples, with extra weight for the second green follow-through day.
