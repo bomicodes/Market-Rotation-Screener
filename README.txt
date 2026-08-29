@@ -1,3 +1,9 @@
+v27.0 — REBUILD LAYER 2.5 AS ONE BULK SERVER SCAN
+- Replaces up to 90 browser-side /api/chart-preview requests with one /api/early-reversal-scan request. Layer 2.5 no longer downloads full chart-preview payloads just to inspect the last few daily bars.
+- The server computes the existing failed-2D / continuation logic directly from cached daily OHLC using dl_ohlc, with controlled concurrency of 3 workers and per-ticker failure isolation.
+- This removes the 6-request browser burst against a 1-worker/4-thread Render service, avoids queue time consuming client-side per-ticker timeouts, and dramatically reduces JSON/network overhead.
+- If the bulk enrichment itself is unavailable, Top Setups continues without early-price bonuses rather than failing the scan.
+
 v26.9 — HARDEN LAYER 2.5 SO ONE TICKER CANNOT FAIL THE SCAN
 - Fixes the new Layer 2.5 failure mode introduced by v26.7: AbortController construction occurred outside the per-ticker try/catch and batches still used Promise.all, so an unexpected client-side exception could reject the entire batch and terminate Top Setups at Layer 2.5.
 - Each chart-preview enrichment is now fully isolated. AbortController is feature-detected, the 8-second bound is enforced with Promise.race, and batches use Promise.allSettled so a timeout, network failure, JSON error, browser compatibility issue, or other single-ticker exception cannot reject the Layer 2.5 batch.
