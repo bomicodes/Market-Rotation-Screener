@@ -5,85 +5,52 @@ s=p.read_text()
 assert 'APP_VERSION = "27.2"' in s
 s=s.replace('APP_VERSION = "27.2"','APP_VERSION = "27.4"',1)
 
-old='''async function auditHoldings(){
- const p=document.getElementById("auditPanel");p.style.display="block";p.textContent="Checking issuer holdings feeds…";
- try{
-   let r=await fetch("/api/holdings-audit"),j=await r.json();if(!j.ok)throw Error(j.error||"Audit failed");
-   p.innerHTML=`<div class="scroll"><table><thead><tr><th>ETF</th><th>Holdings loaded</th><th>Source</th><th>Status</th></tr></thead><tbody>${j.results.map(x=>`<tr><td><b>${x.etf}</b><div class="tiny">${x.name}</div></td><td>${x.count}</td><td>${x.source}</td><td>${!x.ok?"⚠️ "+(x.error||"failed"):(x.partial?"⚠️ PARTIAL":"✓ FULL")}</td></tr>`).join("")}</tbody></table></div>`;
- }catch(e){p.innerHTML=`<span class="error">${e.message}</span>`}
-}
+start=s.index('async function auditHoldings(){')
+end=s.index('function applyMarketPayload(',start)
+s=s[:start]+s[end:]
 
-'''
-assert old in s
-s=s.replace(old,'',1)
-
-old='''async function fetchPremiumSupportReliable(ticker,direction,attempts=3){
-  const delays=[0,1200,3500];let lastErr=null;
-  for(let i=0;i<attempts;i++){
-    if(delays[i])await sleepMs(delays[i]);
-    try{
-      const url=`/api/premium-support/${encodeURIComponent(ticker)}?direction=${encodeURIComponent(direction)}`;
-      const r=await fetch(url,{headers:{"Accept":"application/json"},cache:"no-store"});
-      const raw=await r.text();let j={};
-      try{j=raw?JSON.parse(raw):{}}catch(_e){throw new Error(`Unreadable premium response (${r.status})`)}
-      if(r.ok&&j.ok)return j;
-      const msg=j?.error||`HTTP ${r.status}`;
-      if(![429,502,503,504].includes(r.status))throw new Error(msg);
-      lastErr=new Error(msg);
-    }catch(e){lastErr=e}
-  }
-  throw lastErr||new Error("Premium support request failed");
-}'''
+start=s.index('async function fetchPremiumSupportReliable(')
+end=s.index('async function rehydrateMissingPremiumSupport(',start)
 new='''async function fetchPremiumSupportReliable(ticker,direction,attempts=3){
-  const delays=[0,1200,3500];let lastErr=null;
-  for(let i=0;i<attempts;i++){
-    if(delays[i])await sleepMs(delays[i]);
-    const ac=new AbortController();
-    const timer=setTimeout(()=>ac.abort(),15000);
-    try{
-      const url=safeTickerUrl("/api/premium-support",ticker,{direction});
-      const r=await fetch(url,{headers:{"Accept":"application/json"},cache:"no-store",signal:ac.signal});
-      const raw=await r.text();let j={};
-      try{j=raw?JSON.parse(raw):{}}catch(_e){throw new Error(`Unreadable premium response (${r.status})`)}
-      if(r.ok&&j.ok)return j;
-      const msg=j?.error||`HTTP ${r.status}`;
-      if(![429,502,503,504].includes(r.status))throw new Error(msg);
-      lastErr=new Error(msg);
-    }catch(e){lastErr=(e?.name==="AbortError")?new Error("Premium support request timed out"):e}
-    finally{clearTimeout(timer)}
-  }
-  throw lastErr||new Error("Premium support request failed");
-}'''
-assert old in s
-s=s.replace(old,new,1)
+ const delays=[0,1200,3500];let lastErr=null;
+ for(let i=0;i<attempts;i++){
+   if(delays[i])await sleepMs(delays[i]);
+   const ac=new AbortController();
+   const timer=setTimeout(()=>ac.abort(),15000);
+   try{
+     const url=safeTickerUrl("/api/premium-support",ticker,{direction});
+     const r=await fetch(url,{headers:{"Accept":"application/json"},cache:"no-store",signal:ac.signal});
+     const raw=await r.text();let j={};
+     try{j=raw?JSON.parse(raw):{}}catch(_e){throw new Error(`Unreadable premium response (${r.status})`)}
+     if(r.ok&&j.ok)return j;
+     const msg=j?.error||`HTTP ${r.status}`;
+     if(![429,502,503,504].includes(r.status))throw new Error(msg);
+     lastErr=new Error(msg);
+   }catch(e){lastErr=(e?.name==="AbortError")?new Error("Premium support request timed out"):e}
+   finally{clearTimeout(timer)}
+ }
+ throw lastErr||new Error("Premium support request failed");
+}
+'''
+s=s[:start]+new+s[end:]
 
-old='''   for(let n=0;n<supportive.length;n+=2){
-     const batch=supportive.slice(n,n+2);
-     const results=await Promise.all(batch.map(async g=>{
-       try{
-         const key=cacheKeySector(g.ticker,"20");
-         if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
-         const r=await fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"}});
-         const j=await r.json();if(!r.ok||!j.ok)return null;
-         clientCache.sectors.set(key,j);return {g,j};
-       }catch(e){return null}
-     }));'''
-new='''   for(let n=0;n<supportive.length;n+=4){
-     const batch=supportive.slice(n,n+4);
-     const results=await Promise.all(batch.map(async g=>{
+start=s.index('   for(let n=0;n<supportive.length;n+=2){')
+end=s.index('\n   // Deduplicate overlapping ETF holdings',start)
+block=s[start:end]
+block=block.replace('for(let n=0;n<supportive.length;n+=2)','for(let n=0;n<supportive.length;n+=4)',1)
+block=block.replace('supportive.slice(n,n+2)','supportive.slice(n,n+4)',1)
+block=block.replace('''     const results=await Promise.all(batch.map(async g=>{
+       try{''','''     const results=await Promise.all(batch.map(async g=>{
        const ac=new AbortController();
        const timer=setTimeout(()=>ac.abort(),20000);
-       try{
-         const key=cacheKeySector(g.ticker,"20");
-         if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
-         const r=await fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"},signal:ac.signal});
-         const j=await r.json();if(!r.ok||!j.ok)return null;
-         clientCache.sectors.set(key,j);return {g,j};
-       }catch(e){return null}
+       try{''',1)
+block=block.replace('''fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"}})''','''fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"},signal:ac.signal})''',1)
+block=block.replace('''       }catch(e){return null}
+     }));''','''       }catch(e){return null}
        finally{clearTimeout(timer)}
-     }));'''
-assert old in s
-s=s.replace(old,new,1)
+     }));''',1)
+block=block.replace('Math.min(n+2,supportive.length)','Math.min(n+4,supportive.length)',1)
+s=s[:start]+block+s[end:]
 
 old='''   const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)})});
    const oj=await or.json();
@@ -102,41 +69,11 @@ new='''   {
 assert old in s
 s=s.replace(old,new,1)
 
-old='''   for(let n=0;n<finalists.length;n+=3){
-     const batch=finalists.slice(n,n+3);
-     await Promise.all(batch.map(async x=>{
-       try{
-         const [cr,sr]=await Promise.all([
-           fetch(`/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d`),
-           fetch(`/api/strat/${encodeURIComponent(x.ticker)}`)
-         ]);
-         const cj=await cr.json(),sj=await sr.json();
-         if(cr.ok&&cj.ok)valueAcceptanceMap[x.ticker]=classifyValueAcceptance(cj);
-         if(sr.ok&&sj.ok)stratSignalMap[x.ticker]=sj;
-       }catch(e){}
-     }));
-   }
-
-   // Layer 5: analyze the option premium itself for final directional candidates.
-   if(st)st.textContent=`Layer 5 · checking premium support on ${finalists.length} finalists`;
-   for(let n=0;n<finalists.length;n+=3){
-     const batch=finalists.slice(n,n+3);
-     await Promise.all(batch.map(async x=>{
-       const direction=premiumDirectionFor(x);
-       if(!direction)return;
-       try{
-         premiumSupportMap[x.ticker]=await fetchPremiumSupportReliable(x.ticker,direction,3);
-       }catch(e){
-         premiumSupportMap[x.ticker]={available:false,retryable:true,direction,reason:`Temporary request failure · ${e.message}`};
-         console.warn("premium support",x.ticker,e);
-       }
-     }));
-   }
-
-   globalTopSetupData=finalists;
-   automaticTopSetupsLastRun=Date.now();
-   setTimeout(()=>rehydrateMissingPremiumSupport(finalists),1800);'''
-new='''   for(let n=0;n<finalists.length;n+=2){
+start=s.index('   if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;')
+end=s.index('\n   if(st)st.textContent=`Market-wide scan complete',start)
+oldblock=s[start:end]
+newblock='''   if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;
+   for(let n=0;n<finalists.length;n+=2){
      const batch=finalists.slice(n,n+2);
      await Promise.all(batch.map(async x=>{
        const [cj,sj]=await Promise.allSettled([
@@ -171,31 +108,41 @@ new='''   for(let n=0;n<finalists.length;n+=2){
    runPremiumSupportInBackground().then(()=>{
      setTimeout(()=>rehydrateMissingPremiumSupport(finalists),1800);
    });'''
-assert old in s
-s=s.replace(old,new,1)
+assert 'Layer 5 · checking premium support' in oldblock
+s=s[:start]+newblock+s[end:]
 
-# Early Turn Watch timeout/Safari hardening from v27.3 portion of supplied patch.
-s=s.replace('''       const sr=await fetch(`/api/sector/${encodeURIComponent(topLaggingSector.ticker)}?limit=10`);
-       sj=await sr.json();''','''       const secAc=new AbortController();
+old='''       const sr=await fetch(`/api/sector/${encodeURIComponent(topLaggingSector.ticker)}?limit=10`);
+       sj=await sr.json();'''
+new='''       const secAc=new AbortController();
        const secTimer=setTimeout(()=>secAc.abort(),20000);
        let sr;
        try{ sr=await fetch(`/api/sector/${encodeURIComponent(topLaggingSector.ticker)}?limit=10`,{signal:secAc.signal}); }
        finally{ clearTimeout(secTimer); }
-       sj=await sr.json();''',1)
-s=s.replace('''         const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:holdings.map(h=>h.ticker)})});
-         const oj=await or.json();''','''         const optAc=new AbortController();
+       sj=await sr.json();'''
+assert old in s
+s=s.replace(old,new,1)
+
+old='''         const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:holdings.map(h=>h.ticker)})});
+         const oj=await or.json();'''
+new='''         const optAc=new AbortController();
          const optTimer=setTimeout(()=>optAc.abort(),30000);
          let or;
          try{ or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:holdings.map(h=>h.ticker)}),signal:optAc.signal}); }
          finally{ clearTimeout(optTimer); }
-         const oj=await or.json();''',1)
-s=s.replace('''       const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=bullish`);
-       const j=await r.json();''','''       const psAc=new AbortController();
+         const oj=await or.json();'''
+assert old in s
+s=s.replace(old,new,1)
+
+old='''       const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=bullish`);
+       const j=await r.json();'''
+new='''       const psAc=new AbortController();
        const psTimer=setTimeout(()=>psAc.abort(),15000);
        let r;
        try{ r=await fetch(safeTickerUrl("/api/premium-support",x.ticker,{direction:"bullish"}),{signal:psAc.signal}); }
        finally{ clearTimeout(psTimer); }
-       const j=await r.json();''',1)
+       const j=await r.json();'''
+assert old in s
+s=s.replace(old,new,1)
 
 p.write_text(s)
 
@@ -216,7 +163,6 @@ v27.3 — SCAN RELIABILITY: TIMEOUTS + SAFARI-SAFE URLS ACROSS THE FULL PIPELINE
 assert readme.startswith('v27.2')
 r.write_text(entry+readme)
 
-# Static validation: app.py is a Flask module and CI runner intentionally does not install runtime deps.
 out=p.read_text()
 assert 'APP_VERSION = "27.4"' in out
 assert 'for(let n=0;n<supportive.length;n+=4)' in out
