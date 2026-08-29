@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.1"
+APP_VERSION = "27.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -73,15 +73,67 @@ SECTOR_HOLDING_SUPPLEMENTS = {
     "XLB": [{"ticker": "B", "name": "Barrick Mining Corporation", "weight": None}],
 }
 
+_US_EQUITY_SYMBOLS={"loaded_at":0.0,"symbols":None}
+def _basic_us_equity_symbol(value):
+    t=str(value or "").strip().upper().replace(".","-")
+    if not t or len(t)>8 or any(ch not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ-" for ch in t):
+        return None
+    parts=t.split("-")
+    if not parts or not (1<=len(parts[0])<=5) or not parts[0].isalpha():
+        return None
+    if any((not p.isalpha()) or len(p)>2 for p in parts[1:]):
+        return None
+    return t
+
+def _active_alpaca_us_equity_symbols():
+    if not ALPACA_API_KEY or not ALPACA_API_SECRET:
+        return None
+    now=time.time()
+    cached_symbols=_US_EQUITY_SYMBOLS.get("symbols")
+    if cached_symbols is not None and now-float(_US_EQUITY_SYMBOLS.get("loaded_at") or 0)<3600:
+        return cached_symbols
+    try:
+        resp=requests.get(
+            ALPACA_TRADING_BASE_URL+"/v2/assets",
+            params={"status":"active","asset_class":"us_equity"},
+            headers={"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_API_SECRET},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        rows=resp.json() or []
+        symbols={str(x.get("symbol") or "").upper().replace(".","-") for x in rows if x.get("symbol")}
+        if symbols:
+            _US_EQUITY_SYMBOLS["loaded_at"]=now
+            _US_EQUITY_SYMBOLS["symbols"]=symbols
+            return symbols
+    except Exception:
+        pass
+    return cached_symbols
+
+def filter_us_equity_holdings(holdings):
+    active=_active_alpaca_us_equity_symbols()
+    out=[]; seen=set()
+    for h in holdings or []:
+        row=dict(h)
+        t=_basic_us_equity_symbol(row.get("ticker") or row.get("symbol"))
+        if not t or t in seen:
+            continue
+        if active is not None and t not in active:
+            continue
+        row["ticker"]=t
+        seen.add(t)
+        out.append(row)
+    return out
+
 def apply_sector_supplements(etf, holdings):
     out=[dict(h) for h in holdings]
-    seen={str(h.get("ticker") or h.get("symbol") or "").upper() for h in out}
-    for s in SECTOR_HOLDING_SUPPLEMENTS.get(etf, []):
-        sym=str(s.get("ticker") or "").upper()
+    seen={str(h.get("ticker") or h.get("symbol") or "").upper().replace(".","-") for h in out}
+    for extra in SECTOR_HOLDING_SUPPLEMENTS.get(etf, []):
+        sym=str(extra.get("ticker") or "").upper().replace(".","-")
         if sym and sym not in seen:
-            out.append(dict(s))
+            out.append(dict(extra))
             seen.add(sym)
-    return out
+    return filter_us_equity_holdings(out)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 SETUP_DB_PATH = os.environ.get("SETUP_DB_PATH", "/tmp/market_rotation_setups.sqlite3")

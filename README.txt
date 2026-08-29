@@ -1,3 +1,9 @@
+v27.2 — FILTER NON-US / MALFORMED HOLDING SYMBOLS BEFORE PRICE SCANS
+- Render logs showed sector scans sending local/foreign listing codes such as 968, 3800, S92, NOFR, SCATC, DORL, GRE and SLR into Yahoo as if they were US tickers, creating repeated failed downloads and unnecessary work during Top Setups.
+- All holdings now pass through a US-equity namespace filter after issuer/provider retrieval and sector supplements. Obvious malformed/numeric/local-exchange codes are rejected immediately.
+- When Alpaca credentials are available, the filter refreshes Alpaca's active US-equity asset list at most once per hour and only keeps holdings that resolve to an active US equity. If that lookup is temporarily unavailable, the app falls back to a conservative US ticker-shape filter rather than failing the sector scan.
+- This does not change RRG scoring, Top Setups ranking, Layer 2.5 reversal logic, or card presentation. It only prevents invalid/non-US listing identifiers from reaching the expensive price/scan pipeline.
+
 v27.1 — SAFARI-SAFE LAYER 2.5 BULK REQUEST
 - v27.0 successfully moved Layer 2.5 to a single bulk server endpoint, but its browser call used a JSON POST with a complex fetch RequestInit object. That request pattern has previously produced opaque iOS Safari/WebKit DOMException failures elsewhere in this app.
 - Render logs after v27.0 showed no /api/early-reversal-scan request reaching the server during the reported failure, confirming the failure was occurring client-side before dispatch rather than inside the bulk endpoint.
