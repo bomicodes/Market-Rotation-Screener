@@ -1,0 +1,36 @@
+name: Apply v26.0 attention-first trader board
+on:
+  push:
+    paths:
+      - '.patches/apply_v26_0.py'
+      - '.github/workflows/apply-v26-0.yml'
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply patch
+        run: python .patches/apply_v26_0.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'APP_VERSION = "26.0"' in s
+          assert 'v26DecisionStrip' in s
+          assert 'MAX CONTRACT' in s
+          assert 'SETUP QUALITY' in s and 'TRADEABILITY' in s
+          assert 'Why? · full confluence evidence' in s
+          print('v26.0 validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .patches/apply_v26_0.py .github/workflows/apply-v26-0.yml
+          git add -A
+          git commit -m "v26.0 attention-first trader board" || exit 0
+          git push
