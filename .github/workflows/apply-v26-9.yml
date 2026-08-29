@@ -1,0 +1,42 @@
+name: Apply v26.9 Layer 2.5 resilience fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v26-9.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .patches/apply_v26_9_layer25_resilience.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          r=Path('README.txt').read_text()
+          assert 'APP_VERSION = "26.9"' in s
+          assert 'Promise.allSettled(candidates.slice(n,n+6)' in s
+          assert 'typeof AbortController!=="undefined"' in s
+          assert 'Promise.race([request,timeout])' in s
+          assert 'Layer 2.5 chart-preview timeout' in s
+          assert r.startswith('v26.9 — HARDEN LAYER 2.5')
+          print('validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git rm .patches/apply_v26_9_layer25_resilience.py .github/workflows/apply-v26-9.yml
+          git commit -m "v26.9 prevent Layer 2.5 per-ticker failures from aborting scans"
+          git push
