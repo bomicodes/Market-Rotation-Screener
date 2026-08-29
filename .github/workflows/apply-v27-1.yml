@@ -25,8 +25,13 @@ jobs:
           s=Path('app.py').read_text(); r=Path('README.txt').read_text()
           assert 'APP_VERSION = "27.1"' in s
           assert '@app.route("/api/early-reversal-scan",methods=["GET","POST"])' in s
-          assert 'const request=fetch(url);' in s
-          assert 'encodeURIComponent(tickerList)' in s
+          start=s.find('Layer 2.5 · checking early daily reversals')
+          end=s.find('candidates=candidates.sort',start)
+          layer25=s[start:end]
+          assert start >= 0 and end > start
+          assert 'const request=fetch(url);' in layer25
+          assert 'encodeURIComponent(tickerList)' in layer25
+          assert 'fetch("/api/early-reversal-scan",{method:"POST"' not in layer25
           assert r.startswith('v27.1 — SAFARI-SAFE LAYER 2.5')
           print('validation passed')
           PY
