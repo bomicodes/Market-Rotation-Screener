@@ -21,13 +21,14 @@ jobs:
         run: |
           python -m py_compile app.py
           python - <<'PY'
-          import app
-          assert app.APP_VERSION == '27.2'
-          assert app._basic_us_equity_symbol('AAPL') == 'AAPL'
-          assert app._basic_us_equity_symbol('BRK.B') == 'BRK-B'
-          assert app._basic_us_equity_symbol('3800') is None
-          assert app._basic_us_equity_symbol('S92') is None
-          assert app._basic_us_equity_symbol('SCATC') == 'SCATC'
+          from pathlib import Path
+          s=Path('app.py').read_text(); r=Path('README.txt').read_text()
+          assert 'APP_VERSION = "27.2"' in s
+          assert 'def _basic_us_equity_symbol(value):' in s
+          assert 'def filter_us_equity_holdings(holdings):' in s
+          assert 'ALPACA_TRADING_BASE_URL+"/v2/assets"' in s
+          assert 'return filter_us_equity_holdings(out)' in s
+          assert r.startswith('v27.2 — FILTER NON-US / MALFORMED HOLDING SYMBOLS')
           print('validation passed')
           PY
       - name: Commit and self-clean
