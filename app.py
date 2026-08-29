@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.2"
+APP_VERSION = "27.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6082,13 +6082,6 @@ function renderGroups(){
  const dsel=document.getElementById("dashboardSectorSelect");if(dsel&&currentSector&&[...dsel.options].some(o=>o.value===currentSector))dsel.value=currentSector;
 }
 
-async function auditHoldings(){
- const p=document.getElementById("auditPanel");p.style.display="block";p.textContent="Checking issuer holdings feeds…";
- try{
-   let r=await fetch("/api/holdings-audit"),j=await r.json();if(!j.ok)throw Error(j.error||"Audit failed");
-   p.innerHTML=`<div class="scroll"><table><thead><tr><th>ETF</th><th>Holdings loaded</th><th>Source</th><th>Status</th></tr></thead><tbody>${j.results.map(x=>`<tr><td><b>${x.etf}</b><div class="tiny">${x.name}</div></td><td>${x.count}</td><td>${x.source}</td><td>${!x.ok?"⚠️ "+(x.error||"failed"):(x.partial?"⚠️ PARTIAL":"✓ FULL")}</td></tr>`).join("")}</tbody></table></div>`;
- }catch(e){p.innerHTML=`<span class="error">${e.message}</span>`}
-}
 function applyMarketPayload(j,fromCache=false){
  sectorData=j.sectors||[];
  const st=document.getElementById("mstatus");
@@ -7447,16 +7440,19 @@ async function fetchPremiumSupportReliable(ticker,direction,attempts=3){
  const delays=[0,1200,3500];let lastErr=null;
  for(let i=0;i<attempts;i++){
    if(delays[i])await sleepMs(delays[i]);
+   const ac=new AbortController();
+   const timer=setTimeout(()=>ac.abort(),15000);
    try{
-     const url=`/api/premium-support/${encodeURIComponent(ticker)}?direction=${encodeURIComponent(direction)}`;
-     const r=await fetch(url,{headers:{"Accept":"application/json"},cache:"no-store"});
+     const url=safeTickerUrl("/api/premium-support",ticker,{direction});
+     const r=await fetch(url,{headers:{"Accept":"application/json"},cache:"no-store",signal:ac.signal});
      const raw=await r.text();let j={};
      try{j=raw?JSON.parse(raw):{}}catch(_e){throw new Error(`Unreadable premium response (${r.status})`)}
      if(r.ok&&j.ok)return j;
      const msg=j?.error||`HTTP ${r.status}`;
      if(![429,502,503,504].includes(r.status))throw new Error(msg);
      lastErr=new Error(msg);
-   }catch(e){lastErr=e}
+   }catch(e){lastErr=(e?.name==="AbortError")?new Error("Premium support request timed out"):e}
+   finally{clearTimeout(timer)}
  }
  throw lastErr||new Error("Premium support request failed");
 }
@@ -7715,16 +7711,19 @@ async function runAutomaticTopSetups(force=false){
 
    const pool=[];
    // Fetch holdings without changing currentSector/UI selection.
-   for(let n=0;n<supportive.length;n+=2){
-     const batch=supportive.slice(n,n+2);
+   for(let n=0;n<supportive.length;n+=4){
+     const batch=supportive.slice(n,n+4);
      const results=await Promise.all(batch.map(async g=>{
+       const ac=new AbortController();
+       const timer=setTimeout(()=>ac.abort(),20000);
        try{
          const key=cacheKeySector(g.ticker,"20");
          if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
-         const r=await fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"}});
+         const r=await fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"},signal:ac.signal});
          const j=await r.json();if(!r.ok||!j.ok)return null;
          clientCache.sectors.set(key,j);return {g,j};
        }catch(e){return null}
+       finally{clearTimeout(timer)}
      }));
      results.filter(Boolean).forEach(({g,j})=>{
        (j.results||[]).forEach(x=>{
@@ -7735,7 +7734,7 @@ async function runAutomaticTopSetups(force=false){
          pool.push({...x,_parentTicker:g.ticker,_parentGroup:g,_parentHeat:sectorHeatScore(g)});
        });
      });
-     if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+2,supportive.length)}/${supportive.length} supportive groups`;
+     if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+4,supportive.length)}/${supportive.length} supportive groups`;
    }
 
    // Deduplicate overlapping ETF holdings; keep the strongest parent-group context.
@@ -7764,9 +7763,17 @@ async function runAutomaticTopSetups(force=false){
    candidates=candidates.sort((a,b)=>v262EarlyMoveScore(b)-v262EarlyMoveScore(a)).slice(0,60);
 
    if(st)st.textContent=`Layer 3 · checking options on ${candidates.length} RRG candidates`;
-   const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)})});
-   const oj=await or.json();
-   if(or.ok&&oj.ok)(oj.results||[]).forEach(o=>{if(o?.ticker&&o.ok!==false)optionScanMap[o.ticker]=o});
+   {
+     const ac=new AbortController();
+     const timer=setTimeout(()=>ac.abort(),45000);
+     try{
+       const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)}),signal:ac.signal});
+       const oj=await or.json();
+       if(or.ok&&oj.ok)(oj.results||[]).forEach(o=>{if(o?.ticker&&o.ok!==false)optionScanMap[o.ticker]=o});
+     }catch(e){
+       throw new Error(e?.name==="AbortError"?"Options scan timed out — try again in a moment.":`Options scan failed: ${e?.message||e}`);
+     }finally{clearTimeout(timer)}
+   }
 
    candidates=candidates.filter(x=>["Liquid","Tradable"].includes(optionScanMap[x.ticker]?.liquidity));
    if(!candidates.length)throw Error("No RRG candidates passed the Liquid / Tradable options gate.");
@@ -7786,40 +7793,41 @@ async function runAutomaticTopSetups(force=false){
    }).slice(0,16);
 
    if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;
-   for(let n=0;n<finalists.length;n+=3){
-     const batch=finalists.slice(n,n+3);
+   for(let n=0;n<finalists.length;n+=2){
+     const batch=finalists.slice(n,n+2);
      await Promise.all(batch.map(async x=>{
-       try{
-         const [cr,sr]=await Promise.all([
-           fetch(`/api/chart-preview/${encodeURIComponent(x.ticker)}?period=1m&timeframe=1d`),
-           fetch(`/api/strat/${encodeURIComponent(x.ticker)}`)
-         ]);
-         const cj=await cr.json(),sj=await sr.json();
-         if(cr.ok&&cj.ok)valueAcceptanceMap[x.ticker]=classifyValueAcceptance(cj);
-         if(sr.ok&&sj.ok)stratSignalMap[x.ticker]=sj;
-       }catch(e){}
+       const [cj,sj]=await Promise.allSettled([
+         safeTickerFetchJson("/api/chart-preview",x.ticker,{period:"1m",timeframe:"1d"},{ttl:30000,timeoutMs:12000}),
+         safeTickerFetchJson("/api/strat",x.ticker,{},{ttl:30000,timeoutMs:12000})
+       ]);
+       if(cj.status==="fulfilled"&&cj.value?.ok)valueAcceptanceMap[x.ticker]=classifyValueAcceptance(cj.value);
+       if(sj.status==="fulfilled"&&sj.value?.ok)stratSignalMap[x.ticker]=sj.value;
      }));
    }
 
-   // Layer 5: analyze the option premium itself for final directional candidates.
-   if(st)st.textContent=`Layer 5 · checking premium support on ${finalists.length} finalists`;
-   for(let n=0;n<finalists.length;n+=3){
-     const batch=finalists.slice(n,n+3);
-     await Promise.all(batch.map(async x=>{
-       const direction=premiumDirectionFor(x);
-       if(!direction)return;
-       try{
-         premiumSupportMap[x.ticker]=await fetchPremiumSupportReliable(x.ticker,direction,3);
-       }catch(e){
-         premiumSupportMap[x.ticker]={available:false,retryable:true,direction,reason:`Temporary request failure · ${e.message}`};
-         console.warn("premium support",x.ticker,e);
-       }
-     }));
-   }
+   // Premium support is display-only, so never block time-to-first-visible setups on it.
+   const runPremiumSupportInBackground=async()=>{
+     for(let n=0;n<finalists.length;n+=3){
+       const batch=finalists.slice(n,n+3);
+       await Promise.all(batch.map(async x=>{
+         const direction=premiumDirectionFor(x);
+         if(!direction)return;
+         try{
+           premiumSupportMap[x.ticker]=await fetchPremiumSupportReliable(x.ticker,direction,3);
+         }catch(e){
+           premiumSupportMap[x.ticker]={available:false,retryable:true,direction,reason:`Temporary request failure · ${e.message}`};
+           console.warn("premium support",x.ticker,e);
+         }
+       }));
+       try{renderTopSetups()}catch(_e){}
+     }
+   };
 
    globalTopSetupData=finalists;
    automaticTopSetupsLastRun=Date.now();
-   setTimeout(()=>rehydrateMissingPremiumSupport(finalists),1800);
+   runPremiumSupportInBackground().then(()=>{
+     setTimeout(()=>rehydrateMissingPremiumSupport(finalists),1800);
+   });
    if(st)st.textContent=`Market-wide scan complete · ${groups.length} groups considered · ${finalists.length} finalists`;
  }catch(e){
    globalTopSetupData=[];
@@ -7981,14 +7989,22 @@ async function runEarlyTurnWatch(){
      const key=cacheKeySector(topLaggingSector.ticker,"10");
      let sj=clientCache.sectors.has(key)?clientCache.sectors.get(key):null;
      if(!sj){
-       const sr=await fetch(`/api/sector/${encodeURIComponent(topLaggingSector.ticker)}?limit=10`);
+       const secAc=new AbortController();
+       const secTimer=setTimeout(()=>secAc.abort(),20000);
+       let sr;
+       try{ sr=await fetch(`/api/sector/${encodeURIComponent(topLaggingSector.ticker)}?limit=10`,{signal:secAc.signal}); }
+       finally{ clearTimeout(secTimer); }
        sj=await sr.json();
        if(sr.ok&&sj.ok)clientCache.sectors.set(key,sj);
      }
      if(sj?.ok){
        const holdings=(sj.results||[]).filter(h=>h.weight!=null).sort((a,b)=>Number(b.weight)-Number(a.weight)).slice(0,8);
        if(holdings.length){
-         const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:holdings.map(h=>h.ticker)})});
+         const optAc=new AbortController();
+         const optTimer=setTimeout(()=>optAc.abort(),30000);
+         let or;
+         try{ or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:holdings.map(h=>h.ticker)}),signal:optAc.signal}); }
+         finally{ clearTimeout(optTimer); }
          const oj=await or.json();
          if(or.ok&&oj.ok)(oj.results||[]).forEach(o=>{if(o?.ticker&&o.ok!==false)optionScanMap[o.ticker]=o});
          sectorShortlist=holdings.filter(h=>["Liquid","Tradable"].includes(optionScanMap[h.ticker]?.liquidity))
@@ -8012,7 +8028,11 @@ async function runEarlyTurnWatch(){
      const fIn=(f?.tail_trajectory ? f.tail_trajectory==="Rotating In" : (f?.rs_up===true&&f?.mom_up===true));
      const tIn=(t?.tail_trajectory ? t.tail_trajectory==="Rotating In" : (t?.rs_up===true&&t?.mom_up===true));
      try{
-       const r=await fetch(`/api/premium-support/${encodeURIComponent(x.ticker)}?direction=bullish`);
+       const psAc=new AbortController();
+       const psTimer=setTimeout(()=>psAc.abort(),15000);
+       let r;
+       try{ r=await fetch(safeTickerUrl("/api/premium-support",x.ticker,{direction:"bullish"}),{signal:psAc.signal}); }
+       finally{ clearTimeout(psTimer); }
        const j=await r.json();
        const pc=(r.ok&&j.ok)?j.best_contract:null;
        results.push({x,pc,fq,tq,fIn,tIn,source});

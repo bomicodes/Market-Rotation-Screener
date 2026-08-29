@@ -1,3 +1,14 @@
+v27.4 — SCAN SPEED: NON-BLOCKING PREMIUM SUPPORT + CONCURRENCY MATCHED TO SERVER THREADS
+- Profiled the Top Setups pipeline stage by stage. Premium support was blocking the whole scan even though it only changes card display, not hardPass or qualification score. It now runs in the background and fills in progressively after setups render.
+- Layer 2 holdings concurrency is raised from 2 to 4 to match the 4-thread Render server. Layer 4 is reduced from 3 tickers (6 simultaneous requests) to 2 tickers (4 simultaneous requests), matching server capacity instead of oversubscribing it.
+- v27.3 reliability changes are included here: bounded timeouts across the remaining scan stages, Safari-safe ticker URLs for premium/STRAT/value calls, independent settled Layer 4 requests, and removal of dead auditHoldings().
+- Expected effect: substantially faster time-to-first-visible setups while preserving the same qualification/ranking behavior; premium details continue populating afterward.
+
+v27.3 — SCAN RELIABILITY: TIMEOUTS + SAFARI-SAFE URLS ACROSS THE FULL PIPELINE
+- Added bounded request timeouts to Layers 2, 3, 4 and 5 plus Early Turn Watch so one hung request cannot freeze a Promise.all batch indefinitely.
+- Routed Layer 4/5 ticker requests through the app's Safari-safe URL helpers and made Layer 4 endpoint failures independent with Promise.allSettled.
+- Removed dead auditHoldings(), which referenced a non-existent DOM element and was never called.
+
 v27.2 — FILTER NON-US / MALFORMED HOLDING SYMBOLS BEFORE PRICE SCANS
 - Render logs showed sector scans sending local/foreign listing codes such as 968, 3800, S92, NOFR, SCATC, DORL, GRE and SLR into Yahoo as if they were US tickers, creating repeated failed downloads and unnecessary work during Top Setups.
 - All holdings now pass through a US-equity namespace filter after issuer/provider retrieval and sector supplements. Obvious malformed/numeric/local-exchange codes are rejected immediately.
