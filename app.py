@@ -10,7 +10,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.4"
+APP_VERSION = "27.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -3315,7 +3315,7 @@ button {
 .institutionalScore{font-size:17px;font-weight:900;color:#93c5fd}.instRadarHead{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.instRadarHead .status{margin-left:auto}.instPrint{font-weight:800;color:#e2e8f0}.instHot{color:#86efac}.instWarm{color:#fde68a}.instMuted{color:#94a3b8}
 .instContextRow td{border-top:none;padding-top:0}
 .darkPoolContext{color:#7f97a8;line-height:1.5}
-.newsContextGrid{display:grid;grid-template-columns:1fr 1.25fr;gap:14px}.newsCol{min-width:0}.newsItem{padding:8px 0;border-bottom:1px solid #202936}.newsItem:last-child{border-bottom:none}.newsHeadline{font-size:12px;line-height:1.35;color:#e5e7eb}.newsMeta{font-size:10px;color:#64748b;margin-top:3px}.newsWhy{font-size:11px;color:#9fb0c2;margin-top:4px;line-height:1.35}.newsTicker{display:inline-block;font-size:10px;font-weight:800;color:#bfdbfe;border:1px solid #334155;border-radius:999px;padding:2px 6px;margin-right:5px}.newsCat{font-size:9px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.4px}@media(max-width:800px){.newsContextGrid{grid-template-columns:1fr}}
+
 
 </style>
 </head>
@@ -4889,6 +4889,20 @@ button,select,input{font-family:inherit}button{transition:.15s}button.primary{ba
 }
 /* v24 Institutional Decision Layer */
 .instDecisionPanel{border:1px solid #31506c;background:linear-gradient(180deg,#0d1720,#0a1118);margin:12px 0}.instDecisionHead{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:10px}.instDecisionHead h3{margin:0;font-size:14px}.instDecisionHead .horizon{font-size:10px;font-weight:900;color:#7dd3fc;border:1px solid #24566e;border-radius:999px;padding:4px 8px}.instGrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.instCard{border:1px solid #26394b;background:#0b141d;border-radius:8px;padding:9px;min-height:76px}.instCard .k{font-size:8px;letter-spacing:.6px;color:#7f93a8;font-weight:900}.instCard .v{font-size:15px;font-weight:900;margin-top:5px}.instCard .d{font-size:9px;color:#9badbf;line-height:1.45;margin-top:4px}.instSection{margin-top:9px;border-top:1px solid #1d2d3b;padding-top:9px}.instSectionTitle{font-size:9px;font-weight:900;letter-spacing:.7px;color:#cbd5e1;margin-bottom:6px}.instLevelGrid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px}.instLevel{padding:7px;border:1px solid #26394b;border-radius:7px;background:#09121a}.instLevel b{display:block;font-size:12px}.instLevel span{font-size:8px;color:#8193a6}.instFactors{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;margin-top:8px}.instFactor{border:1px solid #2a3e50;border-radius:6px;padding:6px;font-size:8px}.instFactor strong{display:block;font-size:11px;margin-top:2px}.instGood{color:#69e6a6}.instWarn{color:#f6c667}.instBad{color:#fb8d96}.topSetupInstitutional{margin-top:8px;border-top:1px solid #203141;padding-top:7px}.topSetupInstGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:4px}.topSetupInstMetric{font-size:8px;color:#8294a6}.topSetupInstMetric b{display:block;color:#dbe7f2;font-size:10px;margin-top:2px}@media(max-width:900px){.instGrid{grid-template-columns:repeat(2,1fr)}.instLevelGrid{grid-template-columns:repeat(3,1fr)}.instFactors{grid-template-columns:repeat(2,1fr)}.topSetupInstGrid{grid-template-columns:repeat(2,1fr)}}
+/* News + Catalyst Context */
+.newsContextGrid{display:grid;grid-template-columns:1fr 1.25fr;gap:14px}
+.newsCol{min-width:0}
+.newsItem{padding:8px 0;border-bottom:1px solid #202936}
+.newsItem:last-child{border-bottom:none}
+.newsHeadline{font-size:12px;line-height:1.35;color:#e5e7eb}
+a.newsHeadline{color:#e5e7eb;text-decoration:none;border-bottom:1px solid #33415580}
+a.newsHeadline:visited{color:#e5e7eb}
+a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
+.newsMeta{font-size:10px;color:#64748b;margin-top:3px}
+.newsWhy{font-size:11px;color:#9fb0c2;margin-top:4px;line-height:1.35}
+.newsTicker{display:inline-block;font-size:10px;font-weight:800;color:#bfdbfe;border:1px solid #334155;border-radius:999px;padding:2px 6px;margin-right:5px}
+.newsCat{font-size:9px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.4px}
+@media(max-width:800px){.newsContextGrid{grid-template-columns:1fr}}
 </style>
 <div class="wrap">
 <header class="appHeader">
@@ -7601,7 +7615,14 @@ function topSetupEvaluation(x){
  const gateFailures=[];
  if(!rrgPass)gateFailures.push("RRG not aligned");
  if(fOut||tOut)gateFailures.push("Tail rotating out");
- if(!(liq==="Liquid"||liq==="Tradable"))gateFailures.push("Options not liquid/tradable");
+ if(!(liq==="Liquid"||liq==="Tradable")){
+   const checked=Number(opt?.contracts_checked);
+   const tradableCount=Number(opt?.tradable_contracts);
+   if(!opt)gateFailures.push("No options data returned");
+   else if(Number.isFinite(checked)&&checked===0)gateFailures.push("No option contracts in the 7–35 DTE window");
+   else if(Number.isFinite(tradableCount))gateFailures.push(`Illiquid chain · only ${tradableCount} of ${Number.isFinite(checked)?checked:"?"} contracts tradable (needs 3+ with tight spread + real OI/volume)`);
+   else gateFailures.push("Options chain too thin to trade");
+ }
  if(va?.strength==="REJECTION")gateFailures.push("Value acceptance rejected");
  if(!structureOk)gateFailures.push(ctx?.structure?.plan_error||"Invalid trade-plan structure");
  if(hardPass&&qualificationScore<45)gateFailures.push(`Underlying setup ${qualificationScore}/100 below the 45 qualification bar`);

@@ -1,3 +1,9 @@
+v27.5 — NEWS STYLESHEET FIX + SPECIFIC LIQUIDITY FAILURE REASONS
+- Root-caused the unreadable blue news headlines: the News + Catalyst Context CSS lived in an orphaned stylesheet outside the served app template, so the panel reached the browser without those rules. Moved the complete news styling into the live stylesheet and removed the orphaned copy.
+- Added anchor-specific news headline rules: light gray text, subtle underline, matching visited color, and cyan hover so links remain readable on the dark UI while still looking clickable.
+- Nearest Misses no longer reports only "Options not liquid/tradable". It now distinguishes no options response, no contracts in the 7–35 DTE window, and a thin returned chain using contracts_checked/tradable_contracts counts.
+- The liquidity gate remains purely a tradability gate based on OI, volume, and spread thresholds; premium price does not determine whether a chain is Liquid/Tradable.
+
 v27.4 — SCAN SPEED: NON-BLOCKING PREMIUM SUPPORT + CONCURRENCY MATCHED TO SERVER THREADS
 - Profiled the Top Setups pipeline stage by stage. Premium support was blocking the whole scan even though it only changes card display, not hardPass or qualification score. It now runs in the background and fills in progressively after setups render.
 - Layer 2 holdings concurrency is raised from 2 to 4 to match the 4-thread Render server. Layer 4 is reduced from 3 tickers (6 simultaneous requests) to 2 tickers (4 simultaneous requests), matching server capacity instead of oversubscribing it.
