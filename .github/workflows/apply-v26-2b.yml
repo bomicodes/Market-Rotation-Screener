@@ -1,0 +1,30 @@
+name: Apply v26.2 trader board fixes
+on: push
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python .patches/apply_v26_2b_board_fixes.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          assert 'floor_reliable' in s
+          assert "v26Money(d.cost)+'/contract'" in s
+          assert 'd.s.trigger!=null' in s
+          assert 'APP_VERSION = "26.2"' in s
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git commit -m "v26.2 finish trader-board fixes and early detection"
+          git rm .patches/apply_v26_2b_board_fixes.py .github/workflows/apply-v26-2b.yml
+          git commit --amend --no-edit
+          git push
