@@ -1,5 +1,6 @@
 from pathlib import Path
 
+# One-shot migration helper for the v27.7 early-turn institutional-flow patch.
 path = Path("app.py")
 text = path.read_text()
 
