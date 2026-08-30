@@ -32,7 +32,8 @@ jobs:
       - name: Validate cleanup boundaries
         run: |
           ! grep -q 'data-view="history"' app.py
-          ! grep -q 'id="historyChart"' app.py
+          ! grep -q 'installRRGInteractions("historyChart")' app.py
+          grep -q 'document.getElementById("history")?.remove();' app.py
           grep -q '@app.get("/api/historical-rrg")' app.py
           grep -q 'rrgTimelineSlider' app.py
           grep -q 'rrgTimelinePinnedDate' app.py
