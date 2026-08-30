@@ -1,0 +1,38 @@
+name: Apply early-turn flow patch
+
+on:
+  push:
+    branches:
+      - fix/early-turn-institutional-flow
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/early-turn-institutional-flow
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply patch
+        run: python tools/apply_early_turn_flow_patch.py
+      - name: Validate syntax
+        run: python -m py_compile app.py
+      - name: Install test dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run tests
+        run: pytest -q
+      - name: Commit patched app
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py
+          git diff --cached --quiet && exit 0
+          git commit -m "v27.7 integrate institutional flow into early-turn ranking"
+          git push origin HEAD:fix/early-turn-institutional-flow
