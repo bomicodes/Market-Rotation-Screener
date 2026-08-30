@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.6"
+APP_VERSION = "27.7"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5456,14 +5456,14 @@ async function runInstitutionalRadar(){
  // currently loaded in the drill-down view. Broadened to the same all-sectors
  // candidate pool Top Setups and Early Turn Watch already reuse, so this
  // scans across every supportive sector at once instead of one at a time.
- const rows=(window.allSupportiveCandidates||[]).slice().sort((a,b)=>opportunityScore(b)-opportunityScore(a)).slice(0,12);
- if(!rows.length){if(st)st.textContent="Run Top Setups first to build the candidate pool.";return}
+ const rows=(earlyTurnWatchData||[]).map(row=>row?.x).filter(Boolean);
+ if(!rows.length){institutionalRadarResults=[];renderInstitutionalRadar();if(st)st.textContent="No early-turn candidates available for institutional confirmation.";return}
  const symbols=rows.map(x=>x.ticker),meta={};rows.forEach(x=>{const rs=rotationStage(x);meta[x.ticker]={etf:x._parentTicker||currentSector||"",quadrant:x.fast?.quadrant||x.quadrant||"",tail:effectiveTailSignal(x)||x.tail_trajectory||"",stage:rs.level||0,opportunity:opportunityScore(x)}});
  if(btn)btn.disabled=true;if(st)st.textContent=`Scanning ${symbols.length} candidates across all supportive sectors…`;
  try{
    const r=await fetch("/api/institutional-radar",{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify({symbols,meta})});
    const j=await r.json();if(!r.ok||!j.ok)throw Error(j.error||`Scan failed (${r.status})`);
-   institutionalRadarResults=j.results||[];renderInstitutionalRadar();
+   institutionalRadarResults=j.results||[];mergeEarlyTurnInstitutionalFlow();renderInstitutionalRadar();renderEarlyTurnWatch();
    const ok=institutionalRadarResults.filter(x=>x.ok).length;if(st)st.textContent=`${ok}/${symbols.length} candidates analyzed across all supportive sectors`;
    const d=document.getElementById("institutionalRadarDisclosure");if(d&&j.disclosure)d.textContent=j.disclosure;
  }catch(e){if(st)st.innerHTML=`<span class="error">${e.message}</span>`}finally{if(btn)btn.disabled=false}
@@ -7988,16 +7988,50 @@ function earlyTurnQualifies(x){
  const rrgPass=(fGood&&tGood&&fIn&&!tOut)||(fIn&&(fGood||fq==="Lagging")&&tIn&&!tOut)||(fGood&&tGood&&!fOut&&!tOut);
  return !rrgPass;
 }
+function institutionalFlowForTicker(ticker){
+ const t=String(ticker||"").toUpperCase();
+ return (institutionalRadarResults||[]).find(r=>String(r?.ticker||"").toUpperCase()===t)||null;
+}
+function institutionalFlowConfirmed(flow){
+ if(!flow?.ok)return false;
+ return Number(flow.largest_multiple||0)>=1.5&&Number(flow.repeat_days||0)>=2;
+}
+function institutionalFlowBonus(flow){
+ if(!flow?.ok)return 0;
+ const activity=Number(flow.activity_score||0),mult=Number(flow.largest_multiple||0),repeat=Number(flow.repeat_days||0);
+ let bonus=Math.min(1.5,Math.max(0,activity)*0.15);
+ if(mult>=1.25)bonus+=0.5;
+ if(mult>=1.5)bonus+=0.75;
+ if(mult>=2)bonus+=0.5;
+ if(repeat>=2)bonus+=0.75;
+ if(repeat>=3)bonus+=0.5;
+ if(institutionalFlowConfirmed(flow))bonus+=0.75;
+ return Math.min(4.5,bonus);
+}
+function mergeEarlyTurnInstitutionalFlow(){
+ (earlyTurnWatchData||[]).forEach(row=>{
+   const flow=institutionalFlowForTicker(row?.x?.ticker);
+   row.institutional_flow=flow;
+   row.activity_score=Number(flow?.activity_score||0);
+   row.largest_multiple=Number(flow?.largest_multiple||0);
+   row.repeat_days=Number(flow?.repeat_days||0);
+   row.flow_confirmed=institutionalFlowConfirmed(flow);
+   if(row.x)row.x._institutionalFlow=flow;
+ });
+ earlyTurnWatchData=(earlyTurnWatchData||[]).sort((a,b)=>earlyTurnScore(b.x)-earlyTurnScore(a.x));
+}
 function earlyTurnScore(x){
  const opt=optionScanMap[x.ticker];let s=preliminaryRRGScore(x);
  if(opt?.liquidity==="Liquid")s+=2;
  if(opt?.iv_state==="Cheap / Crushed")s+=2;
+ s+=institutionalFlowBonus(x?._institutionalFlow||institutionalFlowForTicker(x?.ticker));
  return s;
 }
 async function runSpeculativeSignals(){
  const st=document.getElementById("speculativeSignalsStatus");
  if(st)st.textContent="Scanning RRG early-turn candidates and sampled large-print activity…";
- await Promise.all([runEarlyTurnWatch(),runInstitutionalRadar()]);
+ await runEarlyTurnWatch();
+ await runInstitutionalRadar();
  const earlyCount=earlyTurnWatchData.length;
  const instCount=(institutionalRadarResults||[]).filter(x=>x.ok).length;
  if(st)st.textContent=`${earlyCount} early-turn watch${earlyCount===1?"":"es"} · ${instCount} large-print candidate${instCount===1?"":"s"} across all supportive sectors`;
@@ -8100,10 +8134,12 @@ function renderEarlyTurnWatch(){
  g.innerHTML=sectorNote+earlyTurnWatchData.map(({x,pc,fq,tq,fIn,source})=>{
    const tailNote=source==="sector"?`Held in ${x._parentTicker} (sector turning)`:((fq==="Lagging"&&fIn)?"Fast tail turning NE from Lagging":"Trend tail turning NE from Lagging");
    const sourceLabel=source==="sector"?"SECTOR-LED":"STOCK-LED";
+   const flow=x?._institutionalFlow||institutionalFlowForTicker(x.ticker),flowConfirmed=institutionalFlowConfirmed(flow);
+   const flowBadge=flowConfirmed?`<span class="instGood" style="display:inline-block;margin-top:5px;padding:3px 7px;border-radius:999px;font-size:11px;font-weight:800">FLOW CONFIRMED · ${Number(flow.largest_multiple||0).toFixed(1)}× · ${Number(flow.repeat_days||0)}/4 sessions · activity ${Number(flow.activity_score||0).toFixed(1)}/10</span>`:"";
    const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","AWAY FROM SUPPORT":"instBad"}[pc.state]||""):"";
    const premiumLine=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM ENTRY · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">Entry-quality overlay · support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM ENTRY · <b>not required for signal</b></div>`;
    return `<div class="topSetupCard" data-early-turn="${x.ticker}">
-     <div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus">${sourceLabel} · ${tailNote}${source!=="sector"&&x._parentTicker?` · ${x._parentTicker}`:""}</div></div></div>
+     <div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus">${sourceLabel} · ${tailNote}${source!=="sector"&&x._parentTicker?` · ${x._parentTicker}`:""}</div>${flowBadge}</div></div>
 ${premiumLine}
      <div class="tiny" style="margin-top:6px;color:#8092a4">Speculative — ${source==="sector"?"the sector, not necessarily this stock, is the confirmed signal":"has not yet met the Full/Early RRG alignment bar used for Top Setups"}. Confirmation may still fail.</div>
    </div>`;
