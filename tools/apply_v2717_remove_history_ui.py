@@ -13,9 +13,10 @@ nav_pat=r'\n\s*<button class="tab" data-view="history"><span class="navIcon">⌁
 s,n=re.subn(nav_pat,'',s,count=1)
 assert n==1, f'history nav removal count={n}'
 
-# Remove only the standalone historical RRG view. The backend endpoint and
-# main-dashboard timeline/history arrays remain untouched.
-view_pat=r'\n<div id="history" class="view">.*?(?=\n<div id="[^"]+" class="view">)'
+# Remove only the standalone historical RRG view. It sits immediately before
+# the GEX top-level view in the rendered page template. The backend endpoint
+# and the dashboard timeline/history arrays remain untouched.
+view_pat=r'\n<div id="history" class="view">.*?(?=\n<div id="gexpage" class="view">)'
 s,n=re.subn(view_pat,'\n',s,count=1,flags=re.S)
 assert n==1, f'history view removal count={n}'
 
