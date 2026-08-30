@@ -2,6 +2,7 @@
 from flask import Flask, jsonify, request, Response, session, redirect
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import io, math, time, traceback, os, sqlite3, json, hmac, threading
+from collections import deque
 from urllib.parse import quote
 from datetime import datetime, timedelta
 import numpy as np
@@ -10,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.5"
+APP_VERSION = "27.6"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -93,10 +94,9 @@ def _active_alpaca_us_equity_symbols():
     if cached_symbols is not None and now-float(_US_EQUITY_SYMBOLS.get("loaded_at") or 0)<3600:
         return cached_symbols
     try:
-        resp=requests.get(
+        resp=alpaca_get(
             ALPACA_TRADING_BASE_URL+"/v2/assets",
             params={"status":"active","asset_class":"us_equity"},
-            headers={"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_API_SECRET},
             timeout=8,
         )
         resp.raise_for_status()
@@ -581,7 +581,7 @@ def _alpaca_daily_ohlc(ticker, period="3y"):
             raw=[]; token=None
             for _ in range(4):
                 if token:params["page_token"]=token
-                r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20)
+                r=alpaca_get(url,params=params,timeout=20)
                 r.raise_for_status(); j=r.json() or {}; raw.extend(j.get("bars") or [])
                 token=j.get("next_page_token") or j.get("page_token")
                 if not token:break
@@ -708,7 +708,7 @@ def alpaca_session_volume_profiles(ticker):
             "sort":"asc",
             "limit":10000
         }
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+        r=alpaca_get(url,params=params,timeout=25)
         if r.status_code in (401,403):
             try: detail=(r.json() or {}).get("message") or r.text
             except Exception: detail=r.text
@@ -798,7 +798,7 @@ def alpaca_visible_profiles(ticker, period, chart_timeframe):
         raw=[]; token=None
         for _ in range(6):
             if token: params["page_token"]=token
-            r=requests.get(url,params=params,headers=alpaca_headers(),timeout=30)
+            r=alpaca_get(url,params=params,timeout=30)
             if r.status_code in (401,403):
                 try: detail=(r.json() or {}).get("message") or r.text
                 except Exception: detail=r.text
@@ -883,7 +883,7 @@ def _canonical_hourly_bars(ticker,period):
                 raw=[]; token=None
                 for _ in range(3):
                     if token:params["page_token"]=token
-                    r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20); r.raise_for_status()
+                    r=alpaca_get(url,params=params,timeout=20); r.raise_for_status()
                     j=r.json() or {}; raw.extend(j.get("bars") or []); token=j.get("next_page_token") or j.get("page_token")
                     if not token:break
                 for b in raw:
@@ -2123,10 +2123,35 @@ def earnings_profile(ticker, dates):
         "behavior":behavior,"events":list(reversed(display_events))
     }
 
+_ALPACA_RATE_LOCK = threading.Lock()
+_ALPACA_CALL_TIMES = deque()
+# Keep a deliberate safety margin below the account-level request ceiling.
+_ALPACA_MAX_PER_MIN = 170
+_ALPACA_WINDOW_SEC = 60.0
+
+def _alpaca_rate_gate():
+    """Block until one more Alpaca request fits inside the shared sliding window."""
+    while True:
+        with _ALPACA_RATE_LOCK:
+            now=time.time()
+            while _ALPACA_CALL_TIMES and now-_ALPACA_CALL_TIMES[0] >= _ALPACA_WINDOW_SEC:
+                _ALPACA_CALL_TIMES.popleft()
+            if len(_ALPACA_CALL_TIMES) < _ALPACA_MAX_PER_MIN:
+                _ALPACA_CALL_TIMES.append(now)
+                return
+            sleep_for=_ALPACA_WINDOW_SEC-(now-_ALPACA_CALL_TIMES[0])+0.01
+        time.sleep(max(0.01,min(sleep_for,5.0)))
+
 def alpaca_headers():
     if not ALPACA_API_KEY or not ALPACA_API_SECRET:
         raise RuntimeError("Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY to Render.")
     return {"APCA-API-KEY-ID":ALPACA_API_KEY,"APCA-API-SECRET-KEY":ALPACA_API_SECRET,"Accept":"application/json"}
+
+def alpaca_get(url, **kwargs):
+    """Single choke point for outbound Alpaca GET requests across Flask and worker threads."""
+    _alpaca_rate_gate()
+    kwargs.setdefault("headers",alpaca_headers())
+    return requests.get(url,**kwargs)
 
 def _safe_float(v):
     try:
@@ -2150,7 +2175,7 @@ def alpaca_option_contracts(ticker,start_date,end_date):
     rows=[]; token=None
     for _ in range(4):
         if token: params["page_token"]=token
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+        r=alpaca_get(url,params=params,timeout=25)
         if r.status_code in (401,403):
             raise RuntimeError("Alpaca contract access was rejected. Check API credentials/account permissions.")
         r.raise_for_status()
@@ -2170,7 +2195,7 @@ def alpaca_option_chain(ticker,start_date,end_date,spot):
     try:
         for _ in range(4):
             if token: params["page_token"]=token
-            r=requests.get(url,params=params,headers=alpaca_headers(),timeout=25)
+            r=alpaca_get(url,params=params,timeout=25)
             if r.status_code in (401,403):
                 _mark_source("alpaca_options", False, f"{r.status_code} rejected")
                 raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} option-chain access was rejected. Check API credentials/feed permissions.")
@@ -2201,7 +2226,7 @@ def alpaca_option_chain_broad(ticker,start_date,end_date,spot):
     out={}; token=None
     for _ in range(10):
         if token: params["page_token"]=token
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=30)
+        r=alpaca_get(url,params=params,timeout=30)
         if r.status_code in (401,403): raise RuntimeError(f"Alpaca {ALPACA_OPTIONS_FEED} broad-chain access was rejected.")
         if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while building broad flow universe.")
         r.raise_for_status(); j=r.json() or {}; part=j.get("snapshots") or {}
@@ -2282,9 +2307,9 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
     for _ in range(4):
         if token:params["page_token"]=token
         elif "page_token" in params:params.pop("page_token",None)
-        r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
+        r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,timeout=30)
         if r.status_code==429:
-            time.sleep(.75);r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,headers=alpaca_headers(),timeout=30)
+            time.sleep(.75);r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",params=params,timeout=30)
         if not r.ok:
             # Preserve Alpaca's response body so a bad parameter/entitlement
             # is diagnosable from the Top Setups card instead of only showing
@@ -2485,7 +2510,7 @@ def _option_trade_chunks(symbols, start_iso, end_iso, feed):
         for _ in range(5):
             if token: params["page_token"]=token
             elif "page_token" in params: params.pop("page_token",None)
-            r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=35)
+            r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,timeout=35)
             if r.status_code in (401,403):
                 try:
                     detail=(r.json() or {}).get("message") or r.text
@@ -2500,7 +2525,7 @@ def _option_trade_chunks(symbols, start_iso, end_iso, feed):
                 )
             if r.status_code==429:
                 time.sleep(1.0)
-                r=requests.get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,headers=alpaca_headers(),timeout=35)
+                r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/trades",params=params,timeout=35)
             if r.status_code==429: raise RuntimeError("Alpaca rate limit reached while loading high-coverage flow.")
             if r.status_code>=400:
                 try:
@@ -2560,7 +2585,7 @@ def _fetch_stock_bars_with_feed(ticker, feed, days=3):
     raw=[]; token=None
     for _ in range(3):
         if token: params["page_token"]=token
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20)
+        r=alpaca_get(url,params=params,timeout=20)
         if r.status_code in (401,403):
             raise PermissionError(f"Account is not entitled to the '{feed}' stock feed yet.")
         r.raise_for_status()
@@ -2580,7 +2605,7 @@ def _fetch_option_snapshots_with_feed(ticker,start_date,end_date,spot,feed):
     out={}; token=None
     for _ in range(3):
         if token: params["page_token"]=token
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=20)
+        r=alpaca_get(url,params=params,timeout=20)
         if r.status_code in (401,403):
             raise PermissionError(f"Account is not entitled to the '{feed}' options feed yet.")
         r.raise_for_status()
@@ -4261,7 +4286,7 @@ def _institutional_trade_sample(ticker):
         url=f"{ALPACA_DATA_BASE_URL}/v2/stocks/{ticker}/trades"
         params={"start":start.isoformat(),"end":end.isoformat(),"feed":ALPACA_STOCK_FEED,
                 "sort":"desc","limit":5000}
-        r=requests.get(url,params=params,headers=alpaca_headers(),timeout=18)
+        r=alpaca_get(url,params=params,timeout=18)
         if r.status_code in (401,403):
             return {"ticker":ticker,"ok":False,"error":f"Alpaca {ALPACA_STOCK_FEED.upper()} trade access rejected ({r.status_code})."}
         r.raise_for_status(); rows=(r.json() or {}).get("trades") or []

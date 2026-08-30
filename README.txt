@@ -1,3 +1,8 @@
+v27.6 — FIX ROOT CAUSE OF FALSE "ILLIQUID" REPORTS: ALPACA RATE LIMITING
+- v27.5 improved the wording of liquidity failures, but rate-limited Alpaca responses could still make later scan candidates look falsely thin. v27.6 adds a shared sliding-window request gate so concurrent scan threads no longer burst Alpaca independently.
+- Added a process-wide limiter at 170 requests/minute and routed Alpaca GET traffic through alpaca_get(). This includes stock/option bars, option chains, trades, snapshots, institutional samples, and the active-US-equity asset refresh used by holdings sanitation.
+- The limiter is shared across Flask threads and ThreadPoolExecutors inside the current single Gunicorn worker. Large scans may take longer when the budget is saturated, but they should pace instead of turning 429s into misleading liquidity failures.
+
 v27.5 — NEWS STYLESHEET FIX + SPECIFIC LIQUIDITY FAILURE REASONS
 - Root-caused the unreadable blue news headlines: the News + Catalyst Context CSS lived in an orphaned stylesheet outside the served app template, so the panel reached the browser without those rules. Moved the complete news styling into the live stylesheet and removed the orphaned copy.
 - Added anchor-specific news headline rules: light gray text, subtle underline, matching visited color, and cyan hover so links remain readable on the dark UI while still looking clickable.
