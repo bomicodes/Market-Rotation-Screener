@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.11"
+APP_VERSION = "27.12"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6003,7 +6003,7 @@ function _rrgCanvasContext(c){
  ctx.setTransform(dpr,0,0,dpr,0,0);
  return {ctx,W,H};
 }
-function drawRRG(id,rows,focusTicker=undefined){
+function drawRRG(id,rows,focusTicker=undefined,fixedScale=undefined){
  rows=rrgRowsForChart(id,rows);
  const c=document.getElementById(id),cv=_rrgCanvasContext(c),ctx=cv.ctx,W=cv.W,H=cv.H,p=48;
  rrgFocusState[id]=rrgFocusState[id]||{selected:null,rows:[],hits:[]};
@@ -6022,13 +6022,25 @@ function drawRRG(id,rows,focusTicker=undefined){
    return;
  }
 
- let xs=[],ys=[];
- rows.forEach(r=>(r.tail||[]).forEach(pt=>{if(Number.isFinite(Number(pt.x)))xs.push(Number(pt.x));if(Number.isFinite(Number(pt.y)))ys.push(Number(pt.y));}));
- // Keep 100/100 exactly centered and use ONE pixels-per-RRG-unit scale for
- // both axes. This preserves tail angles and quadrant geometry instead of
- // stretching X and Y independently to fill the panel.
- const dx=Math.max(2,...xs.map(v=>Math.abs(v-100)))+.65;
- const dy=Math.max(2,...ys.map(v=>Math.abs(v-100)))+.65;
+ // Axis scale: normally auto-fit to whatever's in `rows` this call (live
+ // view, unchanged). While scrubbing the history timeline, a fixedScale is
+ // passed in instead -- each scrub position only carries one day's 8-point
+ // tail, and that day's spread naturally differs slightly from the next
+ // day's, so recomputing bounds fresh on every drag frame rescaled the
+ // WHOLE chart every frame. A stable scale computed once across the full
+ // scrubbable range keeps the grid fixed while the dots/tails move.
+ let dx,dy;
+ if(fixedScale&&Number.isFinite(fixedScale.dx)&&Number.isFinite(fixedScale.dy)){
+   dx=fixedScale.dx;dy=fixedScale.dy;
+ } else {
+   let xs=[],ys=[];
+   rows.forEach(r=>(r.tail||[]).forEach(pt=>{if(Number.isFinite(Number(pt.x)))xs.push(Number(pt.x));if(Number.isFinite(Number(pt.y)))ys.push(Number(pt.y));}));
+   // Keep 100/100 exactly centered and use ONE pixels-per-RRG-unit scale for
+   // both axes. This preserves tail angles and quadrant geometry instead of
+   // stretching X and Y independently to fill the panel.
+   dx=Math.max(2,...xs.map(v=>Math.abs(v-100)))+.65;
+   dy=Math.max(2,...ys.map(v=>Math.abs(v-100)))+.65;
+ }
  const plotW=Math.max(1,W-2*p),plotH=Math.max(1,H-2*p);
  const unitsPerPx=Math.max((2*dx)/plotW,(2*dy)/plotH);
  const halfX=unitsPerPx*plotW/2,halfY=unitsPerPx*plotH/2;
@@ -6269,13 +6281,22 @@ function quadrantJS(x,y){
  if(x<100&&y<100)return "Lagging";
  return "Weakening";
 }
-let rrgTimelineDates=[],rrgTimelineIndex=null;
+let rrgTimelineDates=[],rrgTimelineIndex=null,rrgTimelineScale={fast:null,trend:null};
 function buildRRGTimelineDates(){
  rrgTimelineDates=[];
  for(const r of (sectorData||[])){
    const h=r.fast?.history;
    if(h&&h.length>rrgTimelineDates.length)rrgTimelineDates=h.map(p=>p.date);
  }
+}
+function computeStableScale(mode){
+ let xs=[],ys=[];
+ for(const r of (sectorData||[])){
+   const h=mode==="trend"?r.trend?.history:r.fast?.history;
+   (h||[]).forEach(p=>{if(Number.isFinite(p.x))xs.push(p.x);if(Number.isFinite(p.y))ys.push(p.y);});
+ }
+ if(!xs.length||!ys.length)return null;
+ return {dx:Math.max(2,...xs.map(v=>Math.abs(v-100)))+.65,dy:Math.max(2,...ys.map(v=>Math.abs(v-100)))+.65};
 }
 function historicalPointFor(history,dateStr,tailLen=8){
  if(!history||!history.length)return null;
@@ -6296,6 +6317,7 @@ function sectorDataAsOf(dateStr){
 }
 function setupRRGTimeline(){
  buildRRGTimelineDates();
+ rrgTimelineScale={fast:computeStableScale("fast"),trend:computeStableScale("trend")};
  const bar=document.getElementById("rrgTimelineBar"),slider=document.getElementById("rrgTimelineSlider");
  if(!bar||!slider)return;
  if(rrgTimelineDates.length<2){bar.style.display="none";return}
@@ -6352,7 +6374,7 @@ function renderGroups(){
    sectorState.selected=null;
  }
 
- drawRRG("sectorChart",data);
+ drawRRG("sectorChart",data,undefined,viewingHistorical?rrgTimelineScale[sectorRRGMode]:undefined);
  document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow sectorTickerRow ${activeMacroBasket()&&!activeMacroBasket().has(x.ticker)?"macroDim":""}" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
 
  document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",async()=>{
