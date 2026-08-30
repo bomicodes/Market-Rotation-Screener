@@ -1020,13 +1020,14 @@ def compute_rrg(bench, asset, n1=10, n2=5, std_window=None, timeframe="1d", desp
     if despike_threshold_pct is None:
         despike_threshold_pct = calibrated_despike
     rs = despike_rs(pd.Series((a / b) * 100.0, dtype=float), threshold_pct=despike_threshold_pct)
+    std_window = max(2, int(std_window))
     rs_mean = rs.rolling(n1).mean()
-    rs_std = rs.rolling(max(std_window, n1)).std(ddof=1).replace(0, np.nan)
+    rs_std = rs.rolling(std_window).std(ddof=1).replace(0, np.nan)
     ratio = 100.0 + (rs - rs_mean) / rs_std
 
     roc = ratio.pct_change() * 100.0
     roc_mean = roc.rolling(n2).mean()
-    roc_std = roc.rolling(max(std_window, n2)).std(ddof=1).replace(0, np.nan)
+    roc_std = roc.rolling(std_window).std(ddof=1).replace(0, np.nan)
     momentum = 100.0 + (roc - roc_mean) / roc_std
 
     return ratio.to_numpy(), momentum.to_numpy()
