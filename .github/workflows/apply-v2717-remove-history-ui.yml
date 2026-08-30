@@ -1,0 +1,47 @@
+name: Apply v27.17 remove historical RRG UI
+on:
+  push:
+    branches:
+      - feat/remove-redundant-historical-rrg-v2717
+    paths:
+      - tools/apply_v2717_remove_history_ui.py
+      - .github/workflows/apply-v2717-remove-history-ui.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/remove-redundant-historical-rrg-v2717
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Apply patch
+        run: python tools/apply_v2717_remove_history_ui.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Test
+        run: pytest -q
+      - name: Validate cleanup boundaries
+        run: |
+          ! grep -q 'data-view="history"' app.py
+          ! grep -q 'id="historyChart"' app.py
+          grep -q '@app.get("/api/historical-rrg")' app.py
+          grep -q 'rrgTimelineSlider' app.py
+          grep -q 'rrgTimelinePinnedDate' app.py
+          grep -q 'APP_VERSION = "27.17"' app.py
+      - name: Commit app patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'v27.17 remove redundant Historical RRG UI'
+          git pull --rebase origin feat/remove-redundant-historical-rrg-v2717
+          git push origin HEAD:feat/remove-redundant-historical-rrg-v2717
