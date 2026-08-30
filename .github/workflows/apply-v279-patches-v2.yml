@@ -4,8 +4,7 @@ on:
     branches:
       - feat/leaps-rrg-zscore
     paths:
-      - patches/leaps-premium-support.patch
-      - patches/rrg-zscore.patch
+      - tools/apply_v279_patches.py
       - .github/workflows/apply-v279-patches-v2.yml
 permissions:
   contents: write
@@ -24,16 +23,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
-      - name: Apply LEAPS patch
-        run: |
-          git apply --check patches/leaps-premium-support.patch
-          git apply patches/leaps-premium-support.patch
-      - name: Apply RRG patch
-        run: |
-          git apply --check patches/rrg-zscore.patch
-          git apply patches/rrg-zscore.patch
-      - name: Bump version
-        run: sed -i 's/APP_VERSION = "27.8"/APP_VERSION = "27.9"/' app.py
+      - name: Apply patches
+        run: python tools/apply_v279_patches.py
       - name: Compile
         run: python -m py_compile app.py
       - name: Test
