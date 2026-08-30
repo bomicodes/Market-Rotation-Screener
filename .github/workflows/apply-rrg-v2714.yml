@@ -1,0 +1,66 @@
+name: Apply RRG v27.14
+on:
+  push:
+    branches:
+      - feat/rrg-daily-weekly-smooth
+    paths:
+      - tools/apply_rrg_v2714.py
+      - .github/workflows/apply-rrg-v2714.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/rrg-daily-weekly-smooth
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Apply patch
+        run: python tools/apply_rrg_v2714.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Test
+        run: pytest -q
+      - name: Validate daily weekly RRG math
+        run: |
+          python - <<'PY'
+          import numpy as np, pandas as pd
+          import app
+          idx=pd.bdate_range('2020-01-02', periods=1650)
+          bench=pd.Series(100*np.exp(np.linspace(0,.45,len(idx))),index=idx)
+          asset=bench*(1+0.03*np.sin(np.linspace(0,18,len(idx))))
+          px=pd.DataFrame({'SPY':bench,'XLK':asset})
+          w=app.rrg_resample_prices(px,'1w')
+          assert len(w)<len(px)
+          assert all(pd.Timestamp(d).weekday()==4 for d in w.index[:-1])
+          daily=app.dual_rrg_rows(px,'SPY',['XLK'],history_len=200,timeframe='1d')
+          weekly=app.dual_rrg_rows(px,'SPY',['XLK'],history_len=104,timeframe='1w')
+          assert daily and weekly
+          assert len(daily[0]['fast']['history'])==200
+          assert len(weekly[0]['fast']['history'])==104
+          assert daily[0]['fast']['tail'][-1]['date'] != weekly[0]['fast']['tail'][-2]['date']
+          print('daily/weekly RRG validation passed')
+          PY
+      - name: Sanity-check UI hooks
+        run: |
+          grep -q 'setSectorRRGTimeframe' app.py
+          grep -q 'smoothRRGPath' app.py
+          grep -q 'scheduleRRGTimelineChartRender' app.py
+          grep -q 'sectors_weekly' app.py
+          grep -q 'APP_VERSION = "27.14"' app.py
+      - name: Commit app patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'v27.14 add true daily-weekly RRG and smooth timeline'
+          git pull --rebase origin feat/rrg-daily-weekly-smooth
+          git push origin HEAD:feat/rrg-daily-weekly-smooth
