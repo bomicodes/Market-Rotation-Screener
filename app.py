@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.16"
+APP_VERSION = "27.17"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5134,7 +5134,6 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
   <div class="brand"><div class="brandMark">↗</div><div class="brandText"><b>MARKET ROTATION SCREENER</b><span>ROTATION · POSITIONING · OPTIONS</span></div></div>
   <nav class="tabs appNav">
     <button class="tab active" data-view="rotation"><span class="navIcon">▦</span><span>Dashboard</span></button>
-    <button class="tab" data-view="history"><span class="navIcon">⌁</span><span>RRG Historical</span></button>
     <button class="tab" data-view="gexpage" id="navGex"><span class="navIcon">⌗</span><span>GEX Landscape</span></button>
     <button class="tab" data-view="earnings" id="navEarnings"><span class="navIcon">◫</span><span>Earnings Movers</span></button>
     <button class="navJump" id="navOptions"><span class="navIcon">▤</span><span>Options Scanner</span></button>
@@ -6320,7 +6319,6 @@ function installRRGInteractions(id){
 
 installRRGInteractions("sectorChart");
 installRRGInteractions("stockChart");
-installRRGInteractions("historyChart");
 
 function installStockSummaryFocusOnly(){
  document.addEventListener("click",evt=>{
@@ -8983,25 +8981,8 @@ function shiftHistDate(days){
 }
 
 document.getElementById("runHistory").addEventListener("click",loadHistorical);
-document.getElementById("histQuadrantFilter").addEventListener("change",renderHistorical);
-document.getElementById("histTailFilter").addEventListener("change",renderHistorical);
-document.getElementById("histTickerSearch").addEventListener("input",renderHistorical);
-document.getElementById("histPrev").addEventListener("click",()=>shiftHistDate(-1));
-document.getElementById("histNext").addEventListener("click",()=>shiftHistDate(1));
-document.getElementById("histMode").addEventListener("change",()=>{
- const groups=document.getElementById("histMode").value==="groups";
- document.getElementById("histETF").disabled=groups;
- document.getElementById("histLimit").disabled=groups;
- document.getElementById("histLimitLabel").style.opacity=groups?.45:1;
- loadHistorical();
-});
-document.getElementById("histETF").addEventListener("change",loadHistorical);
-document.getElementById("histLimit").addEventListener("change",loadHistorical);
-document.getElementById("histETF").disabled=true;
-document.getElementById("histLimit").disabled=true;
-document.getElementById("histLimitLabel").style.opacity=.45;
-document.getElementById("histDate").value=new Date().toISOString().slice(0,10);
-
+// v27.17: main RRG timeline supersedes the standalone Historical RRG view.
+document.getElementById("history")?.remove();
 
 document.getElementById("heatGroupFilter")?.addEventListener("change",renderHeatMap);
 document.getElementById("refreshHeat")?.addEventListener("click",async()=>{const st=document.getElementById("heatStatus");if(st)st.textContent="Refreshing market map…";await loadMarket(true);if(currentSector)await loadSector(true);renderHeatMap();if(st)st.textContent="Updated";});
@@ -9120,7 +9101,7 @@ let _rrgResizeTimer=null;
 window.addEventListener("resize",()=>{
  clearTimeout(_rrgResizeTimer);
  _rrgResizeTimer=setTimeout(()=>{
-   ["sectorChart","stockChart","historyChart"].forEach(id=>{
+   ["sectorChart","stockChart"].forEach(id=>{
      const st=rrgFocusState[id];
      if(st?.rows?.length)drawRRG(id,st.rows,st.selected);
    });
