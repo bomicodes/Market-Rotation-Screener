@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.13"
+APP_VERSION = "27.14"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -931,12 +931,8 @@ def sma(arr, n):
 
 RRG_STD_WINDOW = 63  # ~1 trading quarter; shared here and in compute_rrg's default
                       # so the warm-up guard below can't silently drift out of sync.
-RRG_HISTORY_LEN = 200  # ~9-10 months of trading days for the main dashboard's
-                        # timeline slider. Only the main sector/industry
-                        # dashboard call passes this -- other rrg_rows/
-                        # dual_rrg_rows callers (per-ticker deep-dives, sector
-                        # drill-downs) leave history_len unset and see no
-                        # payload growth.
+RRG_HISTORY_LEN = 200  # ~9-10 months of daily observations for the main dashboard.
+RRG_WEEKLY_HISTORY_LEN = 104  # ~2 years of true weekly observations for the 1W timeline.
 
 def despike_rs(rs, threshold_pct=4.0):
     """Correct isolated one-bar data glitches in a relative-strength series
@@ -957,6 +953,23 @@ def despike_rs(rs, threshold_pct=4.0):
         if abs(jump) >= threshold_pct and np.sign(jump) != np.sign(revert) and abs(jump+revert) < abs(jump)*0.35:
             vals[i] = (prev+nxt)/2.0
     return pd.Series(vals, index=rs.index)
+
+def rrg_resample_prices(prices, timeframe="1d"):
+    """Return the observation grid used by the RRG calculation.
+
+    Fast/Trend remain sensitivity settings; timeframe controls the actual input
+    observations. 1W therefore means weekly closes, not a slower smoothing
+    preset applied to daily bars.
+    """
+    if timeframe != "1w":
+        return prices
+    if prices is None or len(prices) == 0:
+        return prices
+    out = prices.copy().sort_index()
+    out.index = pd.DatetimeIndex(out.index)
+    if getattr(out.index, "tz", None) is not None:
+        out.index = out.index.tz_localize(None)
+    return out.resample("W-FRI").last().dropna(how="all")
 
 def compute_rrg(bench, asset, n1=10, n2=5, std_window=RRG_STD_WINDOW):
     """JdK-style RS-Ratio / RS-Momentum using the publicly documented z-score
@@ -1116,9 +1129,10 @@ def rrg_rows(prices, bench_ticker, members, n1=10, n2=5, tail=8, history_len=Non
     return sorted(out, key=lambda r:(-r["score"],-r["y"],-r["x"]))
 
 
-def dual_rrg_rows(prices, bench_ticker, members, tail_fast=8, tail_trend=8, history_len=None):
-    fast = {r["ticker"]: r for r in rrg_rows(prices, bench_ticker, members, 10, 5, tail_fast, history_len)}
-    trend = {r["ticker"]: r for r in rrg_rows(prices, bench_ticker, members, 25, 12, tail_trend, history_len)}
+def dual_rrg_rows(prices, bench_ticker, members, tail_fast=8, tail_trend=8, history_len=None, timeframe="1d"):
+    rrg_prices = rrg_resample_prices(prices, timeframe)
+    fast = {r["ticker"]: r for r in rrg_rows(rrg_prices, bench_ticker, members, 10, 5, tail_fast, history_len)}
+    trend = {r["ticker"]: r for r in rrg_rows(rrg_prices, bench_ticker, members, 25, 12, tail_trend, history_len)}
     out = []
     for ticker in members:
         f = fast.get(ticker)
@@ -3169,10 +3183,9 @@ def historical_continuation_score(profile):
 
 def market_payload():
     tickers=["SPY","RSP","IWM","QQQ","HYG","LQD","^VIX","^TNX"]+list(RRG_UNIVERSE)
-    # Bumped from 18mo -> 3y so the RRG history slider (below) has enough
-    # trading days to scrub back RRG_HISTORY_LEN periods even after the
-    # z-score formula's own ~126-day (2*RRG_STD_WINDOW) warm-up is subtracted.
-    prices=dl_prices(tickers,"3y")
+    # Six years supports both the 200-session daily timeline and a true weekly
+    # RRG with a 63-observation volatility window plus ~2 years of history.
+    prices=dl_prices(tickers,"6y")
 
     if "SPY" not in prices.columns:
         raise RuntimeError("SPY data unavailable after provider retry.")
@@ -3246,15 +3259,17 @@ def market_payload():
         risk_appetite="Risk-Off"
     else:
         risk_appetite="Mixed"
-    rows=dual_rrg_rows(prices,"SPY",list(RRG_UNIVERSE),8,8,history_len=RRG_HISTORY_LEN)
-    for r in rows:
-        r["name"]=RRG_UNIVERSE.get(r["ticker"],r["ticker"])
-        r["group"]="Core Sector" if r["ticker"] in SECTORS else "Industry / Theme"
-        r["alignment"]=alignment_label(r.get("fast"), r.get("trend"))
+    rows=dual_rrg_rows(prices,"SPY",list(RRG_UNIVERSE),8,8,history_len=RRG_HISTORY_LEN,timeframe="1d")
+    weekly_rows=dual_rrg_rows(prices,"SPY",list(RRG_UNIVERSE),8,8,history_len=RRG_WEEKLY_HISTORY_LEN,timeframe="1w")
+    for collection in (rows, weekly_rows):
+        for r in collection:
+            r["name"]=RRG_UNIVERSE.get(r["ticker"],r["ticker"])
+            r["group"]="Core Sector" if r["ticker"] in SECTORS else "Industry / Theme"
+            r["alignment"]=alignment_label(r.get("fast"), r.get("trend"))
     valid_index = prices.dropna(how="all").index
     if len(valid_index) == 0:
         raise RuntimeError("Market price frame contains no valid dated observations.")
-    return {"asof":valid_index.max().strftime("%Y-%m-%d"),"internals":internals,"participation":participation,"risk_appetite":risk_appetite,"risk_score":risk_score,"sectors":rows}
+    return {"asof":valid_index.max().strftime("%Y-%m-%d"),"internals":internals,"participation":participation,"risk_appetite":risk_appetite,"risk_score":risk_score,"sectors":rows,"sectors_weekly":weekly_rows}
 
 
 
@@ -5205,7 +5220,7 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
 
     <main class="dashCol dashCenter rrgShell">
       <div class="panel">
-        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · click a ticker to focus and load holdings</div></div><div class="rrgControlStack"><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div></div></div>
+        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · 1D · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · 1D/1W changes observation periodicity · Fast/Trend changes sensitivity</div></div><div class="rrgControlStack"><div class="rrgToggle"><button id="rrgDailyBtn" class="active" type="button" onclick="setSectorRRGTimeframe('1d')">1D</button><button id="rrgWeeklyBtn" type="button" onclick="setSectorRRGTimeframe('1w')">1W</button></div><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div></div></div>
         <div class="rrgFilterBar">
           <div class="rrgSelectFilters">
             <label><span>SECTOR / GROUP</span><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></label>
@@ -5609,11 +5624,11 @@ function fmtCompact(n){
  if(a>=1e3)return (x/1e3).toFixed(a>=1e4?1:2)+"K";
  return Math.round(x).toLocaleString();
 }
-let sectorData=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
+let sectorData=[],sectorDataWeekly=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
 let globalTopSetupData=[],automaticTopSetupsRunning=false,automaticTopSetupsLastRun=0;
 
 let previewVPMode="auto",previewPayload=null,previewTimeframe="1d";
-let sectorRRGMode="fast", sectorQuadrantFilter="all", dashboardPayload=null, dashboardHeatMode="composite";
+let sectorRRGMode="fast", sectorRRGTimeframe="1d", sectorQuadrantFilter="all", dashboardPayload=null, dashboardHeatMode="composite";
 const clientCache={market:null,sectors:new Map(),historical:new Map()};
 function cacheKeySector(etf,limit){return `${etf}|${limit}`}
 function cacheKeyHistory(mode,etf,date,limit){return `${mode}|${etf}|${date}|${limit}`}
@@ -5988,9 +6003,17 @@ function selectedInterpretation(x){
  if(f.quadrant==="Lagging" && t.quadrant==="Lagging")return "Weak on both horizons — low-priority until momentum turns.";
  return `${x?.alignment||"Mixed"} — compare fast change with trend persistence.`;
 }
+function activeSectorRRGData(){
+ return sectorRRGTimeframe==="1w"&&sectorDataWeekly.length?sectorDataWeekly:sectorData;
+}
+function updateDashboardRRGTitle(){
+ const ttl=document.getElementById("dashboardRRGTitle");if(!ttl)return;
+ const tf=sectorRRGTimeframe==="1w"?"1W":"1D";
+ ttl.textContent=sectorRRGMode==="fast"?`RRG LIVE · ${tf} · FAST ROTATION (10/5)`:`RRG LIVE · ${tf} · TREND (25/12)`;
+}
 function updateSelectedSectorCard(ticker){
  const el=document.getElementById("selectedSectorCard"); if(!el)return;
- const x=(sectorData||[]).find(r=>r.ticker===ticker);
+ const x=(activeSectorRRGData()||[]).find(r=>r.ticker===ticker);
  if(!x){el.innerHTML='<div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div>';return;}
  const f=x.fast||{},t=x.trend||{};
  el.innerHTML=`<div><div class="sscLabel">Selected</div><div class="sscValue">${x.ticker}</div><div class="tiny">${x.name||x.group||""}</div></div>
@@ -6002,8 +6025,17 @@ function setSectorRRGMode(mode){
  sectorRRGMode=mode==="trend"?"trend":"fast";
  ["rrgFastBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="fast"));
  ["rrgTrendBtn"].forEach(id=>document.getElementById(id)?.classList.toggle("active",sectorRRGMode==="trend"));
- const ttl=document.getElementById("dashboardRRGTitle");if(ttl)ttl.textContent=sectorRRGMode==="fast"?"RRG LIVE · FAST ROTATION (10/5)":"RRG LIVE · TREND (25/12)";
+ updateDashboardRRGTitle();
  renderGroups();
+}
+function setSectorRRGTimeframe(timeframe){
+ sectorRRGTimeframe=timeframe==="1w"?"1w":"1d";
+ document.getElementById("rrgDailyBtn")?.classList.toggle("active",sectorRRGTimeframe==="1d");
+ document.getElementById("rrgWeeklyBtn")?.classList.toggle("active",sectorRRGTimeframe==="1w");
+ updateDashboardRRGTitle();
+ setupRRGTimeline();
+ renderGroups();
+ updateSelectedSectorCard(rrgFocusState["sectorChart"]?.selected||currentSector);
 }
 function sparklineSVG(x,mode="fast"){
  const src=mode==="trend"?(x?.trend||{}):(x?.fast||x||{}), pts=src.tail||[];
@@ -6022,6 +6054,18 @@ function _rrgCanvasContext(c){
  const ctx=c.getContext("2d");
  ctx.setTransform(dpr,0,0,dpr,0,0);
  return {ctx,W,H};
+}
+function smoothRRGPath(ctx,pts,X,Y){
+ if(!pts.length)return;
+ const xy=pts.map(p=>({x:X(p.x),y:Y(p.y)}));
+ ctx.moveTo(xy[0].x,xy[0].y);
+ if(xy.length<3){for(let i=1;i<xy.length;i++)ctx.lineTo(xy[i].x,xy[i].y);return;}
+ const tension=.55;
+ for(let i=0;i<xy.length-1;i++){
+   const p0=xy[i-1]||xy[i],p1=xy[i],p2=xy[i+1],p3=xy[i+2]||p2;
+   const k=tension/6;
+   ctx.bezierCurveTo(p1.x+(p2.x-p0.x)*k,p1.y+(p2.y-p0.y)*k,p2.x-(p3.x-p1.x)*k,p2.y-(p3.y-p1.y)*k,p2.x,p2.y);
+ }
 }
 function drawRRG(id,rows,focusTicker=undefined,fixedScale=undefined){
  rows=rrgRowsForChart(id,rows);
@@ -6140,9 +6184,7 @@ function drawRRG(id,rows,focusTicker=undefined,fixedScale=undefined){
    ctx.lineWidth=1.65;
    ctx.globalAlpha=isFaded?.06:(isSelected?1:.72);
    ctx.beginPath();
-   pts.forEach((pt,j)=>{
-     j?ctx.lineTo(X(pt.x),Y(pt.y)):ctx.moveTo(X(pt.x),Y(pt.y));
-   });
+   smoothRRGPath(ctx,pts,X,Y);
    ctx.stroke();
 
    let last=pts[pts.length-1],
@@ -6183,7 +6225,8 @@ function toggleRRGFocus(id,ticker){
  const state=rrgFocusState[id];
  if(!state)return;
  const next=state.selected===ticker?null:ticker;
- drawRRG(id,state.rows,next);
+ const fixed=(id==="sectorChart"&&rrgTimelineIndex!=null)?rrgTimelineScale[sectorRRGMode]:undefined;
+ drawRRG(id,state.rows,next,fixed);
  if(id==="sectorChart"){syncSectorRowSelection();updateSelectedSectorCard(next||currentSector);}
  if(id==="stockChart")syncLiveRowSelection();
  if(id==="historyChart")syncHistoricalRowSelection();
@@ -6304,14 +6347,14 @@ function quadrantJS(x,y){
 let rrgTimelineDates=[],rrgTimelineIndex=null,rrgTimelineScale={fast:null,trend:null};
 function buildRRGTimelineDates(){
  rrgTimelineDates=[];
- for(const r of (sectorData||[])){
+ for(const r of (activeSectorRRGData()||[])){
    const h=r.fast?.history;
    if(h&&h.length>rrgTimelineDates.length)rrgTimelineDates=h.map(p=>p.date);
  }
 }
 function computeStableScale(mode){
  let xs=[],ys=[];
- for(const r of (sectorData||[])){
+ for(const r of (activeSectorRRGData()||[])){
    const h=mode==="trend"?r.trend?.history:r.fast?.history;
    (h||[]).forEach(p=>{if(Number.isFinite(p.x))xs.push(p.x);if(Number.isFinite(p.y))ys.push(p.y);});
  }
@@ -6329,22 +6372,29 @@ function historicalPointFor(history,dateStr,tailLen=8){
          rs_up:prev?pt.x>prev.x:null,mom_up:prev?pt.y>prev.y:null,tail_trajectory:null};
 }
 function sectorDataAsOf(dateStr){
- return (sectorData||[]).map(r=>{
+ return (activeSectorRRGData()||[]).map(r=>{
    const f=historicalPointFor(r.fast?.history,dateStr)||r.fast;
    const t=r.trend?.history?(historicalPointFor(r.trend.history,dateStr)||r.trend):r.trend;
    return {...r,fast:{...r.fast,...f},trend:r.trend?{...r.trend,...t}:null,x:f?.x??r.x,y:f?.y??r.y,quadrant:f?.quadrant??r.quadrant};
  });
 }
 function setupRRGTimeline(){
+ const previousDate=rrgTimelineIndex!=null?rrgTimelineDates[rrgTimelineIndex]:null;
  buildRRGTimelineDates();
  rrgTimelineScale={fast:computeStableScale("fast"),trend:computeStableScale("trend")};
  const bar=document.getElementById("rrgTimelineBar"),slider=document.getElementById("rrgTimelineSlider");
  if(!bar||!slider)return;
- if(rrgTimelineDates.length<2){bar.style.display="none";return}
+ if(rrgTimelineDates.length<2){bar.style.display="none";rrgTimelineIndex=null;return}
  bar.style.display="flex";
  slider.min="0";slider.max=String(rrgTimelineDates.length-1);
- slider.value=String(rrgTimelineDates.length-1);
- rrgTimelineIndex=null;
+ let restored=null;
+ if(previousDate){
+   let idx=rrgTimelineDates.findIndex(d=>d===previousDate);
+   if(idx<0){for(let i=rrgTimelineDates.length-1;i>=0;i--){if(rrgTimelineDates[i]<=previousDate){idx=i;break;}}}
+   if(idx>=0&&idx<rrgTimelineDates.length-1)restored=idx;
+ }
+ rrgTimelineIndex=restored;
+ slider.value=String(restored==null?rrgTimelineDates.length-1:restored);
  updateRRGTimelineLabel();
 }
 function updateRRGTimelineLabel(){
@@ -6352,6 +6402,11 @@ function updateRRGTimelineLabel(){
  const live=rrgTimelineIndex==null||rrgTimelineIndex>=rrgTimelineDates.length-1;
  if(label)label.textContent=live?"Live":`As of ${rrgTimelineDates[rrgTimelineIndex]}`;
  if(liveBtn)liveBtn.style.display=live?"none":"inline-block";
+}
+let rrgTimelineFrame=null;
+function scheduleRRGTimelineChartRender(){
+ if(rrgTimelineFrame!=null)cancelAnimationFrame(rrgTimelineFrame);
+ rrgTimelineFrame=requestAnimationFrame(()=>{rrgTimelineFrame=null;renderGroups({chartOnly:true});});
 }
 function installRRGTimelineHandlers(){
  const slider=document.getElementById("rrgTimelineSlider"),liveBtn=document.getElementById("rrgTimelineLiveBtn");
@@ -6361,6 +6416,10 @@ function installRRGTimelineHandlers(){
      const idx=Number(slider.value);
      rrgTimelineIndex=idx>=rrgTimelineDates.length-1?null:idx;
      updateRRGTimelineLabel();
+     scheduleRRGTimelineChartRender();
+   });
+   slider.addEventListener("change",()=>{
+     if(rrgTimelineFrame!=null){cancelAnimationFrame(rrgTimelineFrame);rrgTimelineFrame=null;}
      renderGroups();
    });
  }
@@ -6376,16 +6435,16 @@ function installRRGTimelineHandlers(){
 }
 function filteredGroups(source){
  let f=document.getElementById("groupFilter")?.value||"all";
- return (source||sectorData).filter(x=>{
+ return (source||activeSectorRRGData()).filter(x=>{
    const gok=f==="all"||(f==="core"&&x.group==="Core Sector")||(f==="industry"&&x.group==="Industry / Theme");
    const q=sectorRRGMode==="trend"?(x.trend?.quadrant):(x.fast?.quadrant||x.quadrant);
    const qok=sectorQuadrantFilter==="all"||q===sectorQuadrantFilter;
    return gok&&qok;
  });
 }
-function renderGroups(){
+function renderGroups(opts={}){
  const viewingHistorical=rrgTimelineIndex!=null&&rrgTimelineDates[rrgTimelineIndex];
- const source=viewingHistorical?sectorDataAsOf(rrgTimelineDates[rrgTimelineIndex]):sectorData;
+ const source=viewingHistorical?sectorDataAsOf(rrgTimelineDates[rrgTimelineIndex]):activeSectorRRGData();
  let data=filteredGroups(source);
 
  // Clear sector focus if the selected ETF is hidden by the current group filter.
@@ -6395,6 +6454,7 @@ function renderGroups(){
  }
 
  drawRRG("sectorChart",data,undefined,viewingHistorical?rrgTimelineScale[sectorRRGMode]:undefined);
+ if(opts.chartOnly)return;
  document.getElementById("sectorRows").innerHTML=data.map((x,k)=>`<tr class="clickrow sectorTickerRow ${activeMacroBasket()&&!activeMacroBasket().has(x.ticker)?"macroDim":""}" data-sector="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name} · ${x.group}</div></td><td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${alignBadge(x.alignment)}</td></tr>`).join("");
 
  document.querySelectorAll("[data-sector]").forEach(el=>el.addEventListener("click",async()=>{
@@ -6410,6 +6470,7 @@ function renderGroups(){
 
 function applyMarketPayload(j,fromCache=false){
  sectorData=j.sectors||[];
+ sectorDataWeekly=j.sectors_weekly||[];
  setupRRGTimeline();
  installRRGTimelineHandlers();
  const st=document.getElementById("mstatus");
