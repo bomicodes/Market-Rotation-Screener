@@ -32,7 +32,8 @@ jobs:
       - name: Apply RRG patch
         run: git apply patches/rrg-zscore.patch
       - name: Bump app version
-        run: python - <<'PY'
+        run: |
+          python - <<'PY'
           from pathlib import Path
           p=Path('app.py')
           s=p.read_text()
