@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.9"
+APP_VERSION = "27.10"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -929,7 +929,10 @@ def alpaca_chart_bars(ticker,timeframe,period):
 def sma(arr, n):
     return pd.Series(arr, dtype=float).rolling(n).mean().to_numpy()
 
-def compute_rrg(bench, asset, n1=10, n2=5):
+RRG_STD_WINDOW = 63  # ~1 trading quarter; shared here and in compute_rrg's default
+                      # so the warm-up guard below can't silently drift out of sync.
+
+def compute_rrg(bench, asset, n1=10, n2=5, std_window=RRG_STD_WINDOW):
     """JdK-style RS-Ratio / RS-Momentum using the publicly documented z-score
     formulation of the Relative Rotation Graph method (Julius de Kempenaer).
 
@@ -942,28 +945,35 @@ def compute_rrg(bench, asset, n1=10, n2=5):
     the code below is written from scratch against that public description,
     not copied from any single implementation.
 
-    Previous version used a plain ratio-of-SMA (100 * RS/SMA(RS)) with no
-    volatility scaling, which let every sector swing the same amount for the
-    same % move regardless of that sector's own volatility -- this produced
-    visibly noisier, more jagged tails than standard JdK RRG tools. The
-    z-score version below scales each sector's deviation by its own recent
-    volatility, which is what makes standard RRG tails read as smooth arcs
-    rather than jagged zigzags.
+    Previous (pre-z-score) version used a plain ratio-of-SMA (100 * RS/SMA(RS))
+    with no volatility scaling, which let every sector swing the same amount
+    for the same % move regardless of that sector's own volatility.
 
-    RS-Ratio     = 100 + (RS - SMA(RS, n1)) / STDEV(RS, n1)
-    RS-Momentum  = 100 + (ROC - SMA(ROC, n2)) / STDEV(ROC, n2)
+    IMPORTANT: the mean window (n1/n2) and the standard-deviation window are
+    deliberately decoupled. A first pass used n1/n2 for both the mean AND the
+    std, which looked right at Trend's 25/12 window but made Fast's 10/5
+    window noticeably WORSE than the old formula -- a rolling std computed
+    from only 5-10 points is itself a high-variance estimate, so dividing by
+    it amplifies noise instead of damping it. std_window=63 (~1 trading
+    quarter, a standard volatility-estimation convention) stabilizes the
+    denominator on both Fast and Trend, while n1/n2 still control how quickly
+    the centerline itself reacts -- which is what should differ between the
+    two, not how noisy the normalization is.
+
+    RS-Ratio     = 100 + (RS - SMA(RS, n1)) / STDEV(RS, std_window)
+    RS-Momentum  = 100 + (ROC - SMA(ROC, n2)) / STDEV(ROC, std_window)
                    where ROC is the period-over-period % change of RS-Ratio.
     """
     b = np.asarray(bench, dtype=float)
     a = np.asarray(asset, dtype=float)
     rs = pd.Series((a / b) * 100.0, dtype=float)
     rs_mean = rs.rolling(n1).mean()
-    rs_std = rs.rolling(n1).std(ddof=1).replace(0, np.nan)
+    rs_std = rs.rolling(max(std_window, n1)).std(ddof=1).replace(0, np.nan)
     ratio = 100.0 + (rs - rs_mean) / rs_std
 
     roc = ratio.pct_change() * 100.0
     roc_mean = roc.rolling(n2).mean()
-    roc_std = roc.rolling(n2).std(ddof=1).replace(0, np.nan)
+    roc_std = roc.rolling(max(std_window, n2)).std(ddof=1).replace(0, np.nan)
     momentum = 100.0 + (roc - roc_mean) / roc_std
 
     return ratio.to_numpy(), momentum.to_numpy()
@@ -982,7 +992,15 @@ def rrg_rows(prices, bench_ticker, members, n1=10, n2=5, tail=8):
         if ticker == bench_ticker or ticker not in prices.columns:
             continue
         pair = prices[[bench_ticker,ticker]].dropna()
-        if len(pair) < max(40, n1+n2+tail+5):
+        # Was max(40, n1+n2+tail+5) -- sized for the old ratio-of-SMA formula.
+        # The z-score formula's rs_std/roc_std each need RRG_STD_WINDOW valid
+        # observations before producing a single non-NaN point, and momentum
+        # needs that satisfied twice in sequence (ratio's std window, then
+        # roc's std window on top of it) -- roughly 2*RRG_STD_WINDOW points
+        # before the FIRST valid momentum value exists, before even counting
+        # the requested tail length.
+        min_needed = max(2*RRG_STD_WINDOW + tail + 10, n1+n2+tail+5)
+        if len(pair) < min_needed:
             continue
         ratio, mom = compute_rrg(pair[bench_ticker].values, pair[ticker].values, n1, n2)
         valid = np.isfinite(ratio) & np.isfinite(mom)
