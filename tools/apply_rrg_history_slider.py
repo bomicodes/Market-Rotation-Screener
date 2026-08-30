@@ -63,8 +63,12 @@ once('''def dual_rrg_rows(prices, bench_ticker, members, tail_fast=8, tail_trend
     trend = {r["ticker"]: r for r in rrg_rows(prices, bench_ticker, members, 25, 12, tail_trend, history_len)}
 ''','dual history')
 
-once('''    prices=dl_prices(tickers,"18mo")
-''','''    # Bumped from 18mo -> 3y so the RRG history slider (below) has enough
+once('''def market_payload():
+    tickers=["SPY","RSP","IWM","QQQ","HYG","LQD","^VIX","^TNX"]+list(RRG_UNIVERSE)
+    prices=dl_prices(tickers,"18mo")
+''','''def market_payload():
+    tickers=["SPY","RSP","IWM","QQQ","HYG","LQD","^VIX","^TNX"]+list(RRG_UNIVERSE)
+    # Bumped from 18mo -> 3y so the RRG history slider (below) has enough
     # trading days to scrub back RRG_HISTORY_LEN periods even after the
     # z-score formula's own ~126-day (2*RRG_STD_WINDOW) warm-up is subtracted.
     prices=dl_prices(tickers,"3y")
@@ -141,9 +145,6 @@ function setupRRGTimeline(){
  if(rrgTimelineDates.length<2){bar.style.display="none";return}
  bar.style.display="flex";
  slider.min="0";slider.max=String(rrgTimelineDates.length-1);
- // Default to live (rightmost) on every fresh payload load, not wherever the
- // slider happened to be left -- a background refresh shouldn't silently
- // re-anchor the view to whatever historical date was being viewed before.
  slider.value=String(rrgTimelineDates.length-1);
  rrgTimelineIndex=null;
  updateRRGTimelineLabel();
@@ -188,11 +189,9 @@ once('''function renderGroups(){
  const source=viewingHistorical?sectorDataAsOf(rrgTimelineDates[rrgTimelineIndex]):sectorData;
  let data=filteredGroups(source);
 ''','historical render source')
-
 once(''' updateSelectedSectorCard(rrgFocusState["sectorChart"]?.selected||currentSector);
 ''',''' if(!viewingHistorical)updateSelectedSectorCard(rrgFocusState["sectorChart"]?.selected||currentSector);
 ''','historical selected card')
-
 once('''function applyMarketPayload(j,fromCache=false){
  sectorData=j.sectors||[];
 ''','''function applyMarketPayload(j,fromCache=false){
