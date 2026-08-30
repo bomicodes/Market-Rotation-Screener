@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.15"
+APP_VERSION = "27.16"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6360,7 +6360,7 @@ function quadrantJS(x,y){
  if(x<100&&y<100)return "Lagging";
  return "Weakening";
 }
-let rrgTimelineDates=[],rrgTimelineIndex=null,rrgTimelineScale={fast:null,trend:null};
+let rrgTimelineDates=[],rrgTimelineIndex=null,rrgTimelinePinnedDate=null,rrgTimelineScrubbing=false,rrgTimelineScale={fast:null,trend:null};
 function buildRRGTimelineDates(){
  rrgTimelineDates=[];
  for(const r of (activeSectorRRGData()||[])){
@@ -6395,7 +6395,9 @@ function sectorDataAsOf(dateStr){
  });
 }
 function setupRRGTimeline(){
- const previousDate=rrgTimelineIndex!=null?rrgTimelineDates[rrgTimelineIndex]:null;
+ // Preserve the user's chosen historical DATE independently of the array index.
+ // Market refreshes replace the history arrays, so an index is not durable state.
+ const previousDate=rrgTimelinePinnedDate || (rrgTimelineIndex!=null?rrgTimelineDates[rrgTimelineIndex]:null);
  buildRRGTimelineDates();
  rrgTimelineScale={fast:computeStableScale("fast"),trend:computeStableScale("trend")};
  const bar=document.getElementById("rrgTimelineBar"),slider=document.getElementById("rrgTimelineSlider");
@@ -6410,7 +6412,10 @@ function setupRRGTimeline(){
    if(idx>=0&&idx<rrgTimelineDates.length-1)restored=idx;
  }
  rrgTimelineIndex=restored;
- slider.value=String(restored==null?rrgTimelineDates.length-1:restored);
+ if(restored!=null)rrgTimelinePinnedDate=rrgTimelineDates[restored];
+ else if(!rrgTimelineScrubbing)rrgTimelinePinnedDate=null;
+ // Never let a background refresh move the physical thumb while the user is dragging.
+ if(!rrgTimelineScrubbing)slider.value=String(restored==null?rrgTimelineDates.length-1:restored);
  updateRRGTimelineLabel();
 }
 function updateRRGTimelineLabel(){
@@ -6428,21 +6433,41 @@ function installRRGTimelineHandlers(){
  const slider=document.getElementById("rrgTimelineSlider"),liveBtn=document.getElementById("rrgTimelineLiveBtn");
  if(slider&&!slider.dataset.wired){
    slider.dataset.wired="1";
+   const beginScrub=()=>{rrgTimelineScrubbing=true;};
+   const finishScrub=()=>{rrgTimelineScrubbing=false;};
+   slider.addEventListener("pointerdown",beginScrub);
+   slider.addEventListener("touchstart",beginScrub,{passive:true});
    slider.addEventListener("input",()=>{
+     rrgTimelineScrubbing=true;
      const idx=Number(slider.value);
-     rrgTimelineIndex=idx>=rrgTimelineDates.length-1?null:idx;
+     if(idx>=rrgTimelineDates.length-1){
+       rrgTimelineIndex=null;
+       rrgTimelinePinnedDate=null;
+     } else {
+       rrgTimelineIndex=idx;
+       rrgTimelinePinnedDate=rrgTimelineDates[idx]||rrgTimelinePinnedDate;
+     }
      updateRRGTimelineLabel();
      scheduleRRGTimelineChartRender();
    });
    slider.addEventListener("change",()=>{
+     finishScrub();
+     const idx=Number(slider.value);
+     if(idx>=rrgTimelineDates.length-1){rrgTimelineIndex=null;rrgTimelinePinnedDate=null;}
+     else {rrgTimelineIndex=idx;rrgTimelinePinnedDate=rrgTimelineDates[idx]||rrgTimelinePinnedDate;}
      if(rrgTimelineFrame!=null){cancelAnimationFrame(rrgTimelineFrame);rrgTimelineFrame=null;}
+     updateRRGTimelineLabel();
      renderGroups();
    });
+   slider.addEventListener("pointerup",finishScrub);
+   slider.addEventListener("pointercancel",finishScrub);
  }
  if(liveBtn&&!liveBtn.dataset.wired){
    liveBtn.dataset.wired="1";
    liveBtn.addEventListener("click",()=>{
+     rrgTimelineScrubbing=false;
      rrgTimelineIndex=null;
+     rrgTimelinePinnedDate=null;
      if(slider)slider.value=String(rrgTimelineDates.length-1);
      updateRRGTimelineLabel();
      renderGroups();
