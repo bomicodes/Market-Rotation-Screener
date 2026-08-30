@@ -1,0 +1,44 @@
+name: Apply RRG despike
+on:
+  push:
+    branches:
+      - feat/rrg-rs-despike
+    paths:
+      - tools/apply_rrg_despike.py
+      - .github/workflows/apply-rrg-despike.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/rrg-rs-despike
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Apply patch
+        run: python tools/apply_rrg_despike.py
+      - name: Compile
+        run: python -m py_compile app.py
+      - name: Test
+        run: pytest -q
+      - name: Sanity-check despike hooks
+        run: |
+          grep -q 'def despike_rs' app.py
+          grep -q 'rs = despike_rs' app.py
+          grep -q 'APP_VERSION = "27.13"' app.py
+      - name: Commit app patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'v27.13 despike isolated RS data glitches'
+          git pull --rebase origin feat/rrg-rs-despike
+          git push origin HEAD:feat/rrg-rs-despike
