@@ -1,0 +1,45 @@
+name: Apply v27.6 Alpaca rate limiter
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-v27-6.yml'
+      - '.patches/apply_v27_6_alpaca_rate_limit.py'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Apply patch
+        run: python .patches/apply_v27_6_alpaca_rate_limit.py
+      - name: Validate
+        run: |
+          python -m py_compile app.py
+          python - <<'PY'
+          from pathlib import Path
+          s=Path('app.py').read_text()
+          r=Path('README.txt').read_text()
+          assert 'APP_VERSION = "27.6"' in s
+          assert 'from collections import deque' in s
+          assert 'def _alpaca_rate_gate():' in s
+          assert 'def alpaca_get(url, **kwargs):' in s
+          assert '_ALPACA_MAX_PER_MIN = 170' in s
+          assert 'requests.get(f"{ALPACA_DATA_BASE_URL}' not in s
+          assert 'requests.get(url,params=params,headers=alpaca_headers()' not in s
+          assert r.startswith('v27.6')
+          print('validation passed')
+          PY
+      - name: Commit and self-clean
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.py README.txt
+          git rm .patches/apply_v27_6_alpaca_rate_limit.py .github/workflows/apply-v27-6.yml
+          git commit -m "v27.6 rate-limit Alpaca requests across scan threads"
+          git push
