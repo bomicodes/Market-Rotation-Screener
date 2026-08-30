@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.7"
+APP_VERSION = "27.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -988,6 +988,26 @@ def rrg_rows(prices, bench_ticker, members, n1=10, n2=5, tail=8):
             tail_trajectory = "Rotating Out"
         else:
             tail_trajectory = "Neutral"
+
+        # Quantitative RRG diagnostics. Keep these derived from the plotted
+        # coordinates so chart, grid and scanner always describe the same tail.
+        if len(tail_pts) >= 2:
+            step_dx = float(tail_pts[-1]["x"] - tail_pts[-2]["x"])
+            step_dy = float(tail_pts[-1]["y"] - tail_pts[-2]["y"])
+        else:
+            step_dx = step_dy = 0.0
+        velocity = math.hypot(step_dx, step_dy)
+        heading_deg = (math.degrees(math.atan2(step_dy, step_dx)) + 360.0) % 360.0 if velocity > eps else None
+        heading_names = ("E","NE","N","NW","W","SW","S","SE")
+        heading = heading_names[int(((heading_deg or 0.0) + 22.5) // 45.0) % 8] if heading_deg is not None else "FLAT"
+        distance = math.hypot(x - 100.0, y - 100.0)
+        radial_angle = (math.degrees(math.atan2(y - 100.0, x - 100.0)) + 360.0) % 360.0 if distance > eps else None
+        prev_distance = math.hypot(px - 100.0, py - 100.0)
+        prev_angle = (math.degrees(math.atan2(py - 100.0, px - 100.0)) + 360.0) % 360.0 if prev_distance > eps else None
+        angle_roc = None
+        if radial_angle is not None and prev_angle is not None:
+            angle_roc = ((radial_angle - prev_angle + 180.0) % 360.0) - 180.0
+
         score = 0.0
         score += {"Leading":3.0,"Improving":2.6,"Weakening":1.0,"Lagging":0.5}[q]
         if x > px: score += 1.4
@@ -1001,6 +1021,10 @@ def rrg_rows(prices, bench_ticker, members, n1=10, n2=5, tail=8):
             "score":round(min(10,score),1),"tail":tail_pts,
             "tail_trajectory":tail_trajectory,
             "tail_dx":round(dx_tail,4),"tail_dy":round(dy_tail,4),
+            "heading":heading,"heading_deg":round(heading_deg,1) if heading_deg is not None else None,
+            "velocity":round(velocity,4),"distance":round(distance,4),
+            "radial_angle":round(radial_angle,1) if radial_angle is not None else None,
+            "angle_roc":round(angle_roc,2) if angle_roc is not None else None,
             "date":pair.index[li].strftime("%Y-%m-%d")
         })
     return sorted(out, key=lambda r:(-r["score"],-r["y"],-r["x"]))
@@ -5124,6 +5148,17 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
     <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
   </div>
 
+  <div class="panel" id="rrgMetricsPanel">
+    <div class="row" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+      <div><b>RRG Metrics Grid</b><div class="tiny">Quantifies the same tail shown above · 100/100 center · click a row to open the ticker</div></div>
+      <div class="row" style="gap:8px">
+        <select id="rrgMetricsMode"><option value="fast">Fast</option><option value="trend">Trend</option></select>
+        <select id="rrgMetricsSort"><option value="rotation">Rotation quality</option><option value="velocity">Velocity</option><option value="distance">Distance</option><option value="angle_roc">Angle ROC</option><option value="rs">RS</option><option value="momentum">Momentum</option><option value="ticker">Ticker</option></select>
+      </div>
+    </div>
+    <div class="scroll" style="margin-top:8px"><table><thead><tr><th>Ticker</th><th>Quadrant</th><th>RS</th><th>Momentum</th><th>Heading</th><th>Velocity</th><th>Distance</th><th>Angle ROC</th><th>Rotation</th></tr></thead><tbody id="rrgMetricRows"></tbody></table></div>
+  </div>
+
   <div class="priceActionGrid">
     <div class="panel priceChartPanel priceChartPanelWide" id="previewPanel">
       <div class="priceChartHeader">
@@ -8020,10 +8055,41 @@ function mergeEarlyTurnInstitutionalFlow(){
  });
  earlyTurnWatchData=(earlyTurnWatchData||[]).sort((a,b)=>earlyTurnScore(b.x)-earlyTurnScore(a.x));
 }
+function rrgMetricSet(x,mode="fast"){
+ return mode==="trend"?(x?.trend||{}):(x?.fast||x||{});
+}
+function rrgRotationQuality(m){
+ if(!m)return 0;
+ const h=String(m.heading||"FLAT");let s=0;
+ if(h==="NE")s+=1.5; else if(h==="N"||h==="E")s+=0.75;
+ const favorable=["NE","N","E"].includes(h);
+ if(favorable){
+   s+=Math.min(1.25,Math.max(0,Number(m.velocity||0))*1.5);
+   s+=Math.min(0.75,Math.max(0,Number(m.distance||0))*0.25);
+   s+=Math.min(0.75,Math.abs(Number(m.angle_roc||0))/20*0.75);
+ }
+ return Math.min(4.25,s);
+}
+function rrgRotationQualityBonus(x){
+ const f=rrgRotationQuality(rrgMetricSet(x,"fast"));
+ const t=rrgRotationQuality(rrgMetricSet(x,"trend"));
+ return Math.min(4.5,f*0.7+t*0.3);
+}
+function rrgRotationLabel(m){
+ if(!m)return "—";
+ const q=String(m.quadrant||""),h=String(m.heading||"FLAT"),v=Number(m.velocity||0);
+ if(v<0.08)return "Flat / noise";
+ if(q==="Lagging"&&["NE","N","E"].includes(h))return "Early Turn";
+ if(q==="Improving"&&["NE","N","E"].includes(h))return "Accelerating";
+ if(q==="Leading"&&["NE","N","E"].includes(h))return "Leading";
+ if(["SW","S","W"].includes(h))return "Rotating Out";
+ return "Mixed";
+}
 function earlyTurnScore(x){
  const opt=optionScanMap[x.ticker];let s=preliminaryRRGScore(x);
  if(opt?.liquidity==="Liquid")s+=2;
  if(opt?.iv_state==="Cheap / Crushed")s+=2;
+ s+=rrgRotationQualityBonus(x);
  s+=institutionalFlowBonus(x?._institutionalFlow||institutionalFlowForTicker(x?.ticker));
  return s;
 }
@@ -8245,11 +8311,26 @@ function opportunityHTML(x){
  const s=opportunityScore(x),stars=Math.max(1,Math.min(5,Math.ceil(s/2)));
  return `<b>${"★".repeat(stars)}${"☆".repeat(5-stars)}</b><div class="tiny">${s}/10 · rotation + options${valueAcceptanceMap[x.ticker]?` + value`:""}</div>`;
 }
+function renderRRGMetricGrid(data){
+ const body=document.getElementById("rrgMetricRows"),modeEl=document.getElementById("rrgMetricsMode"),sortEl=document.getElementById("rrgMetricsSort");
+ if(!body)return;
+ const mode=modeEl?.value||"fast",sort=sortEl?.value||"rotation";
+ const rows=[...(data||[])];
+ const val=(x,key)=>{const m=rrgMetricSet(x,mode);if(key==="rotation")return rrgRotationQuality(m);if(key==="rs")return Number(m.x||0);if(key==="momentum")return Number(m.y||0);if(key==="ticker")return String(x.ticker||"");return Number(m[key]||0)};
+ rows.sort((a,b)=>sort==="ticker"?String(val(a,sort)).localeCompare(String(val(b,sort))):val(b,sort)-val(a,sort));
+ const arrow={NE:"↗",N:"↑",E:"→",SE:"↘",S:"↓",SW:"↙",W:"←",NW:"↖",FLAT:"·"};
+ body.innerHTML=rows.map(x=>{const m=rrgMetricSet(x,mode),h=m.heading||"FLAT",roc=m.angle_roc;return `<tr class="clickrow" data-rrg-metric-ticker="${x.ticker}"><td><b>${x.ticker}</b></td><td>${m.quadrant||"—"}</td><td>${m.x==null?"—":fmt(m.x,2)}</td><td>${m.y==null?"—":fmt(m.y,2)}</td><td><b>${arrow[h]||"·"} ${h}</b>${m.heading_deg==null?"":`<div class="tiny">${fmt(m.heading_deg,0)}°</div>`}</td><td>${m.velocity==null?"—":fmt(m.velocity,2)}</td><td>${m.distance==null?"—":fmt(m.distance,2)}</td><td class="${Number(roc||0)>=0?'up':'down'}">${roc==null?"—":`${roc>=0?'+':''}${fmt(roc,1)}°`}</td><td><b>${rrgRotationLabel(m)}</b><div class="tiny">Q ${rrgRotationQuality(m).toFixed(1)}/4.25</div></td></tr>`}).join("");
+ document.querySelectorAll("[data-rrg-metric-ticker]").forEach(row=>row.addEventListener("click",()=>openSectorStockTicker(row.dataset.rrgMetricTicker,{scroll:true})));
+ if(modeEl&&!modeEl.dataset.bound){modeEl.dataset.bound="1";modeEl.addEventListener("change",()=>renderRRGMetricGrid(filteredLiveStocks()));}
+ if(sortEl&&!sortEl.dataset.bound){sortEl.dataset.bound="1";sortEl.addEventListener("change",()=>renderRRGMetricGrid(filteredLiveStocks()));}
+}
+
 function renderLiveStocks(){
  const data=filteredLiveStocks();
  const stockState=rrgFocusState["stockChart"];
  if(stockState?.selected&&!data.some(x=>x.ticker===stockState.selected))stockState.selected=null;
  drawRRG("stockChart",data);
+ renderRRGMetricGrid(data);
  document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
  <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
  <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td><td>${opportunityHTML(x)}</td>
