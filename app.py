@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.12"
+APP_VERSION = "27.13"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -938,6 +938,26 @@ RRG_HISTORY_LEN = 200  # ~9-10 months of trading days for the main dashboard's
                         # drill-downs) leave history_len unset and see no
                         # payload growth.
 
+def despike_rs(rs, threshold_pct=4.0):
+    """Correct isolated one-bar data glitches in a relative-strength series
+    before they enter the RRG math.
+
+    A single bad print, stale/delayed quote, or adjustment artifact can create
+    an isolated spike that largely reverses on the next bar. This targets that
+    specific jump-and-revert signature and replaces only the isolated middle
+    point with the midpoint of its neighbors.
+    """
+    vals = np.array(rs.to_numpy(), copy=True)
+    for i in range(1, len(vals) - 1):
+        prev, cur, nxt = vals[i-1], vals[i], vals[i+1]
+        if not (np.isfinite(prev) and np.isfinite(cur) and np.isfinite(nxt)):
+            continue
+        jump = (cur/prev - 1)*100 if prev else 0.0
+        revert = (nxt/cur - 1)*100 if cur else 0.0
+        if abs(jump) >= threshold_pct and np.sign(jump) != np.sign(revert) and abs(jump+revert) < abs(jump)*0.35:
+            vals[i] = (prev+nxt)/2.0
+    return pd.Series(vals, index=rs.index)
+
 def compute_rrg(bench, asset, n1=10, n2=5, std_window=RRG_STD_WINDOW):
     """JdK-style RS-Ratio / RS-Momentum using the publicly documented z-score
     formulation of the Relative Rotation Graph method (Julius de Kempenaer).
@@ -972,7 +992,7 @@ def compute_rrg(bench, asset, n1=10, n2=5, std_window=RRG_STD_WINDOW):
     """
     b = np.asarray(bench, dtype=float)
     a = np.asarray(asset, dtype=float)
-    rs = pd.Series((a / b) * 100.0, dtype=float)
+    rs = despike_rs(pd.Series((a / b) * 100.0, dtype=float))
     rs_mean = rs.rolling(n1).mean()
     rs_std = rs.rolling(max(std_window, n1)).std(ddof=1).replace(0, np.nan)
     ratio = 100.0 + (rs - rs_mean) / rs_std
