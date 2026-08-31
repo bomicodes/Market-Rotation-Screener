@@ -4277,11 +4277,16 @@ def api_postearnings_opportunities():
             move=abs(float(cur.get("current_move_pct") or 0))
             f_in=((f.get("tail_trajectory")=="Rotating In") if f.get("tail_trajectory") else (f.get("rs_up") is True and f.get("mom_up") is True))
             t_in=((tr.get("tail_trajectory")=="Rotating In") if tr.get("tail_trajectory") else (tr.get("rs_up") is True and tr.get("mom_up") is True))
-            pre=move*2.2+(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
+            f_out=((f.get("tail_trajectory")=="Rotating Out") if f.get("tail_trajectory") else (f.get("rs_up") is False and f.get("mom_up") is False))
+            t_out=((tr.get("tail_trajectory")=="Rotating Out") if tr.get("tail_trajectory") else (tr.get("rs_up") is False and tr.get("mom_up") is False))
+            # Archetype-neutral pre-rank: don't bias the 20-name history pass toward
+            # bullish/NE names before we know whether the stock is a continuation
+            # or reversion setup. Historical enrichment decides trade direction.
+            pre=move*1.5+(12 if (f_in or f_out) else 0)+(8 if (t_in or t_out) else 0)+(5 if f.get("quadrant") in ("Leading","Improving","Weakening","Lagging") else 0)
             prelim.append((pre,sym,d,rot,cur))
         prelim.sort(reverse=True,key=lambda x:x[0])
 
-        # Historical work only for the strongest 10 stock candidates.
+        # Historical work for the strongest 20 stock candidates after the cheap market-wide pre-rank.
         def enrich(item):
             pre,sym,d,rot,cur=item
             profile=cached(
@@ -8838,8 +8843,12 @@ function peExecutionBonus(x){
  if(q==="Liquid")return 10;if(q==="Tradable")return 8;if(q==="Wide but Active")return 5;return 0;
 }
 function peTradeScore(x){
- if(x?.options_loading||!x?.best_contract)return x?.trade_score??null;
- const base=Number(x?.opportunity_score||0),exec=peExecutionBonus(x);
+ if(x?.options_loading)return x?.trade_score??null;
+ const base=Number(x?.opportunity_score||0);
+ // A strong stock setup without an executable contract is still useful research,
+ // but it should not outrank a slightly weaker setup we can actually trade.
+ if(!x?.best_contract)return Math.round(base*.72*10)/10;
+ const exec=peExecutionBonus(x);
  const cov=Number(x?.best_contract?.expected_move_coverage);
  const covBonus=Number.isFinite(cov)?Math.min(4,Math.max(0,cov)*2):0;
  return Math.min(100,Math.round((base*.90+exec+covBonus)*10)/10);
