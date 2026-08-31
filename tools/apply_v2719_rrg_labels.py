@@ -11,13 +11,12 @@ repls={
 'Fast finds the turn; Trend checks whether it is persisting.':'Early finds the turn; Confirmed checks whether it is persisting.',
 '<span class="note">Fast + Trend</span>':'<span class="note">Early + Confirmed</span>',
 '<th>Fast</th><th>Trend</th>':'<th>Early</th><th>Confirmed</th>',
-'<th>Score</th><th>Fast</th><th>Trend</th>':'<th>Score</th><th>Early</th><th>Confirmed</th>',
 '<select id="rrgMetricsMode"><option value="fast">Fast</option><option value="trend">Trend</option></select>':'<select id="rrgMetricsMode"><option value="fast">Early · 10/5</option><option value="trend">Confirmed · 25/12</option></select>',
 }
 for old,new in repls.items():
     assert old in s, f'missing: {old[:90]}'
     s=s.replace(old,new)
-# Dynamic title uses the internal mode keys; keep those keys unchanged but make display terminology intuitive.
+# Dynamic display terminology only; internal fast/trend mode keys stay untouched.
 s=s.replace('sectorRRGMode==="trend"?"TREND ROTATION (25/12)":"FAST ROTATION (10/5)"','sectorRRGMode==="trend"?"CONFIRMED ROTATION (25/12)":"EARLY ROTATION (10/5)"')
 s=s.replace('sectorRRGMode==="trend"?"Trend 25/12":"Fast 10/5"','sectorRRGMode==="trend"?"Confirmed · 25/12":"Early · 10/5"')
 assert s!=orig
