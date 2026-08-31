@@ -24,7 +24,12 @@ jobs:
           pip install -r requirements.txt
           pip install pytest
       - name: Apply patch
-        run: python tools/apply_v2718_post_earnings_v2.py
+        run: |
+          # The existing renderEarnings sort has changed shape across versions.
+          # Backend order is already setup-score sorted and hydration explicitly
+          # reranks by Trade Score, so this intermediate rewrite is unnecessary.
+          sed -i '/# Sort by hydrated Trade Score, then stock setup score\./,+1d' tools/apply_v2718_post_earnings_v2.py
+          python tools/apply_v2718_post_earnings_v2.py
       - name: Compile
         run: python -m py_compile app.py
       - name: Test
