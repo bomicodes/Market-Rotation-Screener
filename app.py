@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.18"
+APP_VERSION = "27.19"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5318,7 +5318,7 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
 
     <main class="dashCol dashCenter rrgShell">
       <div class="panel">
-        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · 1D · FAST ROTATION (10/5)</h2><div class="note">Benchmark: SPY · 1D/1W changes observation periodicity · Fast/Trend changes sensitivity</div></div><div class="rrgControlStack"><div class="rrgToggle"><button id="rrgDailyBtn" class="active" type="button" onclick="setSectorRRGTimeframe('1d')">1D</button><button id="rrgWeeklyBtn" type="button" onclick="setSectorRRGTimeframe('1w')">1W</button></div><div class="rrgToggle"><button id="rrgFastBtn" class="active">FAST 10/5</button><button id="rrgTrendBtn">TREND 25/12</button></div></div></div>
+        <div class="rrgHeader"><div><h2 id="dashboardRRGTitle">RRG LIVE · 1D · EARLY ROTATION (10/5)</h2><div class="note">Benchmark: SPY · Timeframe changes observation periodicity · Sensitivity changes how early the rotation responds</div></div><div class="rrgControlStack"><div><div class="tiny" style="text-align:right;margin-bottom:3px">TIMEFRAME</div><div class="rrgToggle"><button id="rrgDailyBtn" class="active" type="button" onclick="setSectorRRGTimeframe('1d')">1D</button><button id="rrgWeeklyBtn" type="button" onclick="setSectorRRGTimeframe('1w')">1W</button></div></div><div><div class="tiny" style="text-align:right;margin-bottom:3px">SENSITIVITY</div><div class="rrgToggle"><button id="rrgFastBtn" class="active" title="10/5 · reacts sooner to relative-strength turns">EARLY</button><button id="rrgTrendBtn" title="25/12 · slower confirmation of persistent rotation">CONFIRMED</button></div></div></div></div>
         <div class="rrgFilterBar">
           <div class="rrgSelectFilters">
             <label><span>SECTOR / GROUP</span><select id="dashboardSectorSelect"><option value="">Choose sector…</option></select></label>
@@ -5334,12 +5334,12 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
           <button type="button" class="secondary" id="rrgTimelineLiveBtn" style="display:none">Back to live</button>
         </div>
         <canvas id="sectorChart" width="900" height="650"></canvas>
-        <div id="selectedSectorCard" class="selectedSectorCard"><div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div></div>
+        <div id="selectedSectorCard" class="selectedSectorCard"><div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Early · 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Confirmed · 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Early finds the turn; Confirmed checks whether it is persisting.</div></div></div>
       </div>
     </main>
 
     <aside class="dashCol dashRight">
-      <div class="sideSection sectorSummaryPanel"><div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Fast + Trend</span></div><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Fast</th><th>Trend</th><th>Signal</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
+      <div class="sideSection sectorSummaryPanel"><div class="dashTopline"><span class="dashTitle">SECTOR SUMMARY</span><span class="note">Early + Confirmed</span></div><div class="scroll"><table><thead><tr><th>#</th><th>Sector</th><th>Early</th><th>Confirmed</th><th>Signal</th></tr></thead><tbody id="sectorRows"></tbody></table></div></div>
     </aside>
   </div>
   <div class="legacyMarketBlock"><button class="primary" id="refreshMarket">Refresh market</button><div id="internals" class="cards"></div></div>
@@ -5409,14 +5409,14 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
   </div>
   <div class="grid2">
     <div class="panel"><canvas id="stockChart" width="900" height="540"></canvas></div>
-    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Fast</th><th>Trend</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
+    <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Early</th><th>Confirmed</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
   </div>
 
   <div class="panel" id="rrgMetricsPanel">
     <div class="row" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
       <div><b>RRG Metrics Grid</b><div class="tiny">Quantifies the same tail shown above · 100/100 center · click a row to open the ticker</div></div>
       <div class="row" style="gap:8px">
-        <select id="rrgMetricsMode"><option value="fast">Fast</option><option value="trend">Trend</option></select>
+        <select id="rrgMetricsMode"><option value="fast">Early · 10/5</option><option value="trend">Confirmed · 25/12</option></select>
         <select id="rrgMetricsSort"><option value="rotation">Rotation quality</option><option value="velocity">Velocity</option><option value="distance">Distance</option><option value="angle_roc">Angle ROC</option><option value="rs">RS</option><option value="momentum">Momentum</option><option value="ticker">Ticker</option></select>
       </div>
     </div>
@@ -5651,7 +5651,7 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
     </div>
     <div class="panel">
       <div class="scroll"><table>
-        <thead><tr><th>#</th><th>Ticker</th><th>Fast</th><th>Trend</th><th>+1D</th><th>+5D</th><th>+10D</th><th>+20D</th></tr></thead>
+        <thead><tr><th>#</th><th>Ticker</th><th>Early</th><th>Confirmed</th><th>+1D</th><th>+5D</th><th>+10D</th><th>+20D</th></tr></thead>
         <tbody id="histRows"></tbody>
       </table></div>
     </div>
@@ -6116,11 +6116,11 @@ function updateDashboardRRGTitle(){
 function updateSelectedSectorCard(ticker){
  const el=document.getElementById("selectedSectorCard"); if(!el)return;
  const x=(activeSectorRRGData()||[]).find(r=>r.ticker===ticker);
- if(!x){el.innerHTML='<div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Fast 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Trend 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Fast finds the turn; Trend checks whether it is persisting.</div></div>';return;}
+ if(!x){el.innerHTML='<div><div class="sscLabel">Selected</div><div class="sscValue">Click a sector</div></div><div><div class="sscLabel">Early · 10/5</div><div class="sscValue">—</div></div><div><div class="sscLabel">Confirmed · 25/12</div><div class="sscValue">—</div></div><div><div class="sscLabel">Interpretation</div><div class="sscInterp">Early finds the turn; Confirmed checks whether it is persisting.</div></div>';return;}
  const f=x.fast||{},t=x.trend||{};
  el.innerHTML=`<div><div class="sscLabel">Selected</div><div class="sscValue">${x.ticker}</div><div class="tiny">${x.name||x.group||""}</div></div>
- <div><div class="sscLabel">Fast 10/5</div><div class="sscValue ${quadrantClass(f.quadrant)}">${f.quadrant||"—"} ${f.rs_up&&f.mom_up?"↗":""}</div><div class="tiny">RS ${f.x==null?"—":fmt(f.x,1)} · Mom ${f.y==null?"—":fmt(f.y,1)}</div></div>
- <div><div class="sscLabel">Trend 25/12</div><div class="sscValue ${quadrantClass(t.quadrant)}">${t.quadrant||"—"} ${t.rs_up&&t.mom_up?"↗":""}</div><div class="tiny">RS ${t.x==null?"—":fmt(t.x,1)} · Mom ${t.y==null?"—":fmt(t.y,1)}</div></div>
+ <div><div class="sscLabel">Early · 10/5</div><div class="sscValue ${quadrantClass(f.quadrant)}">${f.quadrant||"—"} ${f.rs_up&&f.mom_up?"↗":""}</div><div class="tiny">RS ${f.x==null?"—":fmt(f.x,1)} · Mom ${f.y==null?"—":fmt(f.y,1)}</div></div>
+ <div><div class="sscLabel">Confirmed · 25/12</div><div class="sscValue ${quadrantClass(t.quadrant)}">${t.quadrant||"—"} ${t.rs_up&&t.mom_up?"↗":""}</div><div class="tiny">RS ${t.x==null?"—":fmt(t.x,1)} · Mom ${t.y==null?"—":fmt(t.y,1)}</div></div>
  <div><div class="sscLabel">Interpretation</div><div class="sscInterp">${selectedInterpretation(x)}</div></div>`;
 }
 function setSectorRRGMode(mode){
