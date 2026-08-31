@@ -1,0 +1,38 @@
+name: Apply v27.20 post-earnings structure
+on:
+  push:
+    branches: [feat/postearnings-structure-v2720]
+    paths:
+      - tools/apply_v2720_postearnings_structure.py
+      - .github/workflows/apply-v2720-postearnings-structure.yml
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: feat/postearnings-structure-v2720}
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.11'}
+      - run: pip install -r requirements.txt && pip install pytest
+      - run: python tools/apply_v2720_postearnings_structure.py
+      - run: python -m py_compile app.py
+      - run: pytest -q
+      - name: Focused checks
+        run: |
+          grep -q 'APP_VERSION = "27.20"' app.py
+          grep -q 'POST-EARNINGS BASE' app.py
+          grep -q 'SECOND-LEG SETUP' app.py
+          grep -q 'REVERSION BASE' app.py
+          grep -q 'reaction_retained_pct' app.py
+          grep -q 'post_reaction_range_pct' app.py
+          grep -q 'Historical magnitude:' app.py
+      - name: Commit app patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app.py
+          git commit -m 'v27.20 recognize post-earnings bases and second legs'
+          git pull --rebase origin feat/postearnings-structure-v2720
+          git push origin HEAD:feat/postearnings-structure-v2720
