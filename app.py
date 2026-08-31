@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.17"
+APP_VERSION = "27.18"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4231,19 +4231,40 @@ def api_postearnings_opportunities():
         prices=dl_prices(["SPY"]+reporters,"18mo")
         rrg={r["ticker"]:r for r in dual_rrg_rows(prices,"SPY",reporters,8,8)}
 
-        def current_from_frame(sym,event_date):
+        def current_from_frame(sym,event_date,event_meta=None):
+            """Current post-earnings move aligned to the first tradable session.
+
+            After-hours reports use the NEXT regular session and use the report-date
+            close as the pre-event base. Premarket/date-only events use the first
+            session on/after the calendar date and the prior session as the base.
+            """
             try:
                 if sym not in prices.columns:return {}
                 s=prices[sym].dropna()
                 if len(s)<2:return {}
                 d=pd.Timestamp(event_date).normalize()
-                before=s[s.index.normalize()<d]
-                after=s[s.index.normalize()>=d]
+                raw_time=str((event_meta or {}).get("time") or "").strip().lower()
+                after_close=("after" in raw_time or raw_time in ("amc","postmarket","post-market"))
+                if not after_close:
+                    try:
+                        hour=float(raw_time.split(":",1)[0])
+                        after_close=hour>=16
+                    except Exception:
+                        pass
+                norm=s.index.normalize()
+                if after_close:
+                    before=s[norm<=d]
+                    after=s[norm>d]
+                else:
+                    before=s[norm<d]
+                    after=s[norm>=d]
                 if before.empty or after.empty:return {}
                 base=float(before.iloc[-1]); last=float(after.iloc[-1]); day1=float(after.iloc[0])
                 return {"current_move_pct":round((last/base-1)*100,2),
                         "day1_move_pct":round((day1/base-1)*100,2),
-                        "sessions_since":int(len(after))}
+                        "sessions_since":int(len(after)),
+                        "first_post_session":pd.Timestamp(after.index[0]).strftime("%Y-%m-%d"),
+                        "after_hours_aligned":bool(after_close)}
             except Exception:return {}
 
         # Cheap pre-rank first. This prevents dozens of per-ticker history calls.
@@ -4252,7 +4273,7 @@ def api_postearnings_opportunities():
             meta=recent_map[sym]; d=pd.Timestamp(meta["date"]).normalize()
             rot=rrg.get(sym,{})
             f=rot.get("fast") or {}; tr=rot.get("trend") or {}
-            cur=current_from_frame(sym,d)
+            cur=current_from_frame(sym,d,meta)
             move=abs(float(cur.get("current_move_pct") or 0))
             f_in=((f.get("tail_trajectory")=="Rotating In") if f.get("tail_trajectory") else (f.get("rs_up") is True and f.get("mom_up") is True))
             t_in=((tr.get("tail_trajectory")=="Rotating In") if tr.get("tail_trajectory") else (tr.get("rs_up") is True and tr.get("mom_up") is True))
@@ -4263,91 +4284,148 @@ def api_postearnings_opportunities():
         # Historical work only for the strongest 10 stock candidates.
         def enrich(item):
             pre,sym,d,rot,cur=item
-            dates=merged_historical_earnings_dates(sym,d.strftime("%Y-%m-%d"))
-            profile=earnings_profile(sym,dates)
+            profile=cached(
+                f"peprofile-v2:{sym}:{d.strftime('%Y-%m-%d')}",
+                lambda:earnings_profile(sym,merged_historical_earnings_dates(sym,d.strftime("%Y-%m-%d"))),
+                ttl=3600,
+            )
             if not profile:return None
-            hist_score=historical_continuation_score(profile)
-            f=rot.get("fast") or {}; tr=rot.get("trend") or {}
-            f_in=((f.get("tail_trajectory")=="Rotating In") if f.get("tail_trajectory") else (f.get("rs_up") is True and f.get("mom_up") is True))
-            t_in=((tr.get("tail_trajectory")=="Rotating In") if tr.get("tail_trajectory") else (tr.get("rs_up") is True and tr.get("mom_up") is True))
-            rot_score=(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
-            move=float(cur.get("current_move_pct") or 0)
-            current_score=min(25,abs(move)*2.2)+(4 if profile.get("behavior")=="CONTINUATION" else 0)
-            expected=max(float(profile.get("median_exc10") or 0),float(profile.get("median_exc14") or 0))
+            behavior=str(profile.get("behavior") or "MIXED")
+            # Continuation and reversion are both valid post-earnings archetypes.
+            # Historical mover quality is rewarded equally; the current tape/RRG
+            # decides whether that archetype is actually actionable now.
+            hist_score=float(profile.get("score") or 0)*4.0
+            if behavior in ("CONTINUATION","REVERSION"): hist_score+=20.0
 
-            # How much runway is left in the expected drift window. A stock on
-            # day 9 of a ~14-session historical drift isn't a fresh setup anymore.
+            f=rot.get("fast") or {}; tr=rot.get("trend") or {}
+            def rotating_in(m):
+                return ((m.get("tail_trajectory")=="Rotating In") if m.get("tail_trajectory") else (m.get("rs_up") is True and m.get("mom_up") is True))
+            def rotating_out(m):
+                return ((m.get("tail_trajectory")=="Rotating Out") if m.get("tail_trajectory") else (m.get("rs_up") is False and m.get("mom_up") is False))
+            f_in,t_in=rotating_in(f),rotating_in(tr)
+            f_out,t_out=rotating_out(f),rotating_out(tr)
+
+            move=float(cur.get("current_move_pct") or 0)
+            day1_move=_safe_float(cur.get("day1_move_pct"))
+            reaction_move=day1_move if day1_move is not None and abs(day1_move)>=0.75 else move
+            reaction_sign=1.0 if reaction_move>=0 else -1.0
+            expected=max(float(profile.get("median_exc10") or 0),float(profile.get("median_exc14") or 0),0.01)
+            move_consumed_pct=round(100.0*abs(move)/expected,1)
+            remaining_runway_pct=round(max(0.0,100.0-move_consumed_pct),1)
+            remaining_runway_pct_uncapped=round(100.0-move_consumed_pct,1)
+            remaining_runway_abs=round(max(0.0,expected-abs(move)),2)
+            if move_consumed_pct<35: setup_stage="FRESH"
+            elif move_consumed_pct<65: setup_stage="DEVELOPING"
+            elif move_consumed_pct<90: setup_stage="MATURE"
+            else: setup_stage="EXTENDED"
+
             expected_window=14 if profile.get("has_exc14_data") else 10
             sessions_since=cur.get("sessions_since")
             window_progress_pct=round(min(150.0,100.0*sessions_since/expected_window),1) if sessions_since else None
-            if window_progress_pct is not None and window_progress_pct>=100:
-                current_score-=6  # tail of the move, not the start of it
 
-            # Round-trip / give-back check: if the move has already faded back
-            # toward (or through) the pre-earnings base, the initial reaction failed
-            # regardless of how big the raw excursion looked.
-            day1_move=cur.get("day1_move_pct")
-            round_trip=False
-            retained_pct=None
-            # Only trust the retained/round-trip check when day 1 actually moved
-            # a meaningful amount. Dividing by a near-flat first-day reaction
-            # (e.g. 0.2%) blows the ratio up into noisy, meaningless numbers.
+            retained_pct=None; round_trip=False; recovery_pct=None
             if day1_move is not None and abs(day1_move)>=1.0 and sessions_since and sessions_since>1:
                 retained_pct=round(100.0*move/day1_move,1)
                 if (move*day1_move)<0 or retained_pct<=15:
                     round_trip=True
-                    current_score-=15
+                if (move*day1_move)>=0:
+                    recovery_pct=round(max(0.0,100.0*(1.0-abs(move)/abs(day1_move))),1)
+                else:
+                    recovery_pct=round(100.0+100.0*abs(move)/abs(day1_move),1)
 
-            # Standardized earnings-surprise magnitude. Only rewarded when it
-            # actually agrees with the direction of the price reaction — a beat
-            # that the market shrugged off isn't evidence of a real move.
+            setup_type="REVERSION" if behavior=="REVERSION" else "CONTINUATION"
+            if setup_type=="REVERSION":
+                trade_direction="bearish" if reaction_sign>0 else "bullish"
+                directional_rotation=(f_out or t_out) if trade_direction=="bearish" else (f_in or t_in)
+                reversion_confirmed=bool((recovery_pct or 0)>=25 and directional_rotation)
+            else:
+                trade_direction="bullish" if reaction_sign>0 else "bearish"
+                directional_rotation=(f_in or t_in) if trade_direction=="bullish" else (f_out or t_out)
+                reversion_confirmed=False
+
+            # Direction-aware RRG: bullish trades want NE/strengthening rotation;
+            # bearish trades want SW/weakening rotation.
+            if trade_direction=="bullish":
+                rot_score=(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
+            else:
+                rot_score=(12 if f_out else 0)+(8 if t_out else 0)+(5 if f.get("quadrant") in ("Weakening","Lagging") else 0)
+
+            current_score=0.0
+            if setup_type=="CONTINUATION":
+                current_score+=min(8.0,abs(reaction_move)*1.1)
+                if move_consumed_pct<35: current_score+=12
+                elif move_consumed_pct<65: current_score+=9
+                elif move_consumed_pct<90: current_score+=4
+                else: current_score-=8
+                if retained_pct is not None and retained_pct>=50 and not round_trip: current_score+=4
+                if round_trip: current_score-=15
+            else:
+                # Reversion setups become interesting after a meaningful initial
+                # expansion begins to unwind; support/reclaim is proxied here by
+                # recovery + directionally confirming RRG rather than blindly
+                # buying/selling against the original reaction.
+                current_score+=min(10.0,abs(reaction_move))
+                rp=float(recovery_pct or 0)
+                if 25<=rp<60: current_score+=8
+                elif 60<=rp<=125: current_score+=12
+                elif rp>125: current_score+=8
+                if reversion_confirmed: current_score+=8
+                else: current_score-=6
+                if abs(reaction_move)/expected>=0.65: current_score+=4
+
+            if window_progress_pct is not None and window_progress_pct>=100 and setup_type=="CONTINUATION":
+                current_score-=6
+
             meta=recent_map.get(sym) or {}
             surprise_pct=None
             est=_safe_float(meta.get("eps_estimate")); act=_safe_float(meta.get("eps_actual"))
             if est not in (None,0) and act is not None:
                 surprise_pct=round((act-est)/abs(est)*100,1)
-                # Compare against the day-1 reaction (the market's direct response
-                # to the surprise), not the cumulative "current" move — a beat that
-                # popped on day 1 and later faded was still an aligned reaction.
-                react_move=day1_move if day1_move is not None else move
-                aligned=(surprise_pct>0 and react_move>=0) or (surprise_pct<0 and react_move<0)
-                if aligned:
-                    current_score+=min(8.0,abs(surprise_pct)*0.15)
+                if setup_type=="CONTINUATION":
+                    aligned=(surprise_pct>0 and reaction_move>=0) or (surprise_pct<0 and reaction_move<0)
+                    if aligned: current_score+=min(8.0,abs(surprise_pct)*0.15)
 
-            total=max(0.0,min(100.0,.48*hist_score+current_score+rot_score))
+            total=max(0.0,min(100.0,.50*hist_score+current_score+rot_score))
             return {
                 "ticker":sym,"name":all_holdings[sym].get("name"),
                 "earnings_date":d.strftime("%Y-%m-%d"),
                 "calendar_days_ago":max(0,(now-d).days),"parents":parent_map.get(sym,[]),
+                "earnings_time":meta.get("time"),
                 "profile":profile,"historical_score":round(hist_score,1),
                 "current":cur,"rotation":rot,"best_contract":None,
                 "options_execution":"Loading…","options_loading":True,
                 "expected_continuation_pct":round(expected,2),
-                "direction":"bullish" if move>=0 else "bearish",
-                "opportunity_score":round(float(total),1),
+                "direction":trade_direction,"trade_direction":trade_direction,
+                "setup_type":setup_type,"setup_stage":setup_stage,
+                "reversion_confirmed":reversion_confirmed,"recovery_pct":recovery_pct,
+                "opportunity_score":round(float(total),1),"trade_score":None,
                 "eps_surprise_pct":surprise_pct,
                 "drift_window_sessions":expected_window,
                 "drift_window_progress_pct":window_progress_pct,
+                "move_consumed_pct":move_consumed_pct,
+                "remaining_runway_pct":remaining_runway_pct,
+                "remaining_runway_pct_uncapped":remaining_runway_pct_uncapped,
+                "remaining_runway_abs_pct":remaining_runway_abs,
                 "retained_pct_of_day1_move":retained_pct,
                 "round_trip":round_trip,
             }
 
         rows=[]
         with ThreadPoolExecutor(max_workers=4) as ex:
-            futs=[ex.submit(enrich,x) for x in prelim[:10]]
+            futs=[ex.submit(enrich,x) for x in prelim[:20]]
             for f in as_completed(futs):
                 try:
                     x=f.result()
                     if x:rows.append(x)
                 except Exception:pass
         rows.sort(key=lambda x:-x.get("opportunity_score",0))
-        return {"results":rows[:8],"universe":len(tickers),
+        return {"results":rows[:12],"universe":len(tickers),
                 "recent_reporters":len(reporters),"recent_days":recent_days,
                 "diagnostics":diag,"holdings_sources":sorted(sources),
                 "options_deferred":True}
 
     try:
-        key=f"postearnings-opportunities-v1:{recent_days}"
+        key=f"postearnings-opportunities-v2:{recent_days}"
         payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
@@ -4371,7 +4449,7 @@ def api_postearnings_option(ticker):
         if behavior=="CONTINUATION":
             min_dte,ideal_dte=21,30
         elif behavior=="REVERSION":
-            min_dte,ideal_dte=0,14
+            min_dte,ideal_dte=7,21
         else:
             min_dte,ideal_dte=10,21
         dte_max=max(30,min(90,ideal_dte+21))
@@ -5497,11 +5575,15 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
     <div class="row"><strong>🔥 Post-Earnings Opportunities</strong>
       <label class="note">Reported within</label><select id="earnDays"><option selected>5</option><option>7</option><option>10</option></select><span class="note">trading days (approx.)</span>
       <span class="note">Automatically scans all sectors + industries/themes</span>
-      <label class="note">Mover filter</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
+      <label class="note">Mover</label><select id="moverFilter"><option value="all">All</option><option value="hm">High + Moderate</option><option value="high">High only</option></select>
+      <label class="note">Setup</label><select id="peSetupFilter"><option value="all">Continuation + Reversion</option><option value="CONTINUATION">Continuation</option><option value="REVERSION">Reversion</option></select>
+      <label class="note">Stage</label><select id="peStageFilter"><option value="all">All stages</option><option value="FRESH">Fresh</option><option value="DEVELOPING">Developing</option><option value="MATURE">Mature</option><option value="EXTENDED">Extended</option></select>
+      <label class="note">Direction</label><select id="peDirectionFilter"><option value="all">Bull + Bear</option><option value="bullish">Bullish</option><option value="bearish">Bearish</option></select>
+      <label class="note">Execution</label><select id="peExecFilter"><option value="all">All execution</option><option value="good">Liquid + Tradable</option><option value="active">Include Wide but Active</option></select>
       <label class="note">Search</label><input id="earnTickerSearch" type="search" placeholder="Ticker / name…" autocomplete="off" style="width:120px">
       <button class="primary" id="runEarnings">Scan all earnings</button><span id="estatus" class="status"></span>
     </div>
-    <div class="note" style="margin-top:9px">Ranks recent reporters by historical 5–14D continuation, current post-earnings move and trajectory-first RRG. Options favor discounted OTM contracts (~2–8% OTM, roughly 0.25–0.45 delta) with real OI/volume. Liquid, Tradable, and Wide but Active can qualify; poor/no-market contracts are rejected.</div>
+    <div class="note" style="margin-top:9px">Ranks recent reporters by two tradeable archetypes: continuation (reaction persists with runway left) and reversion (an extended reaction starts reclaiming/giving back with directional RRG confirmation). Move-consumption and remaining historical runway are explicit. Options favor discounted OTM contracts (~2–8% OTM, roughly 0.25–0.45 delta) with real OI/volume; once contracts hydrate, Trade Score incorporates execution and the table reranks.</div>
   </div>
   <div class="panel">
     <table><thead><tr><th>#</th><th>Opportunity</th><th>Recent earnings</th><th>Historical continuation</th><th>Current / RRG</th><th>Best OTM contract</th><th>Details</th></tr></thead><tbody id="earnRows"></tbody></table>
@@ -8751,23 +8833,43 @@ function compactRRG(r){
  return `${badge(r.quadrant)}<div class="tiny">${r.rs_up?"RS↑":"RS↓"} · ${r.mom_up?"Mom↑":"Mom↓"}</div>`;
 }
 function moverHTML(p){if(!p)return'<span class="mover">LOAD DETAILS</span>';return`<span class="mover m${p.label}">${p.label}</span><div class="tiny">score ${fmt(p.score,1)}/10 · ${p.behavior}</div>`}
+function peExecutionBonus(x){
+ const q=String(x?.options_execution||x?.best_contract?.execution_quality||"");
+ if(q==="Liquid")return 10;if(q==="Tradable")return 8;if(q==="Wide but Active")return 5;return 0;
+}
+function peTradeScore(x){
+ if(x?.options_loading||!x?.best_contract)return x?.trade_score??null;
+ const base=Number(x?.opportunity_score||0),exec=peExecutionBonus(x);
+ const cov=Number(x?.best_contract?.expected_move_coverage);
+ const covBonus=Number.isFinite(cov)?Math.min(4,Math.max(0,cov)*2):0;
+ return Math.min(100,Math.round((base*.90+exec+covBonus)*10)/10);
+}
 function renderEarnings(){
  const f=document.getElementById("moverFilter").value;
+ const setupF=document.getElementById("peSetupFilter")?.value||"all";
+ const stageF=document.getElementById("peStageFilter")?.value||"all";
+ const dirF=document.getElementById("peDirectionFilter")?.value||"all";
+ const execF=document.getElementById("peExecFilter")?.value||"all";
  const search=(document.getElementById("earnTickerSearch")?.value||"").trim().toUpperCase();
  let arr=earnResults.filter(x=>{
    const l=(x.profile||{}).label||"UNKNOWN";
    const moverOk=f==="all"||(f==="hm"&&(l==="HIGH"||l==="MODERATE"))||(f==="high"&&l==="HIGH");
-   return moverOk&&(!search||String(x.ticker||"").includes(search)||String(x.name||"").toUpperCase().includes(search));
+   const setupOk=setupF==="all"||x.setup_type===setupF;
+   const stageOk=stageF==="all"||x.setup_stage===stageF;
+   const dirOk=dirF==="all"||x.trade_direction===dirF;
+   const ex=String(x.options_execution||"");
+   const execOk=execF==="all"||(execF==="good"&&(ex==="Liquid"||ex==="Tradable"))||(execF==="active"&&(ex==="Liquid"||ex==="Tradable"||ex==="Wide but Active"));
+   return moverOk&&setupOk&&stageOk&&dirOk&&execOk&&(!search||String(x.ticker||"").includes(search)||String(x.name||"").toUpperCase().includes(search));
  });
  document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{
    const p=x.profile||{},r=x.rotation||{},c=x.best_contract,id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
    const exec=c?.execution_quality||"No executable OTM";
    const execClass=exec==="Wide but Active"?"execWide":(c?"execGood":"optBad");
    const contract=x.options_loading?`<span class="note">Loading OTM contracts…</span>`:(c?`<div class="peContract"><b>${c.expiration}${c.dte==null?"":` (${c.dte}D)`} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">${x.options_execution||"No executable OTM contract"}</span>`);
-   const flags=`${p.behavior==="CONTINUATION"?'<span class="histRunner">HISTORICAL RUNNER</span>':""}${p.behavior==="REVERSION"?'<span class="reversionFlag">TENDS TO FADE</span>':""}${x.round_trip?'<span class="givebackFlag">GAVE BACK MOVE</span>':""}`;
-   const windowNote=x.drift_window_progress_pct==null?"":`<div class="tiny">Drift window: ${x.drift_window_progress_pct}% of ~${x.drift_window_sessions}D ${x.drift_window_progress_pct>=100?"(tail of move)":"elapsed"}</div>`;
+   const flags=`${x.setup_type==="CONTINUATION"?'<span class="histRunner">CONTINUATION</span>':'<span class="reversionFlag">REVERSION</span>'}${x.reversion_confirmed?'<span class="histRunner">REVERSION CONFIRMED</span>':""}${x.round_trip?'<span class="givebackFlag">ROUND TRIP</span>':""}`;
+   const windowNote=`<div class="tiny">${x.setup_stage||"—"} · move consumed ${x.move_consumed_pct==null?"—":Number(x.move_consumed_pct).toFixed(0)+"%"} · runway ${x.remaining_runway_pct==null?"—":Number(x.remaining_runway_pct).toFixed(0)+"%"}${x.remaining_runway_abs_pct==null?"":` (~${Number(x.remaining_runway_abs_pct).toFixed(1)} pts)`}</div><div class="tiny">Drift window: ${x.drift_window_progress_pct==null?"—":x.drift_window_progress_pct+"%"} of ~${x.drift_window_sessions}D${x.setup_type==="REVERSION"&&x.recovery_pct!=null?` · reaction recovery ${Number(x.recovery_pct).toFixed(0)}%`:""}</div>`;
    const surpriseNote=x.eps_surprise_pct==null?"":`<div class="tiny">EPS surprise: ${x.eps_surprise_pct>0?"+":""}${x.eps_surprise_pct}%</div>`;
-   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${Number(x.opportunity_score||0).toFixed(0)}/100</div>${flags}</td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div>${surpriseNote}</td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div>${windowNote}</td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
+   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${x.trade_score==null?`SETUP ${Number(x.opportunity_score||0).toFixed(0)}`:`TRADE ${Number(x.trade_score||0).toFixed(0)} · setup ${Number(x.opportunity_score||0).toFixed(0)}`}/100</div>${flags}<div class="tiny">${x.trade_direction||x.direction||"—"}</div></td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div>${surpriseNote}</td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div>${windowNote}</td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
  }).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();document.getElementById(b.dataset.id)?.classList.toggle("open")}));
  document.querySelectorAll("[data-pe-open]").forEach(row=>row.addEventListener("click",e=>{
@@ -8776,16 +8878,13 @@ function renderEarnings(){
  }));
 }
 function detailHTML(x){
- if(x.historyLoading){
-   return `<div class="note">Loading historical earnings profile…</div>`;
- }
- if(x.historyError){
-   return `<div class="error">${x.historyError}</div>${x.historyDates&&x.historyDates.length?`<div class="tiny" style="margin-top:6px">Dates found: ${x.historyDates.join(", ")}</div>`:""}`;
- }
- let p=x.profile;
- if(!p)return `<div class="note">Tap Earnings history to load this ticker's historical profile.</div>`;
+ if(x.historyLoading)return `<div class="note">Loading historical earnings profile…</div>`;
+ if(x.historyError)return `<div class="error">${x.historyError}</div>${x.historyDates&&x.historyDates.length?`<div class="tiny" style="margin-top:6px">Dates found: ${x.historyDates.join(", ")}</div>`:""}`;
+ let p=x.profile;if(!p)return `<div class="note">Tap Earnings history to load this ticker's historical profile.</div>`;
  let ev=p.events||[];
- return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">MEDIAN 1D EXCURSION</div><b>${fmt(p.median_exc1)}%</b></div><div class="metric"><div class="tiny">MEDIAN 5D EXCURSION</div><b>${fmt(p.median_exc5)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div><div class="metric"><div class="tiny">&gt;10% WITHIN 14D</div><b>${fmt(p.pct_gt10_14d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Prior completed earnings events · maximum absolute excursion from the pre-event close</div><table class="eventtable"><thead><tr><th>Date</th><th>1D</th><th>3D</th><th>5D</th><th>10D</th><th>14D</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${fmt(e.exc1)}%</td><td>${fmt(e.exc3)}%</td><td>${fmt(e.exc5)}%</td><td>${fmt(e.exc10)}%</td><td>${fmt(e.exc14)}%</td></tr>`).join("")}</tbody></table>`;
+ const retained=e=>{const a=Number(e.close1),z=Number(e.close10??e.close14);if(!Number.isFinite(a)||a===0||!Number.isFinite(z))return "—";return `${Math.round(100*Math.abs(z)/Math.abs(a))}%`;};
+ const sp=v=>v==null?"—":`${Number(v)>0?"+":""}${Number(v).toFixed(1)}%`;
+ return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">DIRECTION PERSISTED</div><b>${fmt(p.pct_directional_persist,0)}%</b></div><div class="metric"><div class="tiny">DIRECTION REVERTED</div><b>${fmt(p.pct_directional_revert,0)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Signed close path shows whether the original earnings reaction actually persisted or reversed; max excursion preserves total opportunity size.</div><table class="eventtable"><thead><tr><th>Date</th><th>Day 1 close</th><th>Day 5 close</th><th>Day 10 close</th><th>Day 14 close</th><th>Max 14D excursion</th><th>Retained</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${sp(e.close1)}</td><td>${sp(e.close5)}</td><td>${sp(e.close10)}</td><td>${sp(e.close14)}</td><td>${fmt(e.exc14)}%</td><td>${retained(e)}</td></tr>`).join("")}</tbody></table>`;
 }
 
 async function loadHistory(ticker,eventDate,rowId){
@@ -8839,13 +8938,14 @@ async function hydratePostEarningsOptions(){
    while(idx<queue.length){
      const x=queue[idx++];
      try{
-       const q=new URLSearchParams({direction:x.direction||"bullish",expected:String(x.expected_continuation_pct||0)});
+       const q=new URLSearchParams({direction:x.trade_direction||x.direction||"bullish",expected:String(x.expected_continuation_pct||0)});
        const r=await fetch(`/api/postearnings-option/${encodeURIComponent(x.ticker)}?${q.toString()}`);
        const raw=await r.text();let j;
        try{j=JSON.parse(raw)}catch(e){throw Error(`Options response ${r.status}`)}
        if(!r.ok||!j.ok)throw Error(j.error||"Options unavailable");
        x.best_contract=j.best_contract||null;
        x.options_execution=j.options_execution||"No executable OTM contract";
+       x.trade_score=peTradeScore(x);
        x.options_loading=false;
      }catch(e){
        x.options_loading=false;x.options_execution="Options unavailable";
@@ -8854,6 +8954,8 @@ async function hydratePostEarningsOptions(){
    }
  }
  await Promise.all([worker(),worker(),worker()]);
+ earnResults.sort((a,b)=>Number(b.trade_score??b.opportunity_score??0)-Number(a.trade_score??a.opportunity_score??0));
+ renderEarnings();
 }
 
 async function runEarnings(){
@@ -9074,7 +9176,7 @@ document.getElementById("clearLiveWatchlist").addEventListener("click",async()=>
  const tickers=liveWatchlist.map(x=>x.ticker);liveWatchlist=[];saveLiveWatchlist();
  await Promise.all(tickers.map(t=>fetch(`/api/watchlist/${encodeURIComponent(t)}`,{method:"DELETE"}).catch(()=>null)));
  syncWatchlistFromServer();
-});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);document.getElementById("rrgFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
+});document.getElementById("runEarnings").addEventListener("click",runEarnings);document.getElementById("moverFilter").addEventListener("change",renderEarnings);document.getElementById("peSetupFilter")?.addEventListener("change",renderEarnings);document.getElementById("peStageFilter")?.addEventListener("change",renderEarnings);document.getElementById("peDirectionFilter")?.addEventListener("change",renderEarnings);document.getElementById("peExecFilter")?.addEventListener("change",renderEarnings);document.getElementById("earnTickerSearch").addEventListener("input",renderEarnings);document.getElementById("rrgFastBtn")?.addEventListener("click",()=>setSectorRRGMode("fast"));
 document.getElementById("rrgTrendBtn")?.addEventListener("click",()=>setSectorRRGMode("trend"));
 document.getElementById("dashboardSectorSelect")?.addEventListener("change",async e=>{if(e.target.value){toggleRRGFocus("sectorChart",e.target.value);await selectSector(e.target.value,{source:"dashboard"})}});
 document.querySelectorAll("#sectorQuadPills .filterPill").forEach(btn=>btn.addEventListener("click",()=>{sectorQuadrantFilter=btn.dataset.q||"all";document.querySelectorAll("#sectorQuadPills .filterPill").forEach(x=>x.classList.toggle("active",x===btn));renderGroups();}));
