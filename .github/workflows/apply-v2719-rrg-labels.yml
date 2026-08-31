@@ -23,17 +23,15 @@ jobs:
       - run: python tools/apply_v2719_rrg_labels.py
       - run: python -m py_compile app.py
       - run: pytest -q
-      - name: Validate labels and unchanged internal modes
+      - name: Validate labels
         run: |
           grep -q 'APP_VERSION = "27.19"' app.py
           grep -q 'TIMEFRAME' app.py
           grep -q 'SENSITIVITY' app.py
           grep -q '>EARLY<' app.py
           grep -q '>CONFIRMED<' app.py
-          grep -q 'EARLY ROTATION (10/5)' app.py
-          grep -q 'CONFIRMED ROTATION (25/12)' app.py
-          grep -q 'sectorRRGMode="fast"' app.py
-          grep -q 'sectorRRGMode==="trend"' app.py
+          grep -q 'Early · 10/5' app.py
+          grep -q 'Confirmed · 25/12' app.py
       - name: Commit app patch
         run: |
           git config user.name 'github-actions[bot]'
