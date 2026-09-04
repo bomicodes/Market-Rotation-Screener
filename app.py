@@ -5462,17 +5462,6 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
     <div class="panel"><div class="scroll"><table><thead><tr><th></th><th>Ticker</th><th>Score</th><th>Early</th><th>Confirmed</th><th>Rotation stage</th><th>Opportunity</th><th>Options</th></tr></thead><tbody id="stockRows"></tbody></table></div></div>
   </div>
 
-  <div class="panel" id="rrgMetricsPanel">
-    <div class="row" style="justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
-      <div><b>RRG Metrics Grid</b><div class="tiny">Quantifies the same tail shown above · 100/100 center · click a row to open the ticker</div></div>
-      <div class="row" style="gap:8px">
-        <select id="rrgMetricsMode"><option value="fast">Early · 10/5</option><option value="trend">Confirmed · 25/12</option></select>
-        <select id="rrgMetricsSort"><option value="rotation">Rotation quality</option><option value="velocity">Velocity</option><option value="distance">Distance</option><option value="angle_roc">Angle ROC</option><option value="rs">RS</option><option value="momentum">Momentum</option><option value="ticker">Ticker</option></select>
-      </div>
-    </div>
-    <div class="scroll" style="margin-top:8px"><table><thead><tr><th>Ticker</th><th>Quadrant</th><th>RS</th><th>Momentum</th><th>Heading</th><th>Velocity</th><th>Distance</th><th>Angle ROC</th><th>Rotation</th></tr></thead><tbody id="rrgMetricRows"></tbody></table></div>
-  </div>
-
   <div class="priceActionGrid">
     <div class="panel priceChartPanel priceChartPanelWide" id="previewPanel">
       <div class="priceChartHeader">
@@ -8802,26 +8791,11 @@ function opportunityHTML(x){
  const s=opportunityScore(x),stars=Math.max(1,Math.min(5,Math.ceil(s/2)));
  return `<b>${"★".repeat(stars)}${"☆".repeat(5-stars)}</b><div class="tiny">${s}/10 · rotation + options${valueAcceptanceMap[x.ticker]?` + value`:""}</div>`;
 }
-function renderRRGMetricGrid(data){
- const body=document.getElementById("rrgMetricRows"),modeEl=document.getElementById("rrgMetricsMode"),sortEl=document.getElementById("rrgMetricsSort");
- if(!body)return;
- const mode=modeEl?.value||"fast",sort=sortEl?.value||"rotation";
- const rows=[...(data||[])];
- const val=(x,key)=>{const m=rrgMetricSet(x,mode);if(key==="rotation")return rrgRotationQuality(m);if(key==="rs")return Number(m.x||0);if(key==="momentum")return Number(m.y||0);if(key==="ticker")return String(x.ticker||"");return Number(m[key]||0)};
- rows.sort((a,b)=>sort==="ticker"?String(val(a,sort)).localeCompare(String(val(b,sort))):val(b,sort)-val(a,sort));
- const arrow={NE:"↗",N:"↑",E:"→",SE:"↘",S:"↓",SW:"↙",W:"←",NW:"↖",FLAT:"·"};
- body.innerHTML=rows.map(x=>{const m=rrgMetricSet(x,mode),h=m.heading||"FLAT",roc=m.angle_roc;return `<tr class="clickrow" data-rrg-metric-ticker="${x.ticker}"><td><b>${x.ticker}</b></td><td>${m.quadrant||"—"}</td><td>${m.x==null?"—":fmt(m.x,2)}</td><td>${m.y==null?"—":fmt(m.y,2)}</td><td><b>${arrow[h]||"·"} ${h}</b>${m.heading_deg==null?"":`<div class="tiny">${fmt(m.heading_deg,0)}°</div>`}</td><td>${m.velocity==null?"—":fmt(m.velocity,2)}</td><td>${m.distance==null?"—":fmt(m.distance,2)}</td><td class="${Number(roc||0)>=0?'up':'down'}">${roc==null?"—":`${roc>=0?'+':''}${fmt(roc,1)}°`}</td><td><b>${rrgRotationLabel(m)}</b><div class="tiny">Q ${rrgRotationQuality(m).toFixed(1)}/4.25</div></td></tr>`}).join("");
- document.querySelectorAll("[data-rrg-metric-ticker]").forEach(row=>row.addEventListener("click",()=>openSectorStockTicker(row.dataset.rrgMetricTicker,{scroll:true})));
- if(modeEl&&!modeEl.dataset.bound){modeEl.dataset.bound="1";modeEl.addEventListener("change",()=>renderRRGMetricGrid(filteredLiveStocks()));}
- if(sortEl&&!sortEl.dataset.bound){sortEl.dataset.bound="1";sortEl.addEventListener("change",()=>renderRRGMetricGrid(filteredLiveStocks()));}
-}
-
 function renderLiveStocks(){
  const data=filteredLiveStocks();
  const stockState=rrgFocusState["stockChart"];
  if(stockState?.selected&&!data.some(x=>x.ticker===stockState.selected))stockState.selected=null;
  drawRRG("stockChart",data);
- renderRRGMetricGrid(data);
  document.getElementById("stockRows").innerHTML=data.map((x,k)=>`<tr class="clickrow liveTickerRow" data-live-ticker="${x.ticker}">
  <td>${liveBookmarkButtonHTML(x.ticker)}</td><td><b>${x.ticker}</b><div class="tiny">${tailBadge(x)}</div></td><td><b>${fmt(x.score,1)}</b></td>
  <td>${compactRRG(x.fast)}</td><td>${compactRRG(x.trend)}</td><td>${rotationStageHTML(x)}<div class="tiny">${alignBadge(x.alignment)}</div></td><td>${opportunityHTML(x)}</td>
