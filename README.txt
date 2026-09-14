@@ -1,3 +1,8 @@
+v27.31 — CALENDAR-FIRST EARNINGS COVERAGE
+- Recent earnings are now discovered from the market calendar before ETF membership is applied. A reporter missing from a stale or partial ETF holdings file is no longer silently excluded.
+- Active U.S. reporters are prioritized by reported market cap and ETF context, then bounded to 120 names for the single Alpaca price job; the best 12 setups are still returned.
+- Nasdaq metadata is merged into Finnhub matches so market-cap/name context is retained while Finnhub EPS surprise data remains available.
+
 v27.30 — COMPLETE RECENT-EARNINGS MERGE + WORKING HISTORY LOAD
 - The selected recency now means actual trading dates (for example, five trading days) rather than an oversized calendar-day approximation that allowed stale reporters into the table.
 - Finnhub, Nasdaq, and Yahoo recent calendars are merged for only those requested dates. A partial Finnhub response no longer suppresses newer reporters found by the public calendars.

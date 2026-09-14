@@ -36,7 +36,9 @@ def test_market_wide_earnings_scan_defers_all_historical_profiles():
     assert "for pre,sym,d,rot,cur in prelim[:12]:" in scanner
     assert "earnings_profile(" not in scanner
     assert "merged_historical_earnings_dates(" not in scanner
-    assert 'postearnings-opportunities-v5:' in scanner
+    assert 'postearnings-opportunities-v6:' in scanner
+    assert "discover_recent_earnings(None,recent_days)" in scanner
+    assert 'parent_map[sym]=["Broad market"]' in scanner
 
 
 def test_options_hydration_does_not_recompute_history():
@@ -67,6 +69,22 @@ def test_recent_calendar_merges_public_results_even_when_finnhub_is_partial(monk
 
     assert set(found) == {"AAA", "BBB"}
     assert diagnostics["calendar_days_checked"] == 5
+
+
+def test_calendar_first_discovery_does_not_require_etf_membership(monkeypatch):
+    today = appmod.pd.Timestamp.now().normalize()
+    monkeypatch.setattr(appmod, "FINNHUB_API_KEY", "key")
+    monkeypatch.setattr(appmod, "UW_API_TOKEN", "")
+    monkeypatch.setattr(appmod, "cached", lambda key, fn, ttl=0: fn())
+    monkeypatch.setattr(appmod, "finnhub_earnings_calendar", lambda start, end: {
+        "OUTSIDE": {"date": today, "source": "Finnhub"}
+    })
+    monkeypatch.setattr(appmod, "nasdaq_calendar_for_day", lambda day: {})
+    monkeypatch.setattr(appmod, "yahoo_calendar_for_day", lambda day: {})
+
+    found, _ = appmod.discover_recent_earnings(None, 5)
+
+    assert "OUTSIDE" in found
 
 
 def test_history_button_loads_profile_and_never_renders_undefined():

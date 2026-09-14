@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.30"
+APP_VERSION = "27.31"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1963,6 +1963,8 @@ def nasdaq_calendar_for_day(day):
                 "date": pd.Timestamp(ds).normalize(),
                 "time": report_time,
                 "source": "Nasdaq earnings calendar",
+                "name": r.get("name") or r.get("companyName"),
+                "market_cap": r.get("marketCap"),
             }
         _mark_source("nasdaq_yahoo_calendar", True)
         return out
@@ -2001,7 +2003,7 @@ def yahoo_calendar_for_day(day):
         _mark_source("nasdaq_yahoo_calendar", False, e)
         return {}
 
-def discover_recent_earnings(tickers, recent_trading_days=10):
+def discover_recent_earnings(tickers=None, recent_trading_days=10):
     """
     Lightweight recent-earnings discovery for the main screen.
 
@@ -2019,10 +2021,10 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
     # range. This keeps stale reporters out while naturally crossing weekends.
     days = list(pd.bdate_range(end=now, periods=recent_trading_days))
     start = days[0].normalize()
-    wanted = set(tickers)
+    wanted = set(tickers) if tickers is not None else None
     found = {}
     diag = {
-        "universe": len(tickers),
+        "universe": len(wanted) if wanted is not None else None,
         "finnhub": 0,
         "nasdaq": 0,
         "uw": 0,
@@ -2035,7 +2037,7 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
         fh_key = f"finnhub-calendar:{start.date()}:{now.date()}"
         fh_map = cached(fh_key, lambda: finnhub_earnings_calendar(start, now), ttl=1800)
         for t, meta in fh_map.items():
-            if t in wanted:
+            if wanted is None or t in wanted:
                 found[t] = meta
                 diag["finnhub"] += 1
 
@@ -2055,7 +2057,7 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
                 except Exception:
                     day_map = {}
                 for t, meta in day_map.items():
-                    if t in wanted and t not in found:
+                    if (wanted is None or t in wanted) and t not in found:
                         found[t] = meta
                         diag["uw"] += 1
 
@@ -2079,12 +2081,15 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
                 nmap, ymap = {}, {}
 
             for t, meta in nmap.items():
-                if t in wanted and t not in found:
-                    found[t] = meta
+                if wanted is None or t in wanted:
+                    if t in found:
+                        found[t]={**meta,**found[t]}
+                    else:
+                        found[t] = meta
                     diag["nasdaq"] += 1
 
             for t, ed in ymap.items():
-                if t in wanted and t not in found:
+                if (wanted is None or t in wanted) and t not in found:
                     found[t] = {
                         "date": ed,
                         "time": None,
@@ -4395,9 +4400,33 @@ def api_postearnings_opportunities():
                 continue
         tickers=list(all_holdings)
 
-        # Reuse the calendar discovery cache. Keep this request stock-focused.
-        recent_map,diag=discover_recent_earnings(tickers,recent_days)
-        reporters=[s for s in tickers if s in recent_map]
+        # Calendar-first discovery prevents incomplete/stale ETF holdings files
+        # from silently excluding a company that genuinely reported this week.
+        recent_map,diag=discover_recent_earnings(None,recent_days)
+        active_symbols=_active_alpaca_us_equity_symbols()
+
+        def market_cap_value(meta):
+            raw=(meta or {}).get("market_cap")
+            if isinstance(raw,(int,float)):
+                return float(raw)
+            text=str(raw or "").replace("$","").replace(",","").strip().upper()
+            mult=1.0
+            if text.endswith("T"):mult=1e12;text=text[:-1]
+            elif text.endswith("B"):mult=1e9;text=text[:-1]
+            elif text.endswith("M"):mult=1e6;text=text[:-1]
+            try:return float(text)*mult
+            except Exception:return 0.0
+
+        reporters=[s for s in recent_map if active_symbols is None or s in active_symbols]
+        reporters.sort(key=lambda s:(market_cap_value(recent_map.get(s)),s in all_holdings),reverse=True)
+        # Bound the single Alpaca price job while covering far more than the 12
+        # rows ultimately displayed. ETF members remain useful context, not a gate.
+        reporters=reporters[:120]
+        for sym in reporters:
+            if sym not in all_holdings:
+                meta=recent_map.get(sym) or {}
+                all_holdings[sym]={"ticker":sym,"name":meta.get("name") or sym,"weight":None}
+                parent_map[sym]=["Broad market"]
         now=pd.Timestamp.now().normalize()
         if not reporters:
             return {"results":[],"universe":len(tickers),
@@ -4534,7 +4563,7 @@ def api_postearnings_opportunities():
                 "options_deferred":True}
 
     try:
-        key=f"postearnings-opportunities-v5:{recent_days}"
+        key=f"postearnings-opportunities-v6:{recent_days}"
         payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
