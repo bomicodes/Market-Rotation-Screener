@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.25"
+APP_VERSION = "27.26"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -400,7 +400,7 @@ def cached_refresh_safe(key, fn, force=False, ttl=CACHE_TTL):
                 return hit[1], True, str(e)
             raise
 
-def dl_prices(tickers, period="3y"):
+def dl_prices(tickers, period="3y", repair_missing=True, attempts=2):
     """Download daily closes with a per-symbol repair pass.
 
     yfinance can occasionally return a populated multi-ticker frame with one or
@@ -413,7 +413,7 @@ def dl_prices(tickers, period="3y"):
 
     last_err = None
     df = None
-    for attempt in range(2):
+    for attempt in range(max(1,int(attempts or 1))):
         try:
             df = yf.download(
                 tickers=tickers,
@@ -455,7 +455,7 @@ def dl_prices(tickers, period="3y"):
             missing.append(ticker)
 
     repaired = []
-    for ticker in missing:
+    for ticker in (missing if repair_missing else []):
         try:
             one = yf.download(
                 ticker,
@@ -4148,6 +4148,71 @@ def api_sector(etf):
                         "holdings_stale":holdings_stale,
                         "holdings_refresh_error":holdings_refresh_error,
                         "results":rows,"holdings":[{"ticker":h["ticker"],"name":h["name"],"weight":h.get("weight")} for h in chosen],"asof":rows[0]["date"] if rows else None})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
+def top_setup_universe_payload(group_tickers, limit=20):
+    """Build several stock RRG universes from one shared price download."""
+    groups=[]; failures=[]; all_symbols=["SPY"]
+    for etf in group_tickers:
+        try:
+            holding_bundle,stale,refresh_error=cached_refresh_safe(
+                f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600
+            )
+            holdings,source=holding_bundle
+            holdings=apply_sector_supplements(etf,holdings)
+            chosen=holdings[:limit]
+            if not chosen:
+                failures.append({"ticker":etf,"error":"No holdings returned"});continue
+            groups.append({"ticker":etf,"holdings":holdings,"chosen":chosen,"source":source,
+                           "stale":stale,"refresh_error":refresh_error})
+            all_symbols.extend([etf,*[h["ticker"] for h in chosen]])
+        except Exception as e:
+            failures.append({"ticker":etf,"error":str(e)})
+    if not groups:
+        raise RuntimeError("No supportive-group holdings were available.")
+
+    prices=dl_prices(list(dict.fromkeys(all_symbols)),"18mo",repair_missing=False,attempts=1)
+    payload_groups=[]
+    for group in groups:
+        etf=group["ticker"];chosen=group["chosen"];holdings=group["holdings"]
+        try:
+            members=[h["ticker"] for h in chosen]
+            rows=dual_rrg_rows(prices,etf,members,8,8)
+            parent_fast_list=rrg_rows(prices,"SPY",[etf],10,5,8)
+            parent_trend_list=rrg_rows(prices,"SPY",[etf],25,12,8)
+            parent_fast=parent_fast_list[0] if parent_fast_list else None
+            parent_trend=parent_trend_list[0] if parent_trend_list else None
+            meta={h["ticker"]:h for h in holdings}
+            for row in rows:
+                m=meta.get(row["ticker"],{})
+                row["name"]=m.get("name",row["ticker"]);row["weight"]=m.get("weight")
+                row["alignment"]=alignment_label(row.get("fast"),row.get("trend"),parent_fast,parent_trend)
+            payload_groups.append({"ok":True,"sector":etf,"sector_name":RRG_UNIVERSE.get(etf,etf),
+                                   "holdings_as_screened":len(chosen),"holdings_total":len(holdings),
+                                   "holdings_source":group["source"],"holdings_stale":group["stale"],
+                                   "holdings_refresh_error":group["refresh_error"],"results":rows,
+                                   "holdings":[{"ticker":h["ticker"],"name":h["name"],"weight":h.get("weight")} for h in chosen],
+                                   "asof":rows[0]["date"] if rows else None})
+        except Exception as e:
+            failures.append({"ticker":etf,"error":str(e)})
+    return {"groups":payload_groups,"failures":failures,"symbols_downloaded":len(set(all_symbols))}
+
+
+@app.post("/api/top-setup-universe")
+def api_top_setup_universe():
+    try:
+        body=request.get_json(silent=True) or {};requested=[]
+        for raw in body.get("groups",[]):
+            ticker=str(raw or "").strip().upper()
+            if ticker in RRG_UNIVERSE and ticker not in requested:requested.append(ticker)
+        requested=requested[:20]
+        if not requested:return jsonify({"ok":False,"error":"No valid supportive groups supplied."}),400
+        limit=max(5,min(25,int(body.get("limit",20))))
+        key=f"top-setup-universe-v27-26:{','.join(requested)}:{limit}"
+        payload,stale,err=cached_refresh_safe(key,lambda:top_setup_universe_payload(requested,limit),ttl=600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
 
@@ -8360,28 +8425,18 @@ async function runAutomaticTopSetups(force=false){
    if(st)st.textContent=`Layer 1 · ${supportive.length}/${groups.length} supportive groups`;
 
    const pool=[];
-   let holdingsGroupsLoaded=0,holdingsGroupFailures=0,holdingsFailureReasons=[];
-   // Fetch holdings without changing currentSector/UI selection.
+   // Fetch all supportive groups in one server request. The backend downloads
+   // their deduplicated price universe once and computes each stock RRG from
+   // that shared frame, avoiding 10 competing /api/sector calculations.
    automaticTopSetupsStage="holdings scan";
-   for(let n=0;n<supportive.length;n+=4){
-     const batch=supportive.slice(n,n+4);
-     const results=await Promise.all(batch.map(async g=>{
-       try{
-         const key=cacheKeySector(g.ticker,"20");
-         if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
-         const endpoint=safeTickerEndpoint("/api/sector",g.ticker);
-         const j=await safeServiceFetchJson(endpoint,{params:{limit:20},timeoutMs:30000});
-         clientCache.sectors.set(key,j);return {g,j};
-       }catch(e){
-         const reason=e?.message||String(e);
-         holdingsFailureReasons.push(`${g.ticker}: ${reason}`);
-         console.warn(`Top Setups holdings failed for ${g.ticker}`,e);
-         return null;
-       }
-     }));
-     holdingsGroupsLoaded+=results.filter(Boolean).length;
-     holdingsGroupFailures+=results.filter(x=>!x).length;
-     results.filter(Boolean).forEach(({g,j})=>{
+   const universe=await safeServiceFetchJson("/api/top-setup-universe",{
+     method:"POST",body:{groups:supportive.map(g=>g.ticker),limit:20},timeoutMs:110000
+   });
+   const groupByTicker=new Map(supportive.map(g=>[g.ticker,g]));
+   (universe.groups||[]).forEach(j=>{
+       const g=groupByTicker.get(j.sector);
+       if(!g)return;
+       clientCache.sectors.set(cacheKeySector(g.ticker,"20"),j);
        (j.results||[]).forEach(x=>{
          const f=x?.fast||x||{},t=x?.trend||{};
          const fIn=(f?.tail_trajectory?f.tail_trajectory==="Rotating In":(f?.rs_up===true&&f?.mom_up===true));
@@ -8389,13 +8444,10 @@ async function runAutomaticTopSetups(force=false){
          if(!stockTrajectoryPrefilter(x)&&!fIn&&!tIn)return;
          pool.push({...x,_parentTicker:g.ticker,_parentGroup:g,_parentHeat:sectorHeatScore(g)});
        });
-     });
-     if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+4,supportive.length)}/${supportive.length} supportive groups`;
-   }
-   if(supportive.length&&holdingsGroupsLoaded===0){
-     const first=holdingsFailureReasons[0];
-     throw Error(`Holdings scan failed for all ${holdingsGroupFailures} supportive groups${first?` · first failure: ${first}`:""}`);
-   }
+   });
+   const groupsLoaded=(universe.groups||[]).length,groupFailures=(universe.failures||[]).length;
+   if(st)st.textContent=`Layer 2 · ${groupsLoaded}/${supportive.length} supportive groups · ${universe.symbols_downloaded||0} symbols in one shared download${groupFailures?` · ${groupFailures} group failures`:""}`;
+   if(!groupsLoaded)throw Error(`Bulk holdings scan returned no groups${universe.failures?.[0]?.error?` · ${universe.failures[0].ticker}: ${universe.failures[0].error}`:""}`);
 
    // Deduplicate overlapping ETF holdings; keep the strongest parent-group context.
    const dedupe=new Map();

@@ -1,3 +1,9 @@
+v27.26 — REBUILD TOP SETUPS HOLDINGS AS ONE SHARED UNIVERSE
+- Replaced up to 10 separate 18-month sector/stock RRG requests with one cached `/api/top-setup-universe` request. The backend deduplicates the supportive groups' top holdings, downloads their price history once, and computes each group from the shared frame.
+- The bulk scan skips Yahoo's potentially unbounded per-symbol repair pass; symbols missing from the bulk response are isolated rather than delaying every group beyond the client timeout.
+- The Top Setups client now allows one bounded 110-second window for this single request, below Gunicorn's 120-second ceiling, instead of launching four 30-second requests that continued working after the browser abandoned them.
+- No scoring, ranking, qualification, or options criteria changed.
+
 v27.25 — FIX SAFARI HOLDINGS-SCAN DISPATCH
 - Top Setups holdings requests now use the minimal GET-only Safari service path rather than the ticker request helper's AbortController/RequestInit form.
 - If every supportive group fails, the scan status now includes the first ticker-specific failure reason instead of only reporting a group count.

@@ -49,7 +49,8 @@ def test_top_setup_network_stages_use_safe_service_requests():
     scan_end = APP_SOURCE.index('\nfunction openTopSetupDeepDive(', scan_start)
     scan = APP_SOURCE[scan_start:scan_end]
 
-    assert 'safeServiceFetchJson(endpoint,{params:{limit:20}' in scan
+    assert 'safeServiceFetchJson("/api/top-setup-universe"' in scan
+    assert 'timeoutMs:110000' in scan
     assert 'safeTickerFetchJson("/api/sector"' not in scan
     assert 'safeServiceFetchJson("/api/early-reversal-scan"' in scan
     assert 'safeServiceFetchJson("/api/options-scan"' in scan
@@ -61,6 +62,11 @@ def test_top_setup_options_failures_cannot_masquerade_as_illiquidity():
     assert 'successfulTickers.has(x.ticker)' in APP_SOURCE
 
 
-def test_holdings_failure_reports_first_real_reason():
-    assert 'holdingsFailureReasons.push(`${g.ticker}: ${reason}`)' in APP_SOURCE
-    assert 'first failure: ${first}' in APP_SOURCE
+def test_holdings_scan_uses_one_bulk_request_not_competing_group_requests():
+    scan_start = APP_SOURCE.index('async function runAutomaticTopSetups(')
+    scan_end = APP_SOURCE.index('\nfunction openTopSetupDeepDive(', scan_start)
+    scan = APP_SOURCE[scan_start:scan_end]
+
+    assert 'body:{groups:supportive.map(g=>g.ticker),limit:20}' in scan
+    assert 'symbols in one shared download' in scan
+    assert 'supportive.slice(n,n+4)' not in scan
