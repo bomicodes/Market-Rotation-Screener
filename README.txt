@@ -1,3 +1,8 @@
+v27.28 — ALPACA BULK PRICE SOURCE FOR EARNINGS
+- The market-wide Earnings scan now loads SPY and all recent reporters through Alpaca's multi-symbol daily-bars endpoint in bounded chunks, replacing the large Yahoo batch that could fail the entire request with no usable frame.
+- The paid Alpaca SIP feed is primary; one bounded Yahoo bulk request remains as fallback. Missing symbols are isolated, and ticker-specific history remains click-to-load.
+- The five-day default, recent-calendar discovery, continuation/reversion scoring, and deferred options hydration remain unchanged.
+
 v27.27 — REMOVE EARNINGS 429 RETRY STORM
 - The market-wide Earnings scan now makes one Safari-safe request with a bounded 110-second window instead of launching up to four overlapping retries while the original Render job is still running.
 - The bulk reporter-price download skips slow serial per-symbol repairs, and historical enrichment is limited to the 12 rows the endpoint can return instead of computing 20 profiles and discarding 8.

@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.27"
+APP_VERSION = "27.28"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -600,6 +600,50 @@ def _alpaca_daily_ohlc(ticker, period="3y"):
             _mark_source("alpaca_stocks",False,e)
         hit=CACHE.get(key)
         if hit and now-hit[0] < stale_ttl:return hit[1].copy()
+        return pd.DataFrame()
+
+
+def alpaca_multi_daily_closes(tickers, period="18mo"):
+    """Fetch many symbols' daily closes through Alpaca in one paginated job."""
+    symbols=list(dict.fromkeys(str(t or "").upper().strip() for t in tickers if t))
+    if not symbols or not (ALPACA_API_KEY and ALPACA_API_SECRET):return pd.DataFrame()
+    try:
+        from zoneinfo import ZoneInfo
+        end=datetime.now(ZoneInfo("America/New_York"));start=end-timedelta(days=_period_days(period))
+        series=[]
+        # Keep query strings bounded while still replacing dozens of one-symbol calls.
+        for offset in range(0,len(symbols),75):
+            chunk=symbols[offset:offset+75]
+            params={"symbols":",".join(chunk),"timeframe":"1Day","start":start.isoformat(),"end":end.isoformat(),
+                    "adjustment":"raw","feed":ALPACA_STOCK_FEED,"sort":"asc","limit":10000}
+            collected={s:[] for s in chunk};token=None
+            for _ in range(10):
+                if token:params["page_token"]=token
+                response=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v2/stocks/bars",params=params,timeout=30)
+                if response.status_code in (401,403):raise RuntimeError("Alpaca multi-symbol stock bars were rejected.")
+                if response.status_code==429:raise RuntimeError("Alpaca rate limit reached while loading earnings prices.")
+                response.raise_for_status();payload=response.json() or {};bars=payload.get("bars") or {}
+                if isinstance(bars,dict):
+                    for symbol,rows in bars.items():
+                        if symbol in collected and isinstance(rows,list):collected[symbol].extend(rows)
+                token=payload.get("next_page_token")
+                if not token:break
+            for symbol,rows in collected.items():
+                values=[];index=[]
+                for bar in rows:
+                    try:
+                        ts=pd.Timestamp(bar.get("t"))
+                        if ts.tzinfo is None:ts=ts.tz_localize("UTC")
+                        index.append(ts.tz_convert("America/New_York").tz_localize(None).normalize())
+                        values.append(float(bar.get("c")))
+                    except Exception:pass
+                if values:series.append(pd.Series(values,index=pd.DatetimeIndex(index),name=symbol).groupby(level=0).last())
+        if not series:return pd.DataFrame()
+        frame=pd.concat(series,axis=1).sort_index().dropna(how="all")
+        _mark_source("alpaca_stocks",True)
+        return frame
+    except Exception as e:
+        _mark_source("alpaca_stocks",False,e)
         return pd.DataFrame()
 
 def dl_ohlc(ticker, period="3y"):
@@ -4336,10 +4380,12 @@ def api_postearnings_opportunities():
                     "recent_reporters":0,"diagnostics":diag}
 
         # One batch price request supplies both RRG and current post-earnings move.
-        # Market-wide discovery must stay bounded. Missing symbols are isolated
-        # from this pass rather than triggering a serial Yahoo repair cascade;
-        # ticker-specific history remains available on demand.
-        prices=dl_prices(["SPY"]+reporters,"18mo",repair_missing=False,attempts=1)
+        # Prefer one multi-symbol Alpaca job. Yahoo remains a bounded fallback,
+        # and ticker-specific historical detail remains available on demand.
+        price_symbols=["SPY"]+reporters
+        prices=alpaca_multi_daily_closes(price_symbols,"18mo")
+        if prices.empty:
+            prices=dl_prices(price_symbols,"18mo",repair_missing=False,attempts=1)
         rrg={r["ticker"]:r for r in dual_rrg_rows(prices,"SPY",reporters,8,8)}
 
         def current_from_frame(sym,event_date,event_meta=None):
