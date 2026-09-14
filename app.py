@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.22"
+APP_VERSION = "27.23"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -3720,7 +3720,7 @@ def api_premium_support(ticker):
     try:
         direction=(request.args.get("direction") or "bullish").lower()
         if direction not in ("bullish","bearish"):direction="bullish"
-        base,_,_=cached_refresh_safe(f"options-v24-1:{ticker.upper()}:0-30:7:35",lambda:options_quality_payload(ticker,"0-30",35,7),ttl=600)
+        base,_,_=cached_refresh_safe(f"options-selected-v27-23:{ticker.upper()}:0-30:7:35",lambda:options_scan_payload(ticker,"0-30",35,7),ttl=600)
         # v26-1: bumped from v25-9 because the DTE universe changed (7-90 -> 7-730);
         # a stale v25-9 cache entry would otherwise keep serving front-month-only
         # results under the old key's TTL after this deploy.
@@ -3732,7 +3732,7 @@ def api_premium_support(ticker):
 def api_options(ticker):
     try:
         force=request.args.get("refresh")=="1"
-        bucket=(request.args.get("gex_window") or "0-30").lower();dmin=max(0,min(30,int(request.args.get("dte_min",7))));dmax=max(dmin+1,min(90,int(request.args.get("dte_max",35))));payload,stale,err=cached_refresh_safe(f"options-v24-1:{ticker.upper()}:{bucket}:{dmin}:{dmax}",lambda:options_quality_payload(ticker,bucket,dmax,dmin),force=force,ttl=600)
+        bucket=(request.args.get("gex_window") or "0-30").lower();dmin=max(0,min(30,int(request.args.get("dte_min",7))));dmax=max(dmin+1,min(90,int(request.args.get("dte_max",35))));payload,stale,err=cached_refresh_safe(f"options-selected-v27-23:{ticker.upper()}:{bucket}:{dmin}:{dmax}",lambda:options_scan_payload(ticker,bucket,dmax,dmin),force=force,ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -3744,7 +3744,7 @@ def api_flow(ticker):
         # Reuse the exact options payload already loaded by the deep-dive panel.
         # Previously Flow used an old cache namespace, forcing a second full chain
         # download immediately after /api/options and making the panel appear stuck.
-        base,_,_=cached_refresh_safe(f"options-v24-1:{ticker.upper()}:0-30:7:35",lambda:options_quality_payload(ticker,"0-30",35,7),ttl=600)
+        base,_,_=cached_refresh_safe(f"options-selected-v27-23:{ticker.upper()}:0-30:7:35",lambda:options_scan_payload(ticker,"0-30",35,7),ttl=600)
         payload,stale,err=cached_refresh_safe(f"flow-v23-6:{ticker.upper()}",lambda:flow_payload(ticker,base),force=force,ttl=600)
         return jsonify({"ok":True,"stale":stale,"refresh_error":err,**payload})
     except Exception as e:
@@ -5987,8 +5987,21 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
      let raw="",j={};
      try{raw=await r.text();j=raw?JSON.parse(raw):{};}
      catch(e){
-       lastErr=new Error(`Service returned an unreadable response (${r.status})`);
-       if([429,502,503,504].includes(r.status))continue;
+       const plain=String(raw||"").replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,180);
+       lastErr=new Error(plain||(
+         r.status===429?"Service is temporarily rate limited. Retrying shortly.":
+         `Service returned an unreadable response (${r.status})`
+       ));
+       if([429,502,503,504].includes(r.status)){
+         if(r.status===429&&attempt+1<maxAttempts){
+           const retryHeader=Number(r.headers?.get?.("Retry-After"));
+           const retryMs=Number.isFinite(retryHeader)&&retryHeader>0
+             ? Math.min(30000,retryHeader*1000)
+             : Math.max(1000,Number(opts.rateLimitWaitMs)||8000);
+           await new Promise(resolve=>setTimeout(resolve,retryMs));
+         }
+         continue;
+       }
        throw lastErr;
      }
      if(r.ok&&j?.ok){
@@ -7396,7 +7409,7 @@ async function loadOptionsTicker(ticker,opts={}){
  st.textContent=`Loading ${ticker} options…`;
  try{
    const gw=document.getElementById("gexWindow")?.value||"0-30";
-   const j=await safeTickerFetchJson("/api/options",ticker,{gex_window:gw,dte_min:7,dte_max:35},{timeoutMs:75000,attempts:1});
+   const j=await safeTickerFetchJson("/api/options",ticker,{gex_window:gw,dte_min:7,dte_max:35},{timeoutMs:75000,attempts:2,rateLimitWaitMs:10000});
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
    const wi=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===liveWatchKey(ticker));

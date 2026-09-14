@@ -1,3 +1,8 @@
+v27.23 — RECOVER SELECTED-TICKER OPTIONS/GEX FROM TRANSIENT 429S
+- Selected-ticker options and 0–30D GEX now reuse one bounded 0–35D Alpaca contract/snapshot download instead of fetching their heavily overlapping universes twice. Premium support and flow reuse that same cached payload.
+- A selected ticker now receives one delayed retry after a transient HTTP 429, honoring Retry-After when supplied. This remains bounded so it cannot recreate the earlier retry storm.
+- Non-JSON rate-limit responses now surface a readable service-busy/provider message instead of the misleading “unreadable response (429)” error.
+
 v27.22 — RESTORE STOCK RRG DEEP-DIVE LOADING
 - Clicking a ticker directly on the stock RRG once again loads its chart/volume profile, STRAT, options chain, and modeled GEX through the shared ticker loader while keeping the RRG in place (no automatic scroll).
 - Stock summary rows once again open the same deep dive. Removed the capture-phase focus-only listener that intercepted those row clicks before their existing loader could run.

@@ -26,3 +26,13 @@ def test_shared_ticker_loader_fans_out_chart_strat_and_options():
     assert 'loadChartPreview(ticker)' in loader
     assert 'loadStrat(ticker)' in loader
     assert 'loadOptionsTicker(ticker,{scroll:false})' in loader
+
+
+def test_selected_options_request_has_one_bounded_rate_limit_retry():
+    loader_start = APP_SOURCE.index('async function loadOptionsTicker(')
+    loader_end = APP_SOURCE.index('\nasync function scanVisibleOptions(', loader_start)
+    loader = APP_SOURCE[loader_start:loader_end]
+
+    assert 'attempts:2' in loader
+    assert 'rateLimitWaitMs:10000' in loader
+    assert 'attempts:3' not in loader

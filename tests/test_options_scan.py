@@ -68,3 +68,34 @@ def test_front_month_scan_does_not_fall_through_to_leaps(monkeypatch):
 
     assert payload["liquidity"] == "Thin"
     assert payload["leaps_checked"] is False
+
+
+def test_selected_ticker_endpoint_uses_one_pass_options_and_gex(monkeypatch):
+    calls = []
+    payload = {
+        "ticker": "TTWO",
+        "spot": 222.91,
+        "contracts": [],
+        "positioning": {"available": True},
+    }
+
+    def selected(ticker, bucket, dte_max, dte_min):
+        calls.append((ticker, bucket, dte_max, dte_min))
+        return dict(payload)
+
+    monkeypatch.setattr(appmod, "options_scan_payload", selected)
+    monkeypatch.setattr(
+        appmod,
+        "options_quality_payload",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("selected ticker should not download options and GEX separately")
+        ),
+    )
+    appmod.CACHE.clear()
+
+    client = appmod.app.test_client()
+    response = client.get("/api/options/TTWO?gex_window=0-30&dte_min=7&dte_max=35")
+
+    assert response.status_code == 200
+    assert response.get_json()["ok"] is True
+    assert calls == [("TTWO", "0-30", 35, 7)]
