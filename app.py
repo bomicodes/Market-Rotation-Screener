@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.21"
+APP_VERSION = "27.22"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6470,14 +6470,17 @@ function installRRGInteractions(id){
  c.addEventListener("click",evt=>{
    const ticker=hitTicker(evt);
    if(!ticker)return;
-   toggleRRGFocus(id,ticker);
-   // Stock RRG clicks are inspection-only: focus the selected tail and dim the
-   // others in place. Opening the chart/volume-profile deep dive remains a
-   // separate action via the stock table/watchlist, so clicking the RRG no
-   // longer yanks the user away from the tail they are trying to inspect.
    if(id==="sectorChart"){
+     toggleRRGFocus(id,ticker);
      syncSectorRowSelection();
      selectSector(ticker,{source:"rrg"});
+   }else if(id==="stockChart"){
+     // Preserve the in-place RRG inspection experience while also refreshing
+     // every selected-ticker module. openSectorStockTicker owns focus state and
+     // fans chart, STRAT, GEX and options out independently.
+     openSectorStockTicker(ticker,{scroll:false});
+   }else{
+     toggleRRGFocus(id,ticker);
    }
  });
 
@@ -6492,21 +6495,6 @@ function installRRGInteractions(id){
 
 installRRGInteractions("sectorChart");
 installRRGInteractions("stockChart");
-
-function installStockSummaryFocusOnly(){
- document.addEventListener("click",evt=>{
-   const target=evt.target;
-   if(!target||!target.closest)return;
-   if(target.closest("button,a,input,select,textarea"))return;
-   const row=target.closest("[data-live-ticker]");
-   if(!row)return;
-   evt.preventDefault();
-   evt.stopImmediatePropagation();
-   const ticker=row.dataset.liveTicker;
-   if(ticker)toggleRRGFocus("stockChart",ticker);
- },true);
-}
-installStockSummaryFocusOnly();
 const MACRO_BASKETS={
  rate:new Set(["XLK","XLC","XLU","XLRE","XLP"]),
  cyclical:new Set(["XLY","XLI","XLF","XLB"]),

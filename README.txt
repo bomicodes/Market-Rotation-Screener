@@ -1,3 +1,8 @@
+v27.22 — RESTORE STOCK RRG DEEP-DIVE LOADING
+- Clicking a ticker directly on the stock RRG once again loads its chart/volume profile, STRAT, options chain, and modeled GEX through the shared ticker loader while keeping the RRG in place (no automatic scroll).
+- Stock summary rows once again open the same deep dive. Removed the capture-phase focus-only listener that intercepted those row clicks before their existing loader could run.
+- Added regression coverage for both click paths and for the shared chart/STRAT/options fan-out.
+
 v27.21 — RESTORE TOP SETUPS, CHART, AND GEX RESPONSIVENESS
 - Removed the Layer 3 retry storm that could saturate the single Render worker: cold ticker requests now receive endpoint-appropriate timeouts and at most one bounded retry instead of being aborted every 12 seconds up to five times while the server continued the orphaned work.
 - Top Setups now ranks to 32 candidates before the options-provider pass and uses a one-pass 0–35D chain payload for both 7–35D liquidity and 0–30D modeled GEX. This removes duplicate contract/snapshot downloads without changing RRG scoring, qualification thresholds, or GEX math.
