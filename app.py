@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.20"
+APP_VERSION = "27.21"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2998,6 +2998,67 @@ def flow_payload(ticker, options_payload=None):
         "note":"V21.3 Institutional Flow Engine: broad ~900-day/wide-strike chain, full candidate coverage when practical, and activity-targeted coverage (default 99.5%) for very large chains. Historical aggressor direction is intentionally not fabricated: Alpaca indicative option trades are delayed while quotes are modified/current, and Alpaca does not expose a historical option-NBBO endpoint in the documented REST API. Contract mix is calls vs puts only; use FlowMS as the directional cross-check unless OPRA live quote/trade capture is available."
     }
 
+def _summarize_option_rows(ticker, spot, rows, rv20):
+    """Build the liquidity/IV portion shared by full and scan payloads."""
+    ivrows=[r for r in rows if r["iv"] is not None and abs(r["moneyness_pct"])<=8 and (r["delta"] is None or .20<=abs(r["delta"])<=.80)]
+    atm_iv=float(np.median([r["iv"] for r in ivrows])) if ivrows else None
+    rv_pct=rv20*100 if rv20 is not None else None
+    ratio=atm_iv/rv_pct if atm_iv is not None and rv_pct and rv_pct>0 else None
+    if ratio is None: ivstate="Unknown"
+    elif ratio<.90: ivstate="Cheap / Crushed"
+    elif ratio<1.25: ivstate="Normal"
+    elif ratio<1.60: ivstate="Elevated"
+    else: ivstate="Juiced"
+    liquid=sum(r["liquidity"]=="Liquid" for r in rows)
+    tradable=sum(r["liquidity"] in ("Liquid","Tradable") for r in rows)
+    liq="Liquid" if liquid>=3 else ("Tradable" if tradable>=3 else "Thin")
+    rank={"Liquid":0,"Tradable":1,"Thin":2}
+    rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
+    return {
+        "ticker":ticker,"spot":round(spot,2),"rv20":round(rv_pct,1) if rv_pct is not None else None,
+        "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
+        "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
+        "iv_state":ivstate,"liquidity":liq,"liquid_contracts":liquid,
+        "tradable_contracts":tradable,"contracts_checked":len(rows),"contracts":rows[:120]
+    }
+
+
+def options_scan_payload(ticker, gex_window="0-30", dte_max=35, dte_min=7):
+    """One-pass options payload for market-wide scans.
+
+    The full single-ticker endpoint intentionally keeps separate trade and GEX
+    expiration universes. A market-wide scan does not need to download those
+    overlapping universes twice for every candidate: fetch their union once,
+    then split the returned rows locally into 7-35D liquidity and 0-30D GEX.
+    """
+    ticker=ticker.upper().strip()
+    dte_min=max(0,min(30,int(dte_min or 0)));dte_max=max(dte_min+1,min(90,int(dte_max or 35)))
+    bucket=str(gex_window or "0-30").lower()
+    if bucket not in ("0-7","8-30","31-90","all","0-30"):bucket="0-30"
+    ranges={"0-7":(0,7),"0-30":(0,30),"8-30":(8,30),"31-90":(31,90),"all":(0,365)}
+    glo,ghi=ranges[bucket]
+    today=pd.Timestamp.now().normalize(); lo=min(dte_min,glo); hi=max(dte_max,ghi)
+    # A market-wide scan is deliberately bounded. The dedicated GEX page still
+    # supports the 31-90D/all buckets through options_quality_payload().
+    hi=min(90,hi)
+    start=(today+pd.Timedelta(days=lo)).strftime("%Y-%m-%d")
+    end=(today+pd.Timedelta(days=hi)).strftime("%Y-%m-%d")
+    rv20,spot=realized_vol_20d(ticker)
+    if spot is None:raise RuntimeError(f"Could not determine current price for {ticker}.")
+    contracts=alpaca_option_contracts(ticker,start,end);meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+    snaps=alpaca_option_chain(ticker,start,end,spot);all_rows=[]
+    for sym,snap in snaps.items():
+        if sym not in meta:continue
+        r=option_contract_row(sym,snap,meta[sym],spot)
+        if r.get("expiration") and r.get("moneyness_pct") is not None:all_rows.append(r)
+    trade_rows=[r for r in all_rows if r.get("dte") is not None and dte_min<=r["dte"]<=dte_max and abs(r["moneyness_pct"])<=20]
+    gex_rows=[r for r in all_rows if r.get("dte") is not None and glo<=r["dte"]<=ghi and abs(r["moneyness_pct"])<=25]
+    summary=_summarize_option_rows(ticker,spot,trade_rows,rv20)
+    return {**summary,"dte_min":dte_min,"dte_max":dte_max,"gex_window":bucket,
+            "feed":f"Alpaca {ALPACA_OPTIONS_FEED}","chain_updated_at":datetime.utcnow().isoformat(timespec="seconds")+"Z",
+            "gex_contracts_checked":len(gex_rows),"positioning":modeled_dealer_positioning(gex_rows,spot),"scan_optimized":True}
+
+
 def options_quality_payload(ticker, gex_window="0-30", dte_max=35, dte_min=7):
     ticker=ticker.upper().strip()
     # Ceiling raised from 90 -> 760 (buffer past 730/2yr) so LEAPS-range
@@ -3018,20 +3079,7 @@ def options_quality_payload(ticker, gex_window="0-30", dte_max=35, dte_min=7):
         if sym not in meta: continue
         r=option_contract_row(sym,snap,meta[sym],spot)
         if r["expiration"] and r["moneyness_pct"] is not None and abs(r["moneyness_pct"])<=20: rows.append(r)
-    ivrows=[r for r in rows if r["iv"] is not None and abs(r["moneyness_pct"])<=8 and (r["delta"] is None or .20<=abs(r["delta"])<=.80)]
-    atm_iv=float(np.median([r["iv"] for r in ivrows])) if ivrows else None
-    rv_pct=rv20*100 if rv20 is not None else None
-    ratio=atm_iv/rv_pct if atm_iv is not None and rv_pct and rv_pct>0 else None
-    if ratio is None: ivstate="Unknown"
-    elif ratio<.90: ivstate="Cheap / Crushed"
-    elif ratio<1.25: ivstate="Normal"
-    elif ratio<1.60: ivstate="Elevated"
-    else: ivstate="Juiced"
-    liquid=sum(r["liquidity"]=="Liquid" for r in rows)
-    tradable=sum(r["liquidity"] in ("Liquid","Tradable") for r in rows)
-    liq="Liquid" if liquid>=3 else ("Tradable" if tradable>=3 else "Thin")
-    rank={"Liquid":0,"Tradable":1,"Thin":2}
-    rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
+    summary=_summarize_option_rows(ticker,spot,rows,rv20)
     # GEX has its own expiration universe, independent of the 7-35D swing
     # contract-selection chain. This prevents trade-horizon filtering from
     # accidentally dropping near-expiry gamma that can dominate dealer positioning.
@@ -3046,20 +3094,16 @@ def options_quality_payload(ticker, gex_window="0-30", dte_max=35, dte_min=7):
         rr=option_contract_row(sym,snap,gmeta[sym],spot)
         if rr.get("expiration") and rr.get("moneyness_pct") is not None and abs(rr["moneyness_pct"])<=25:gex_rows.append(rr)
     return {
-        "ticker":ticker,"spot":round(spot,2),"dte_min":dte_min,"dte_max":dte_max,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+        **summary,"dte_min":dte_min,"dte_max":dte_max,"gex_window":bucket,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
         "chain_updated_at":datetime.utcnow().isoformat(timespec="seconds")+"Z",
-        "rv20":round(rv_pct,1) if rv_pct is not None else None,
-        "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
-        "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
-        "iv_state":ivstate,"liquidity":liq,"liquid_contracts":liquid,"tradable_contracts":tradable,
-        "contracts_checked":len(rows),"gex_contracts_checked":len(gex_rows),"positioning":modeled_dealer_positioning(gex_rows,spot),"contracts":rows[:120]
+        "gex_contracts_checked":len(gex_rows),"positioning":modeled_dealer_positioning(gex_rows,spot)
     }
 
 
 
 _LIQUIDITY_RANK={"Liquid":0,"Tradable":1,"Thin":2}
 
-def contract_liquidity_gate(ticker, gex_window="0-30"):
+def contract_liquidity_gate(ticker, gex_window="0-30", allow_leaps=True):
     """Decoupled liquidity gate: don't reject a name just because its front-month
     (7-35 DTE) chain is thin. A long-dated swing trader may hold a 400+ DTE LEAPS
     on a name whose weeklies are dead — that's a deep chain the old gate never
@@ -3068,9 +3112,9 @@ def contract_liquidity_gate(ticker, gex_window="0-30"):
     clear the bar.
     """
     ticker=ticker.upper().strip()
-    front=cached_refresh_safe(f"options-v24-1:{ticker}:{gex_window}:7:35",
-                               lambda:options_quality_payload(ticker,gex_window,35,7),ttl=600)[0]
-    if front.get("liquidity")=="Liquid":
+    front=cached_refresh_safe(f"options-scan-v27-21:{ticker}:{gex_window}:7:35",
+                               lambda:options_scan_payload(ticker,gex_window,35,7),ttl=600)[0]
+    if front.get("liquidity")=="Liquid" or not allow_leaps:
         return {**front,"liquidity_source":"front-month","leaps_checked":False}
     leaps=None
     try:
@@ -3715,18 +3759,17 @@ def api_options_scan():
             s=str(s).upper().strip()
             if s and s not in symbols: symbols.append(s)
         if not symbols: return jsonify({"ok":False,"error":"No symbols supplied."}),400
-        # Scan the entire filtered ticker set supplied by the live RRG.
-        # Keep a generous safety ceiling only to prevent accidental abuse.
-        symbols=symbols[:100]
+        # The market-wide scan is a ranking pass, not a full-chain export. Keep
+        # it below the provider's shared request ceiling so interactive chart
+        # and GEX requests remain responsive while the scan is running.
+        symbols=symbols[:40]
         if not ALPACA_API_KEY or not ALPACA_API_SECRET:
             return jsonify({"ok":False,"error":"Alpaca is not configured. Add APCA_API_KEY_ID and APCA_API_SECRET_KEY in Render."}),422
         def one(sym):
             try:
-                # Was hardcoded to the 7-35 DTE front-month chain only, so a
-                # name with a dead weekly chain but a deep LEAPS chain got
-                # rejected as "not liquid/tradable" even though the contracts
-                # this trader actually holds were sitting right there.
-                p=contract_liquidity_gate(sym,"0-30")
+                # Market-wide ranking is deliberately front-month focused.
+                # Dedicated ticker analysis still retains the wider LEAPS path.
+                p=contract_liquidity_gate(sym,"0-30",allow_leaps=False)
                 return {"ok":True,**p,"stale":False}
             except Exception as e:
                 return {"ok":False,"ticker":sym,"error":str(e)}
@@ -5922,21 +5965,25 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
  if(ttl>0&&cached&&now-cached.at<ttl)return cached.value;
  if(tickerRequestInflight.has(url))return tickerRequestInflight.get(url);
  const promise=(async()=>{
-   const waits=[0,1000,3000,7000,12000];
-   const requestTimeoutMs=Number(opts.timeoutMs)||12000;
+   const waits=[0,1200,3500];
+   // Cold Render + provider requests can legitimately exceed 12 seconds.
+   // Repeatedly aborting them at 12s left the server doing orphaned work and
+   // created a retry storm that blanked chart and GEX together.
+   const requestTimeoutMs=Number(opts.timeoutMs)||35000;
+   const maxAttempts=Math.max(1,Math.min(waits.length,Number(opts.attempts)||2));
    let lastErr=null;
-   for(let attempt=0;attempt<waits.length;attempt++){
+   for(let attempt=0;attempt<maxAttempts;attempt++){
      if(waits[attempt])await new Promise(r=>setTimeout(r,waits[attempt]));
      let r;
-     const ac=new AbortController();
-     const timer=setTimeout(()=>ac.abort(),requestTimeoutMs);
-     try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"},signal:ac.signal})}
+     const ac=typeof AbortController!=="undefined"?new AbortController():null;
+     const timer=ac?setTimeout(()=>ac.abort(),requestTimeoutMs):null;
+     try{r=await window.fetch(url,{method:"GET",credentials:"same-origin",headers:{Accept:"application/json"},...(ac?{signal:ac.signal}:{})})}
      catch(e){
        const timedOut=e?.name==="AbortError";
        lastErr=new Error(timedOut?`Request timed out after ${requestTimeoutMs}ms`:`Request could not be dispatched: ${e?.message||e}`);
        continue;
      }
-     finally{clearTimeout(timer)}
+     finally{if(timer)clearTimeout(timer)}
      let raw="",j={};
      try{raw=await r.text();j=raw?JSON.parse(raw):{};}
      catch(e){
@@ -7361,7 +7408,7 @@ async function loadOptionsTicker(ticker,opts={}){
  st.textContent=`Loading ${ticker} options…`;
  try{
    const gw=document.getElementById("gexWindow")?.value||"0-30";
-   const j=await safeTickerFetchJson("/api/options",ticker,{gex_window:gw,dte_min:7,dte_max:35});
+   const j=await safeTickerFetchJson("/api/options",ticker,{gex_window:gw,dte_min:7,dte_max:35},{timeoutMs:75000,attempts:1});
    activeOptionsData=j;optionScanMap[ticker]=j;
    renderTopSetups();
    const wi=liveWatchlist.findIndex(x=>liveWatchKey(x.ticker)===liveWatchKey(ticker));
@@ -7383,7 +7430,8 @@ async function loadOptionsTicker(ticker,opts={}){
    renderOptionsPanel();renderLiveStocks();
    const fs=document.getElementById("flowSection"),fst=document.getElementById("flowStatus"),fb=document.getElementById("refreshFlow");
    if(fs)fs.style.display="block";if(fst)fst.textContent=`${ticker} · flow deferred for faster loading`;if(fb)fb.textContent="Load flow";
- }catch(e){console.error("Options request failed",ticker,e);st.innerHTML=`<span class="error">${ticker} options: ${e?.message||e}</span>`}
+   return true;
+ }catch(e){console.error("Options request failed",ticker,e);st.innerHTML=`<span class="error">${ticker} options: ${e?.message||e}</span>`;return false}
 }
 async function scanVisibleOptions(){
  focusOptionsPanel();
@@ -8304,7 +8352,7 @@ async function runAutomaticTopSetups(force=false){
      const old=dedupe.get(x.ticker);
      if(!old || Number(x._parentHeat||0)>Number(old._parentHeat||0))dedupe.set(x.ticker,x);
    });
-   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,90);
+   let candidates=[...dedupe.values()].sort((a,b)=>preliminaryRRGScore(b)-preliminaryRRGScore(a)).slice(0,60);
    if(!candidates.length)throw Error("No stocks passed the market-wide RRG trajectory gate.");
 
    if(st)st.textContent=`Layer 2.5 · checking early daily reversals on ${candidates.length} candidates`;
@@ -8321,12 +8369,15 @@ async function runAutomaticTopSetups(force=false){
    }catch(e){
      console.warn("Layer 2.5 bulk enrichment unavailable; continuing without early-price signals",e);
    }
-   candidates=candidates.sort((a,b)=>v262EarlyMoveScore(b)-v262EarlyMoveScore(a)).slice(0,60);
+   // Rank before the expensive provider pass. Thirty-two names preserve broad
+   // sector/theme coverage while keeping the scan inside one Render request
+   // and well below Alpaca's shared per-minute ceiling.
+   candidates=candidates.sort((a,b)=>v262EarlyMoveScore(b)-v262EarlyMoveScore(a)).slice(0,32);
 
    if(st)st.textContent=`Layer 3 · checking options on ${candidates.length} RRG candidates`;
    {
      const ac=new AbortController();
-     const timer=setTimeout(()=>ac.abort(),45000);
+     const timer=setTimeout(()=>ac.abort(),70000);
      try{
        const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)}),signal:ac.signal});
        const oj=await or.json();
@@ -8358,8 +8409,8 @@ async function runAutomaticTopSetups(force=false){
      const batch=finalists.slice(n,n+2);
      await Promise.all(batch.map(async x=>{
        const [cj,sj]=await Promise.allSettled([
-         safeTickerFetchJson("/api/chart-preview",x.ticker,{period:"1m",timeframe:"1d"},{ttl:30000,timeoutMs:12000}),
-         safeTickerFetchJson("/api/strat",x.ticker,{},{ttl:30000,timeoutMs:12000})
+         safeTickerFetchJson("/api/chart-preview",x.ticker,{period:"1m",timeframe:"1d"},{ttl:30000,timeoutMs:30000,attempts:1}),
+         safeTickerFetchJson("/api/strat",x.ticker,{},{ttl:30000,timeoutMs:30000,attempts:1})
        ]);
        if(cj.status==="fulfilled"&&cj.value?.ok)valueAcceptanceMap[x.ticker]=classifyValueAcceptance(cj.value);
        if(sj.status==="fulfilled"&&sj.value?.ok)stratSignalMap[x.ticker]=sj.value;
@@ -9145,10 +9196,16 @@ async function loadGexPageTicker(){
   const inp=document.getElementById("gexTickerInput"),t=(inp?.value||"").trim().toUpperCase(),hint=document.getElementById("gexPageHint");
   if(!t){if(hint){hint.style.display="block";hint.textContent="Enter a ticker to load its modeled GEX landscape.";}return;}
   if(hint){hint.style.display="block";hint.textContent=`Loading ${t} GEX landscape…`;}
-  await loadChartPreview(t,previewPeriod||"1m");
-  await loadOptionsTicker(t,{scroll:false});
+  // Chart and GEX are independent. Start the chart opportunistically, but do
+  // not make GEX wait behind a slow/failed price-history request.
+  Promise.resolve(loadChartPreview(t,previewPeriod||"1m")).catch(e=>console.warn(`${t} chart failed`,e));
+  const optionsOk=await loadOptionsTicker(t,{scroll:false});
   mountGexPage();
-  if(hint)hint.style.display="none";
+  if(hint){
+    const hasGex=optionsOk&&activeOptionsData?.ticker===t&&activeOptionsData?.positioning?.available;
+    hint.style.display=hasGex?"none":"block";
+    if(!hasGex)hint.textContent=`${t} GEX is unavailable. Check the options status below for the provider response.`;
+  }
 }
 
 function jumpToRotationTarget(id){

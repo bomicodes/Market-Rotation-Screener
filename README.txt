@@ -1,3 +1,9 @@
+v27.21 — RESTORE TOP SETUPS, CHART, AND GEX RESPONSIVENESS
+- Removed the Layer 3 retry storm that could saturate the single Render worker: cold ticker requests now receive endpoint-appropriate timeouts and at most one bounded retry instead of being aborted every 12 seconds up to five times while the server continued the orphaned work.
+- Top Setups now ranks to 32 candidates before the options-provider pass and uses a one-pass 0–35D chain payload for both 7–35D liquidity and 0–30D modeled GEX. This removes duplicate contract/snapshot downloads without changing RRG scoring, qualification thresholds, or GEX math.
+- The market-wide options scan no longer launches a separate 730D LEAPS fetch for every thin weekly chain. Dedicated single-ticker/LEAPS functionality remains available; the automatic swing scan stays focused on the configured 7–35D tradability gate.
+- GEX loading is independent of chart loading. A slow price-history request can no longer prevent an otherwise-valid options/GEX response from rendering, and the page now displays a specific provider-unavailable message instead of silently remaining blank.
+
 v27.6 — FIX ROOT CAUSE OF FALSE "ILLIQUID" REPORTS: ALPACA RATE LIMITING
 - v27.5 improved the wording of liquidity failures, but rate-limited Alpaca responses could still make later scan candidates look falsely thin. v27.6 adds a shared sliding-window request gate so concurrent scan threads no longer burst Alpaca independently.
 - Added a process-wide limiter at 170 requests/minute and routed Alpaca GET traffic through alpaca_get(). This includes stock/option bars, option chains, trades, snapshots, institutional samples, and the active-US-equity asset refresh used by holdings sanitation.
