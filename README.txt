@@ -1,3 +1,9 @@
+v27.27 — REMOVE EARNINGS 429 RETRY STORM
+- The market-wide Earnings scan now makes one Safari-safe request with a bounded 110-second window instead of launching up to four overlapping retries while the original Render job is still running.
+- The bulk reporter-price download skips slow serial per-symbol repairs, and historical enrichment is limited to the 12 rows the endpoint can return instead of computing 20 profiles and discarding 8.
+- Repeat scans reuse a new 5-minute cached payload. A failed refresh preserves prior results and reports “Earnings scan incomplete” rather than replacing the table with an unreadable-response error.
+- The five-day default, continuation/reversion scoring, event-session alignment, and click-to-load historical details remain unchanged.
+
 v27.26 — REBUILD TOP SETUPS HOLDINGS AS ONE SHARED UNIVERSE
 - Replaced up to 10 separate 18-month sector/stock RRG requests with one cached `/api/top-setup-universe` request. The backend deduplicates the supportive groups' top holdings, downloads their price history once, and computes each group from the shared frame.
 - The bulk scan skips Yahoo's potentially unbounded per-symbol repair pass; symbols missing from the bulk response are isolated rather than delaying every group beyond the client timeout.

@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.26"
+APP_VERSION = "27.27"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4336,7 +4336,10 @@ def api_postearnings_opportunities():
                     "recent_reporters":0,"diagnostics":diag}
 
         # One batch price request supplies both RRG and current post-earnings move.
-        prices=dl_prices(["SPY"]+reporters,"18mo")
+        # Market-wide discovery must stay bounded. Missing symbols are isolated
+        # from this pass rather than triggering a serial Yahoo repair cascade;
+        # ticker-specific history remains available on demand.
+        prices=dl_prices(["SPY"]+reporters,"18mo",repair_missing=False,attempts=1)
         rrg={r["ticker"]:r for r in dual_rrg_rows(prices,"SPY",reporters,8,8)}
 
         def current_from_frame(sym,event_date,event_meta=None):
@@ -4409,7 +4412,8 @@ def api_postearnings_opportunities():
             prelim.append((pre,sym,d,rot,cur))
         prelim.sort(reverse=True,key=lambda x:x[0])
 
-        # Historical work for the strongest 20 stock candidates after the cheap market-wide pre-rank.
+        # Historical work only for the 12 rows the endpoint can return. The old
+        # code enriched 20 and discarded 8, adding avoidable provider traffic.
         def enrich(item):
             pre,sym,d,rot,cur=item
             profile=cached(
@@ -4575,7 +4579,7 @@ def api_postearnings_opportunities():
 
         rows=[]
         with ThreadPoolExecutor(max_workers=4) as ex:
-            futs=[ex.submit(enrich,x) for x in prelim[:20]]
+            futs=[ex.submit(enrich,x) for x in prelim[:12]]
             for f in as_completed(futs):
                 try:
                     x=f.result()
@@ -4588,7 +4592,7 @@ def api_postearnings_opportunities():
                 "options_deferred":True}
 
     try:
-        key=f"postearnings-opportunities-v2:{recent_days}"
+        key=f"postearnings-opportunities-v3:{recent_days}"
         payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
@@ -9152,34 +9156,22 @@ async function hydratePostEarningsOptions(){
 async function runEarnings(){
  const st=document.getElementById("estatus");
  st.textContent="Scanning all sectors/themes for recent earnings opportunities…";
+ const previousResults=Array.isArray(earnResults)?earnResults.slice():[];
  try{
    const days=document.getElementById("earnDays").value||"5";
-   let response=null,raw="",j=null,lastErr=null;
-   const waits=[0,2500,6000,12000];
-   for(let attempt=0;attempt<waits.length;attempt++){
-     if(waits[attempt]){st.textContent=`Earnings service restarted or is busy · retrying ${attempt}/${waits.length-1}…`;await new Promise(r=>setTimeout(r,waits[attempt]));}
-     try{
-       response=await window.fetch(`/api/postearnings-opportunities?days=${encodeURIComponent(days)}`,{method:"GET",credentials:"same-origin",headers:{"Accept":"application/json"}});
-       raw=await response.text();j=null;
-       try{j=raw?JSON.parse(raw):null}catch(_e){}
-       if(response.ok&&j?.ok)break;
-       lastErr=new Error(j?.error||`Scan failed (${response.status})`);
-       if(![429,502,503,504].includes(response.status))throw lastErr;
-     }catch(e){
-       lastErr=e;
-       if(attempt===waits.length-1)throw e;
-       continue;
-     }
-   }
-   if(!response||!response.ok||!j?.ok){
-     if(response&&!j)throw Error(`Earnings service returned an unreadable response (${response.status})`);
-     throw lastErr||new Error("Earnings scan failed");
-   }
+   // This is one expensive cached server job. Do not retry it while the first
+   // request is still consuming the Render worker; overlapping retries caused
+   // the HTML 429 responses previously reported as "unreadable".
+   const j=await safeServiceFetchJson("/api/postearnings-opportunities",{params:{days},timeoutMs:110000});
    earnResults=j.results||[];
    st.textContent=`${j.recent_reporters||0} recent reporters · ${j.universe||0} unique holdings scanned · showing ${earnResults.length} curated opportunities`;
    renderEarnings();
    if(j.options_deferred) hydratePostEarningsOptions();
- }catch(e){st.innerHTML=`<span class="error">${e.message}</span>`}
+ }catch(e){
+   earnResults=previousResults;
+   st.innerHTML=`<span class="error">Earnings scan incomplete: ${e?.message||e}</span>${previousResults.length?` <span class="note">· showing ${previousResults.length} prior result${previousResults.length===1?"":"s"}</span>`:""}`;
+   if(previousResults.length)renderEarnings();
+ }
 }
 
 let historicalData=[];
