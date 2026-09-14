@@ -1,3 +1,9 @@
+v27.24 — SAFARI-SAFE TOP SETUPS + HONEST EMPTY STATES
+- Routed Top Setups holdings, early-reversal, and options-liquidity requests through validated same-origin URL builders with minimal Safari-safe fetch signatures. Top Setup scanning no longer directly constructs AbortController request objects for these stages.
+- A failed scan now preserves the last successful board and reports the exact failed stage. When no prior board exists, the panel explicitly says the scan did not complete instead of claiming there are no A-quality setups.
+- Options-provider failures are separated from genuine illiquidity. A batch with no usable provider responses can no longer make every candidate look like it failed the Liquid/Tradable gate.
+- Top Setup qualification remains unchanged: Full/Early RRG alignment, no rotating-out horizon, Liquid/Tradable options, no Value Acceptance rejection, valid structure, and underlying score at least 45.
+
 v27.23 — RECOVER SELECTED-TICKER OPTIONS/GEX FROM TRANSIENT 429S
 - Selected-ticker options and 0–30D GEX now reuse one bounded 0–35D Alpaca contract/snapshot download instead of fetching their heavily overlapping universes twice. Premium support and flow reuse that same cached payload.
 - A selected ticker now receives one delayed retry after a transient HTTP 429, honoring Retry-After when supplied. This remains bounded so it cannot recreate the earlier retry storm.

@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.23"
+APP_VERSION = "27.24"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5809,7 +5809,7 @@ function fmtCompact(n){
  return Math.round(x).toLocaleString();
 }
 let sectorData=[],sectorDataWeekly=[],currentSector=null,earnResults=[],liveStockData=[],liveSearchData=[],liveSearchSector=null,liveSearchLoading=false,sectorRequestSeq=0,previewTicker=null,previewPeriod="1m",previewRequestSeq=0;
-let globalTopSetupData=[],automaticTopSetupsRunning=false,automaticTopSetupsLastRun=0;
+let globalTopSetupData=[],automaticTopSetupsRunning=false,automaticTopSetupsLastRun=0,automaticTopSetupsError=null,automaticTopSetupsStage=null;
 
 let previewVPMode="auto",previewPayload=null,previewTimeframe="1d";
 let sectorRRGMode="fast", sectorRRGTimeframe="1d", sectorQuadrantFilter="all", dashboardPayload=null, dashboardHeatMode="composite";
@@ -6017,6 +6017,45 @@ async function safeTickerFetchJson(path,ticker,params={},opts={}){
  })();
  tickerRequestInflight.set(url,promise);
  try{return await promise}finally{tickerRequestInflight.delete(url)}
+}
+
+function safeServiceUrl(path,params={}){
+ const p=String(path||"");
+ // Keep service requests same-origin and reject malformed/control-character
+ // paths before Safari's fetch implementation sees them.
+ if(!/^\/api\/[A-Za-z0-9._\/-]+$/.test(p))throw new Error(`Invalid service path: ${p||"(empty)"}`);
+ const q=[];
+ Object.entries(params||{}).forEach(([k,v])=>{
+   if(v===undefined||v===null)return;
+   q.push(`${encodeURIComponent(String(k))}=${encodeURIComponent(String(v))}`);
+ });
+ return q.length?`${p}?${q.join("&")}`:p;
+}
+
+async function safeServiceFetchJson(path,{params={},method="GET",body=null,timeoutMs=35000}={}){
+ const url=safeServiceUrl(path,params),verb=String(method||"GET").toUpperCase();
+ let request;
+ try{
+   // Safari has been most reliable with the simplest possible GET signature.
+   // POST keeps only the scalar RequestInit fields required for JSON.
+   request=verb==="GET"
+     ? window.fetch(url)
+     : window.fetch(url,{method:verb,headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify(body||{})});
+ }catch(e){
+   throw new Error(`Request dispatch failed: ${e?.message||e}`);
+ }
+ const timeout=new Promise((_,reject)=>setTimeout(()=>reject(new Error(`Request timed out after ${timeoutMs}ms`)),timeoutMs));
+ let response;
+ try{response=await Promise.race([request,timeout]);}
+ catch(e){throw new Error(e?.message||String(e));}
+ let raw="",payload=null;
+ try{raw=await response.text();payload=raw?JSON.parse(raw):{};}
+ catch(e){
+   const plain=String(raw||"").replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,180);
+   throw new Error(plain||`Service returned an unreadable response (${response.status})`);
+ }
+ if(!response.ok||!payload?.ok)throw new Error(payload?.error||`Request failed (${response.status})`);
+ return payload;
 }
 async function openSectorStockTicker(rawTicker,{scroll=true}={}){
  const ticker=normalizeStockTicker(rawTicker);
@@ -8308,7 +8347,8 @@ async function runAutomaticTopSetups(force=false){
  }
  if(!sectorData?.length){if(st)st.textContent="Waiting for market data";return;}
 
- automaticTopSetupsRunning=true;globalTopSetupData=[];
+ const previousTopSetupData=Array.isArray(globalTopSetupData)?globalTopSetupData.slice():[];
+ automaticTopSetupsRunning=true;globalTopSetupData=[];automaticTopSetupsError=null;automaticTopSetupsStage="market scan";
  if(st)st.textContent="Scanning all sectors + themes…";
  renderTopSetups();
 
@@ -8320,21 +8360,21 @@ async function runAutomaticTopSetups(force=false){
    if(st)st.textContent=`Layer 1 · ${supportive.length}/${groups.length} supportive groups`;
 
    const pool=[];
+   let holdingsGroupsLoaded=0,holdingsGroupFailures=0;
    // Fetch holdings without changing currentSector/UI selection.
+   automaticTopSetupsStage="holdings scan";
    for(let n=0;n<supportive.length;n+=4){
      const batch=supportive.slice(n,n+4);
      const results=await Promise.all(batch.map(async g=>{
-       const ac=new AbortController();
-       const timer=setTimeout(()=>ac.abort(),20000);
        try{
          const key=cacheKeySector(g.ticker,"20");
          if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
-         const r=await fetch(`/api/sector/${encodeURIComponent(g.ticker)}?limit=20`,{headers:{"Accept":"application/json"},signal:ac.signal});
-         const j=await r.json();if(!r.ok||!j.ok)return null;
+         const j=await safeTickerFetchJson("/api/sector",g.ticker,{limit:20},{timeoutMs:30000,attempts:1});
          clientCache.sectors.set(key,j);return {g,j};
-       }catch(e){return null}
-       finally{clearTimeout(timer)}
+       }catch(e){console.warn(`Top Setups holdings failed for ${g.ticker}`,e);return null}
      }));
+     holdingsGroupsLoaded+=results.filter(Boolean).length;
+     holdingsGroupFailures+=results.filter(x=>!x).length;
      results.filter(Boolean).forEach(({g,j})=>{
        (j.results||[]).forEach(x=>{
          const f=x?.fast||x||{},t=x?.trend||{};
@@ -8346,6 +8386,7 @@ async function runAutomaticTopSetups(force=false){
      });
      if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+4,supportive.length)}/${supportive.length} supportive groups`;
    }
+   if(supportive.length&&holdingsGroupsLoaded===0)throw Error(`Holdings scan failed for all ${holdingsGroupFailures} supportive groups`);
 
    // Deduplicate overlapping ETF holdings; keep the strongest parent-group context.
    const dedupe=new Map();
@@ -8357,14 +8398,10 @@ async function runAutomaticTopSetups(force=false){
    if(!candidates.length)throw Error("No stocks passed the market-wide RRG trajectory gate.");
 
    if(st)st.textContent=`Layer 2.5 · checking early daily reversals on ${candidates.length} candidates`;
+   automaticTopSetupsStage="daily reversal scan";
    try{
      const tickerList=candidates.map(x=>String(x.ticker||"").toUpperCase()).filter(Boolean).join(",");
-     const url=`/api/early-reversal-scan?tickers=${encodeURIComponent(tickerList)}`;
-     const request=fetch(url);
-     const timeout=new Promise((_,reject)=>setTimeout(()=>reject(new Error("Layer 2.5 bulk scan timeout")),60000));
-     const resp=await Promise.race([request,timeout]);
-     const j=await resp.json();
-     if(!resp.ok||!j?.ok)throw new Error(j?.error||`Layer 2.5 bulk scan failed (${resp.status})`);
+     const j=await safeServiceFetchJson("/api/early-reversal-scan",{params:{tickers:tickerList},timeoutMs:60000});
      const signals=j.signals||{};
      candidates.forEach(x=>{const sig=signals[String(x.ticker||"").toUpperCase()];if(sig)x._earlyPriceSignal=sig;});
    }catch(e){
@@ -8376,20 +8413,20 @@ async function runAutomaticTopSetups(force=false){
    candidates=candidates.sort((a,b)=>v262EarlyMoveScore(b)-v262EarlyMoveScore(a)).slice(0,32);
 
    if(st)st.textContent=`Layer 3 · checking options on ${candidates.length} RRG candidates`;
+   automaticTopSetupsStage="options liquidity scan";
    {
-     const ac=new AbortController();
-     const timer=setTimeout(()=>ac.abort(),70000);
      try{
-       const or=await fetch("/api/options-scan",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({symbols:candidates.map(x=>x.ticker)}),signal:ac.signal});
-       const oj=await or.json();
-       if(or.ok&&oj.ok)(oj.results||[]).forEach(o=>{if(o?.ticker&&o.ok!==false)optionScanMap[o.ticker]=o});
+       const oj=await safeServiceFetchJson("/api/options-scan",{method:"POST",body:{symbols:candidates.map(x=>x.ticker)},timeoutMs:70000});
+       const returned=Array.isArray(oj.results)?oj.results:[],successful=returned.filter(o=>o?.ticker&&o.ok!==false),failed=returned.filter(o=>o?.ok===false);
+       if(!successful.length)throw new Error(`Options provider returned no usable results for ${candidates.length} candidates${failed.length?` (${failed.length} provider failures)`:""}`);
+       const successfulTickers=new Set(successful.map(o=>o.ticker));
+       successful.forEach(o=>{optionScanMap[o.ticker]=o});
+       candidates=candidates.filter(x=>successfulTickers.has(x.ticker)&&["Liquid","Tradable"].includes(optionScanMap[x.ticker]?.liquidity));
+       if(!candidates.length)throw new Error(`No liquid/tradable chains among ${successful.length} completed option checks${failed.length?`; ${failed.length} provider failures were excluded`:""}`);
      }catch(e){
-       throw new Error(e?.name==="AbortError"?"Options scan timed out — try again in a moment.":`Options scan failed: ${e?.message||e}`);
-     }finally{clearTimeout(timer)}
+       throw new Error(`Options scan failed: ${e?.message||e}`);
+     }
    }
-
-   candidates=candidates.filter(x=>["Liquid","Tradable"].includes(optionScanMap[x.ticker]?.liquidity));
-   if(!candidates.length)throw Error("No RRG candidates passed the Liquid / Tradable options gate.");
    // Persisted for the Early Turn Watch scanner: preliminaryRRGScore actively
    // deprioritizes Lagging-quadrant names, so they rarely survive into the
    // top-16 finalists below even though "still Lagging but the tail just
@@ -8406,6 +8443,7 @@ async function runAutomaticTopSetups(force=false){
    }).slice(0,16);
 
    if(st)st.textContent=`Layer 4 · resolving STRAT + value on ${finalists.length} finalists`;
+   automaticTopSetupsStage="STRAT and value scan";
    for(let n=0;n<finalists.length;n+=2){
      const batch=finalists.slice(n,n+2);
      await Promise.all(batch.map(async x=>{
@@ -8437,14 +8475,16 @@ async function runAutomaticTopSetups(force=false){
    };
 
    globalTopSetupData=finalists;
+   automaticTopSetupsError=null;automaticTopSetupsStage=null;
    automaticTopSetupsLastRun=Date.now();
    runPremiumSupportInBackground().then(()=>{
      setTimeout(()=>rehydrateMissingPremiumSupport(finalists),1800);
    });
    if(st)st.textContent=`Market-wide scan complete · ${groups.length} groups considered · ${finalists.length} finalists`;
  }catch(e){
-   globalTopSetupData=[];
-   if(st)st.textContent=`Top Setup scan: ${e.message}`;
+   globalTopSetupData=previousTopSetupData;
+   automaticTopSetupsError={stage:automaticTopSetupsStage||"scan",message:e?.message||String(e),at:Date.now()};
+   if(st)st.textContent=`Top Setup scan incomplete · ${automaticTopSetupsError.stage}: ${automaticTopSetupsError.message}`;
  }finally{
    automaticTopSetupsRunning=false;
    renderTopSetups();
@@ -8756,9 +8796,12 @@ function renderTopSetups(){
  const usingPremiumWatch=false;
  updateSpeculativeSignalsVisibility(qualified.length);
  const rows=qualified.slice(0,6);
- if(st)st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · qualified on underlying setup · premium is entry quality` : "No A-quality setup currently";
+ if(st){
+   if(automaticTopSetupsError)st.textContent=`Scan incomplete · ${automaticTopSetupsError.stage}: ${automaticTopSetupsError.message}${source.length?" · showing prior results":""}`;
+   else st.textContent=rows.length?`${rows.length} candidate${rows.length===1?"":"s"} · qualified on underlying setup · premium is entry quality` : "No A-quality setup currently";
+ }
  if(!rows.length){
-   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":"No market-wide A-quality setup currently. Premium state does not determine qualification.";
+   const msg=automaticTopSetupsRunning?"Scanning all supportive sectors / themes…":automaticTopSetupsError?`Top Setups did not complete the ${automaticTopSetupsError.stage}. This is a scan failure, not a valid zero-setup result. ${automaticTopSetupsError.message}`:"No market-wide A-quality setup currently. Premium state does not determine qualification.";
    // True worst case: nothing qualifies and no premium-support watch exists either.
    // Show the nearest misses by raw score so it's clear whether this is a
    // genuinely quiet market or something is actually broken.

@@ -36,3 +36,25 @@ def test_selected_options_request_has_one_bounded_rate_limit_retry():
     assert 'attempts:2' in loader
     assert 'rateLimitWaitMs:10000' in loader
     assert 'attempts:3' not in loader
+
+
+def test_top_setups_distinguishes_scan_failure_from_valid_empty_result():
+    assert 'automaticTopSetupsError={stage:automaticTopSetupsStage' in APP_SOURCE
+    assert 'This is a scan failure, not a valid zero-setup result.' in APP_SOURCE
+    assert 'globalTopSetupData=previousTopSetupData' in APP_SOURCE
+
+
+def test_top_setup_network_stages_use_safe_service_requests():
+    scan_start = APP_SOURCE.index('async function runAutomaticTopSetups(')
+    scan_end = APP_SOURCE.index('\nfunction openTopSetupDeepDive(', scan_start)
+    scan = APP_SOURCE[scan_start:scan_end]
+
+    assert 'safeTickerFetchJson("/api/sector"' in scan
+    assert 'safeServiceFetchJson("/api/early-reversal-scan"' in scan
+    assert 'safeServiceFetchJson("/api/options-scan"' in scan
+    assert 'new AbortController()' not in scan
+
+
+def test_top_setup_options_failures_cannot_masquerade_as_illiquidity():
+    assert 'Options provider returned no usable results' in APP_SOURCE
+    assert 'successfulTickers.has(x.ticker)' in APP_SOURCE
