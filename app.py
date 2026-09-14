@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.24"
+APP_VERSION = "27.25"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -8360,7 +8360,7 @@ async function runAutomaticTopSetups(force=false){
    if(st)st.textContent=`Layer 1 · ${supportive.length}/${groups.length} supportive groups`;
 
    const pool=[];
-   let holdingsGroupsLoaded=0,holdingsGroupFailures=0;
+   let holdingsGroupsLoaded=0,holdingsGroupFailures=0,holdingsFailureReasons=[];
    // Fetch holdings without changing currentSector/UI selection.
    automaticTopSetupsStage="holdings scan";
    for(let n=0;n<supportive.length;n+=4){
@@ -8369,9 +8369,15 @@ async function runAutomaticTopSetups(force=false){
        try{
          const key=cacheKeySector(g.ticker,"20");
          if(clientCache.sectors.has(key))return {g,j:clientCache.sectors.get(key)};
-         const j=await safeTickerFetchJson("/api/sector",g.ticker,{limit:20},{timeoutMs:30000,attempts:1});
+         const endpoint=safeTickerEndpoint("/api/sector",g.ticker);
+         const j=await safeServiceFetchJson(endpoint,{params:{limit:20},timeoutMs:30000});
          clientCache.sectors.set(key,j);return {g,j};
-       }catch(e){console.warn(`Top Setups holdings failed for ${g.ticker}`,e);return null}
+       }catch(e){
+         const reason=e?.message||String(e);
+         holdingsFailureReasons.push(`${g.ticker}: ${reason}`);
+         console.warn(`Top Setups holdings failed for ${g.ticker}`,e);
+         return null;
+       }
      }));
      holdingsGroupsLoaded+=results.filter(Boolean).length;
      holdingsGroupFailures+=results.filter(x=>!x).length;
@@ -8386,7 +8392,10 @@ async function runAutomaticTopSetups(force=false){
      });
      if(st)st.textContent=`Layer 2 · scanned ${Math.min(n+4,supportive.length)}/${supportive.length} supportive groups`;
    }
-   if(supportive.length&&holdingsGroupsLoaded===0)throw Error(`Holdings scan failed for all ${holdingsGroupFailures} supportive groups`);
+   if(supportive.length&&holdingsGroupsLoaded===0){
+     const first=holdingsFailureReasons[0];
+     throw Error(`Holdings scan failed for all ${holdingsGroupFailures} supportive groups${first?` · first failure: ${first}`:""}`);
+   }
 
    // Deduplicate overlapping ETF holdings; keep the strongest parent-group context.
    const dedupe=new Map();

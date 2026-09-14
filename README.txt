@@ -1,3 +1,8 @@
+v27.25 — FIX SAFARI HOLDINGS-SCAN DISPATCH
+- Top Setups holdings requests now use the minimal GET-only Safari service path rather than the ticker request helper's AbortController/RequestInit form.
+- If every supportive group fails, the scan status now includes the first ticker-specific failure reason instead of only reporting a group count.
+- No Top Setup universe, scoring, liquidity, or qualification rules changed.
+
 v27.24 — SAFARI-SAFE TOP SETUPS + HONEST EMPTY STATES
 - Routed Top Setups holdings, early-reversal, and options-liquidity requests through validated same-origin URL builders with minimal Safari-safe fetch signatures. Top Setup scanning no longer directly constructs AbortController request objects for these stages.
 - A failed scan now preserves the last successful board and reports the exact failed stage. When no prior board exists, the panel explicitly says the scan did not complete instead of claiming there are no A-quality setups.

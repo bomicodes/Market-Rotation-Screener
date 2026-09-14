@@ -49,7 +49,8 @@ def test_top_setup_network_stages_use_safe_service_requests():
     scan_end = APP_SOURCE.index('\nfunction openTopSetupDeepDive(', scan_start)
     scan = APP_SOURCE[scan_start:scan_end]
 
-    assert 'safeTickerFetchJson("/api/sector"' in scan
+    assert 'safeServiceFetchJson(endpoint,{params:{limit:20}' in scan
+    assert 'safeTickerFetchJson("/api/sector"' not in scan
     assert 'safeServiceFetchJson("/api/early-reversal-scan"' in scan
     assert 'safeServiceFetchJson("/api/options-scan"' in scan
     assert 'new AbortController()' not in scan
@@ -58,3 +59,8 @@ def test_top_setup_network_stages_use_safe_service_requests():
 def test_top_setup_options_failures_cannot_masquerade_as_illiquidity():
     assert 'Options provider returned no usable results' in APP_SOURCE
     assert 'successfulTickers.has(x.ticker)' in APP_SOURCE
+
+
+def test_holdings_failure_reports_first_real_reason():
+    assert 'holdingsFailureReasons.push(`${g.ticker}: ${reason}`)' in APP_SOURCE
+    assert 'first failure: ${first}' in APP_SOURCE
