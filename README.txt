@@ -1,3 +1,8 @@
+v27.30 — COMPLETE RECENT-EARNINGS MERGE + WORKING HISTORY LOAD
+- The selected recency now means actual trading dates (for example, five trading days) rather than an oversized calendar-day approximation that allowed stale reporters into the table.
+- Finnhub, Nasdaq, and Yahoo recent calendars are merged for only those requested dates. A partial Finnhub response no longer suppresses newer reporters found by the public calendars.
+- Lazy historical cells now show LOAD HISTORY instead of undefined/null fields, and the History button now actually requests and displays that ticker's profile.
+
 v27.29 — LIGHTWEIGHT EARNINGS SCAN / 110-SECOND TIMEOUT FIX
 - The main Earnings scan no longer computes up to 12 four-year historical earnings profiles before returning. It now returns current reaction/RRG candidates immediately; historical profiles remain available on demand through each ticker's History control.
 - Post-Earnings option hydration now uses the scan's setup type for DTE selection instead of silently recomputing another historical profile per ticker, and browser concurrency is reduced from three option requests to two.

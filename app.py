@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.29"
+APP_VERSION = "27.30"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2015,8 +2015,10 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
     Historical earnings profiles are loaded separately, on demand.
     """
     now = pd.Timestamp.now().normalize()
-    calendar_days = int(recent_trading_days * 1.8) + 5
-    start = now - pd.Timedelta(days=calendar_days)
+    # "5 days" means five trading dates, not an arbitrary two-week calendar
+    # range. This keeps stale reporters out while naturally crossing weekends.
+    days = list(pd.bdate_range(end=now, periods=recent_trading_days))
+    start = days[0].normalize()
     wanted = set(tickers)
     found = {}
     diag = {
@@ -2037,8 +2039,6 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
                 found[t] = meta
                 diag["finnhub"] += 1
 
-    # Build weekday list once.
-    days = [d for d in pd.date_range(start, now, freq="D") if d.weekday() < 5]
     diag["calendar_days_checked"] = len(days)
 
     # 2) Optional Unusual Whales paid API.
@@ -2059,9 +2059,9 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
                         found[t] = meta
                         diag["uw"] += 1
 
-    # 3 + 4) Nasdaq and Yahoo are fallbacks only. When the configured Finnhub
-    # range request found relevant reporters, fan-out across every weekday adds
-    # dozens of requests without improving the normal scan.
+    # 3 + 4) Merge the public calendars for only the requested trading dates.
+    # Finnhub can return a valid but incomplete range, so the presence of one
+    # Finnhub result must not suppress other recent reporters.
     def public_day(d):
         ds = pd.Timestamp(d).strftime("%Y-%m-%d")
         nkey = f"nasdaq-calendar:{ds}"
@@ -2070,28 +2070,33 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
         ymap = cached(ykey, lambda: yahoo_calendar_for_day(d), ttl=1800)
         return nmap, ymap
 
-    if not found:
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            futures = {ex.submit(public_day, d): d for d in days}
-            for fut in as_completed(futures):
-                try:
-                    nmap, ymap = fut.result()
-                except Exception:
-                    nmap, ymap = {}, {}
+    with ThreadPoolExecutor(max_workers=min(5,len(days))) as ex:
+        futures = {ex.submit(public_day, d): d for d in days}
+        for fut in as_completed(futures):
+            try:
+                nmap, ymap = fut.result()
+            except Exception:
+                nmap, ymap = {}, {}
 
-                for t, meta in nmap.items():
-                    if t in wanted and t not in found:
-                        found[t] = meta
-                        diag["nasdaq"] += 1
+            for t, meta in nmap.items():
+                if t in wanted and t not in found:
+                    found[t] = meta
+                    diag["nasdaq"] += 1
 
-                for t, ed in ymap.items():
-                    if t in wanted and t not in found:
-                        found[t] = {
-                            "date": ed,
-                            "time": None,
-                            "source": "Yahoo earnings calendar"
-                        }
-                        diag["yahoo"] += 1
+            for t, ed in ymap.items():
+                if t in wanted and t not in found:
+                    found[t] = {
+                        "date": ed,
+                        "time": None,
+                        "source": "Yahoo earnings calendar"
+                    }
+                    diag["yahoo"] += 1
+
+    # Defensive filtering: providers occasionally include adjacent dates in a
+    # range response. Never show an older event than the selected trading window.
+    valid_dates={pd.Timestamp(d).normalize() for d in days}
+    found={t:m for t,m in found.items()
+           if pd.Timestamp(m.get("date")).normalize() in valid_dates}
 
     diag["found"] = len(found)
     return found, diag
@@ -4529,7 +4534,7 @@ def api_postearnings_opportunities():
                 "options_deferred":True}
 
     try:
-        key=f"postearnings-opportunities-v4:{recent_days}"
+        key=f"postearnings-opportunities-v5:{recent_days}"
         payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
@@ -8988,7 +8993,7 @@ function renderEarnings(){
    return moverOk&&setupOk&&stageOk&&dirOk&&execOk&&(!search||String(x.ticker||"").includes(search)||String(x.name||"").toUpperCase().includes(search));
  });
  document.getElementById("earnRows").innerHTML=arr.map((x,k)=>{
-   const p=x.profile||{},r=x.rotation||{},c=x.best_contract,id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
+   const p=x.profile||null,r=x.rotation||{},c=x.best_contract,id=`det-${x.ticker.replace(/[^A-Z0-9]/g,"")}`;
    const exec=c?.execution_quality||"No executable OTM";
    const execClass=exec==="Wide but Active"?"execWide":(c?"execGood":"optBad");
    const contract=x.options_loading?`<span class="note">Loading OTM contracts…</span>`:(c?`<div class="peContract"><b>${c.expiration}${c.dte==null?"":` (${c.dte}D)`} · ${c.strike}${String(c.type||"").toLowerCase().startsWith("p")?"P":"C"}</b><div class="tiny">$${Number(c.mid||0).toFixed(2)} mid · ${Number(c.otm_pct||0).toFixed(1)}% OTM · Δ ${c.delta==null?"—":Number(c.delta).toFixed(2)}</div><div class="tiny ${execClass}">${exec} · spread ${c.spread_pct==null?"—":Number(c.spread_pct).toFixed(1)+"%"} · OI ${fmtCompact(c.open_interest)} · vol ${fmtCompact(c.volume)}</div><div class="tiny">Historical move coverage: ${c.expected_move_coverage==null?"—":Math.round(c.expected_move_coverage*100)+"%"}</div></div>`:`<span class="optBad">${x.options_execution||"No executable OTM contract"}</span>`);
@@ -8997,9 +9002,15 @@ function renderEarnings(){
    const flags=`${x.setup_type==="CONTINUATION"?'<span class="histRunner">CONTINUATION</span>':'<span class="reversionFlag">REVERSION</span>'}${structureBadge}${x.reversion_confirmed?'<span class="histRunner">REVERSION CONFIRMED</span>':""}${x.round_trip?'<span class="givebackFlag">ROUND TRIP</span>':""}`;
    const windowNote=`<div class="tiny"><b>${structure}</b>${x.reaction_retained_pct==null?"":` · reaction retained ${Number(x.reaction_retained_pct).toFixed(0)}%`}${x.post_reaction_range_pct==null?"":` · post-reaction range ${Number(x.post_reaction_range_pct).toFixed(1)}%`}</div><div class="tiny">Historical magnitude: ${x.setup_stage||"—"} · consumed ${x.move_consumed_pct==null?"—":Number(x.move_consumed_pct).toFixed(0)+"%"} · magnitude runway ${x.remaining_runway_pct==null?"—":Number(x.remaining_runway_pct).toFixed(0)+"%"}</div><div class="tiny">Drift window: ${x.drift_window_progress_pct==null?"—":x.drift_window_progress_pct+"%"} of ~${x.drift_window_sessions}D${x.setup_type==="REVERSION"&&x.recovery_pct!=null?` · reaction recovery ${Number(x.recovery_pct).toFixed(0)}%`:""}</div>`;
    const surpriseNote=x.eps_surprise_pct==null?"":`<div class="tiny">EPS surprise: ${x.eps_surprise_pct>0?"+":""}${x.eps_surprise_pct}%</div>`;
-   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${x.trade_score==null?`SETUP ${Number(x.opportunity_score||0).toFixed(0)}`:`TRADE ${Number(x.trade_score||0).toFixed(0)} · setup ${Number(x.opportunity_score||0).toFixed(0)}`}/100</div>${flags}<div class="tiny">${x.trade_direction||x.direction||"—"}</div></td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div>${surpriseNote}</td><td>${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div></td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div>${windowNote}</td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
+   const historySummary=p?`${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div>`:`<span class="mover">LOAD HISTORY</span><div class="tiny">Current reaction: ${fmt(x.expected_continuation_pct)}%</div>`;
+   return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${x.trade_score==null?`SETUP ${Number(x.opportunity_score||0).toFixed(0)}`:`TRADE ${Number(x.trade_score||0).toFixed(0)} · setup ${Number(x.opportunity_score||0).toFixed(0)}`}/100</div>${flags}<div class="tiny">${x.trade_direction||x.direction||"—"}</div></td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div>${surpriseNote}</td><td>${historySummary}</td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div>${windowNote}</td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
  }).join("");
- document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{e.stopPropagation();document.getElementById(b.dataset.id)?.classList.toggle("open")}));
+ document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{
+   e.stopPropagation();
+   const item=earnResults.find(x=>x.ticker===b.dataset.ticker);
+   if(item&&!item.profile&&!item.historyLoading)loadHistory(b.dataset.ticker,b.dataset.event,b.dataset.id);
+   else document.getElementById(b.dataset.id)?.classList.toggle("open");
+ }));
  document.querySelectorAll("[data-pe-open]").forEach(row=>row.addEventListener("click",e=>{
    if(e.target.closest(".detailBtn"))return;
    openTopSetupDeepDive(row.dataset.peOpen,null,"chart");

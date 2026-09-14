@@ -36,7 +36,7 @@ def test_market_wide_earnings_scan_defers_all_historical_profiles():
     assert "for pre,sym,d,rot,cur in prelim[:12]:" in scanner
     assert "earnings_profile(" not in scanner
     assert "merged_historical_earnings_dates(" not in scanner
-    assert 'postearnings-opportunities-v4:' in scanner
+    assert 'postearnings-opportunities-v5:' in scanner
 
 
 def test_options_hydration_does_not_recompute_history():
@@ -48,6 +48,34 @@ def test_options_hydration_does_not_recompute_history():
     assert "merged_historical_earnings_dates(" not in endpoint
     assert 'setup_type:x.setup_type||""' in APP_SOURCE
     assert "Promise.all([worker(),worker()])" in APP_SOURCE
+
+
+def test_recent_calendar_merges_public_results_even_when_finnhub_is_partial(monkeypatch):
+    today = appmod.pd.Timestamp.now().normalize()
+    monkeypatch.setattr(appmod, "FINNHUB_API_KEY", "key")
+    monkeypatch.setattr(appmod, "UW_API_TOKEN", "")
+    monkeypatch.setattr(appmod, "cached", lambda key, fn, ttl=0: fn())
+    monkeypatch.setattr(appmod, "finnhub_earnings_calendar", lambda start, end: {
+        "AAA": {"date": today, "source": "Finnhub"}
+    })
+    monkeypatch.setattr(appmod, "nasdaq_calendar_for_day", lambda day: {
+        "BBB": {"date": appmod.pd.Timestamp(day), "source": "Nasdaq"}
+    } if appmod.pd.Timestamp(day).normalize() == today else {})
+    monkeypatch.setattr(appmod, "yahoo_calendar_for_day", lambda day: {})
+
+    found, diagnostics = appmod.discover_recent_earnings(["AAA", "BBB"], 5)
+
+    assert set(found) == {"AAA", "BBB"}
+    assert diagnostics["calendar_days_checked"] == 5
+
+
+def test_history_button_loads_profile_and_never_renders_undefined():
+    start = APP_SOURCE.index("function renderEarnings()")
+    end = APP_SOURCE.index("async function hydratePostEarningsOptions()", start)
+    renderer = APP_SOURCE[start:end]
+    assert 'const p=x.profile||null' in renderer
+    assert 'loadHistory(b.dataset.ticker,b.dataset.event,b.dataset.id)' in renderer
+    assert 'LOAD HISTORY' in renderer
 
 
 def test_scan_holdings_prefers_persistent_cache(monkeypatch):
