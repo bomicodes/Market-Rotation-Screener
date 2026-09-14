@@ -1,3 +1,8 @@
+v27.29 — LIGHTWEIGHT EARNINGS SCAN / 110-SECOND TIMEOUT FIX
+- The main Earnings scan no longer computes up to 12 four-year historical earnings profiles before returning. It now returns current reaction/RRG candidates immediately; historical profiles remain available on demand through each ticker's History control.
+- Post-Earnings option hydration now uses the scan's setup type for DTE selection instead of silently recomputing another historical profile per ticker, and browser concurrency is reduced from three option requests to two.
+- Broad scans prefer persistent last-known-good ETF holdings before contacting every issuer. When Finnhub's single range calendar finds reporters, Nasdaq/Yahoo weekday fan-out is skipped; those public calendars remain the fallback when the range source returns nothing.
+
 v27.28 — ALPACA BULK PRICE SOURCE FOR EARNINGS
 - The market-wide Earnings scan now loads SPY and all recent reporters through Alpaca's multi-symbol daily-bars endpoint in bounded chunks, replacing the large Yahoo batch that could fail the entire request with no usable frame.
 - The paid Alpaca SIP feed is primary; one bounded Yahoo bulk request remains as fallback. Missing symbols are isolated, and ticker-specific history remains click-to-load.

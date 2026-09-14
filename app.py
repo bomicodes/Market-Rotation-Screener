@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.28"
+APP_VERSION = "27.29"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -1776,6 +1776,22 @@ def get_fund_holdings(etf):
             return holdings,f"Cached holdings · {source or 'last known good'} · {updated_at}"
         raise live_err
 
+def get_fund_holdings_scan(etf):
+    """Prefer last-known-good holdings for broad synchronous scans.
+
+    A market-wide scan should not contact every issuer sequentially on a cold
+    Render worker. Interactive ETF refreshes still use get_fund_holdings().
+    """
+    etf=str(etf or "").upper().strip()
+    memory=CACHE.get(f"holdings:{etf}")
+    if isinstance(memory,tuple) and len(memory)==2 and memory[1]:
+        return memory[1]
+    saved=_load_holdings_cache(etf)
+    if saved:
+        holdings,source,updated_at=saved
+        return holdings,f"Cached holdings · {source or 'last known good'} · {updated_at}"
+    return get_fund_holdings(etf)
+
 
 
 def finnhub_earnings_calendar(start_date, end_date):
@@ -2043,7 +2059,9 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
                         found[t] = meta
                         diag["uw"] += 1
 
-    # 3 + 4) Nasdaq and Yahoo public calendars, parallelized and cached.
+    # 3 + 4) Nasdaq and Yahoo are fallbacks only. When the configured Finnhub
+    # range request found relevant reporters, fan-out across every weekday adds
+    # dozens of requests without improving the normal scan.
     def public_day(d):
         ds = pd.Timestamp(d).strftime("%Y-%m-%d")
         nkey = f"nasdaq-calendar:{ds}"
@@ -2052,27 +2070,28 @@ def discover_recent_earnings(tickers, recent_trading_days=10):
         ymap = cached(ykey, lambda: yahoo_calendar_for_day(d), ttl=1800)
         return nmap, ymap
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futures = {ex.submit(public_day, d): d for d in days}
-        for fut in as_completed(futures):
-            try:
-                nmap, ymap = fut.result()
-            except Exception:
-                nmap, ymap = {}, {}
+    if not found:
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            futures = {ex.submit(public_day, d): d for d in days}
+            for fut in as_completed(futures):
+                try:
+                    nmap, ymap = fut.result()
+                except Exception:
+                    nmap, ymap = {}, {}
 
-            for t, meta in nmap.items():
-                if t in wanted and t not in found:
-                    found[t] = meta
-                    diag["nasdaq"] += 1
+                for t, meta in nmap.items():
+                    if t in wanted and t not in found:
+                        found[t] = meta
+                        diag["nasdaq"] += 1
 
-            for t, ed in ymap.items():
-                if t in wanted and t not in found:
-                    found[t] = {
-                        "date": ed,
-                        "time": None,
-                        "source": "Yahoo earnings calendar"
-                    }
-                    diag["yahoo"] += 1
+                for t, ed in ymap.items():
+                    if t in wanted and t not in found:
+                        found[t] = {
+                            "date": ed,
+                            "time": None,
+                            "source": "Yahoo earnings calendar"
+                        }
+                        diag["yahoo"] += 1
 
     diag["found"] = len(found)
     return found, diag
@@ -4361,7 +4380,7 @@ def api_postearnings_opportunities():
         all_holdings={}; parent_map={}; sources=set()
         for etf in RRG_UNIVERSE:
             try:
-                holdings,source=cached(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+                holdings,source=get_fund_holdings_scan(etf)
                 holdings=apply_sector_supplements(etf,holdings); sources.add(source)
                 for h in holdings:
                     sym=str(h.get("ticker") or "").upper().strip()
@@ -4458,179 +4477,51 @@ def api_postearnings_opportunities():
             prelim.append((pre,sym,d,rot,cur))
         prelim.sort(reverse=True,key=lambda x:x[0])
 
-        # Historical work only for the 12 rows the endpoint can return. The old
-        # code enriched 20 and discarded 8, adding avoidable provider traffic.
-        def enrich(item):
-            pre,sym,d,rot,cur=item
-            profile=cached(
-                f"peprofile-v2:{sym}:{d.strftime('%Y-%m-%d')}",
-                lambda:earnings_profile(sym,merged_historical_earnings_dates(sym,d.strftime("%Y-%m-%d"))),
-                ttl=3600,
-            )
-            if not profile:return None
-            behavior=str(profile.get("behavior") or "MIXED")
-            # Continuation and reversion are both valid post-earnings archetypes.
-            # Historical mover quality is rewarded equally; the current tape/RRG
-            # decides whether that archetype is actually actionable now.
-            hist_score=float(profile.get("score") or 0)*4.0
-            if behavior in ("CONTINUATION","REVERSION"): hist_score+=20.0
-
-            f=rot.get("fast") or {}; tr=rot.get("trend") or {}
-            def rotating_in(m):
-                return ((m.get("tail_trajectory")=="Rotating In") if m.get("tail_trajectory") else (m.get("rs_up") is True and m.get("mom_up") is True))
-            def rotating_out(m):
-                return ((m.get("tail_trajectory")=="Rotating Out") if m.get("tail_trajectory") else (m.get("rs_up") is False and m.get("mom_up") is False))
-            f_in,t_in=rotating_in(f),rotating_in(tr)
-            f_out,t_out=rotating_out(f),rotating_out(tr)
-
-            move=float(cur.get("current_move_pct") or 0)
-            day1_move=_safe_float(cur.get("day1_move_pct"))
-            reaction_move=day1_move if day1_move is not None and abs(day1_move)>=0.75 else move
-            reaction_sign=1.0 if reaction_move>=0 else -1.0
-            expected=max(float(profile.get("median_exc10") or 0),float(profile.get("median_exc14") or 0),0.01)
-            move_consumed_pct=round(100.0*abs(move)/expected,1)
-            remaining_runway_pct=round(max(0.0,100.0-move_consumed_pct),1)
-            remaining_runway_pct_uncapped=round(100.0-move_consumed_pct,1)
-            remaining_runway_abs=round(max(0.0,expected-abs(move)),2)
-            if move_consumed_pct<35: setup_stage="FRESH"
-            elif move_consumed_pct<65: setup_stage="DEVELOPING"
-            elif move_consumed_pct<90: setup_stage="MATURE"
-            else: setup_stage="EXTENDED"
-
-            # Post-reaction structure is a second dimension from historical
-            # magnitude consumption. A >100% historical move can remain actionable
-            # if the overnight/Day-1 repricing is retained and price compresses.
-            reaction_retained=_safe_float(cur.get("reaction_retained_pct"))
-            post_range=_safe_float(cur.get("post_reaction_range_pct"))
-            drift_day1=_safe_float(cur.get("drift_from_day1_pct"))
-            sessions_now=int(cur.get("sessions_since") or 0)
-            large_reaction=abs(reaction_move)>=max(5.0,expected*0.45)
-            held_reaction=(reaction_retained is not None and reaction_retained>=65 and (move*reaction_move)>0)
-            compressed=bool(sessions_now>=3 and post_range is not None and post_range<=max(8.0,abs(reaction_move)*0.35))
-            post_structure="ACTIVE REACTION"
-            structure_bonus=0.0
-            second_leg=False
-            # setup_type is assigned below; classify direction-agnostically here.
-            if large_reaction and held_reaction and compressed:
-                post_structure="POST-EARNINGS BASE"; structure_bonus=10.0
-            elif large_reaction and held_reaction:
-                post_structure="HOLDING REACTION"; structure_bonus=5.0
-            elif reaction_retained is not None and reaction_retained<=25:
-                post_structure="REACTION FADING"
-
-            expected_window=14 if profile.get("has_exc14_data") else 10
-            sessions_since=cur.get("sessions_since")
-            window_progress_pct=round(min(150.0,100.0*sessions_since/expected_window),1) if sessions_since else None
-
-            retained_pct=None; round_trip=False; recovery_pct=None
-            if day1_move is not None and abs(day1_move)>=1.0 and sessions_since and sessions_since>1:
-                retained_pct=round(100.0*move/day1_move,1)
-                if (move*day1_move)<0 or retained_pct<=15:
-                    round_trip=True
-                if (move*day1_move)>=0:
-                    recovery_pct=round(max(0.0,100.0*(1.0-abs(move)/abs(day1_move))),1)
-                else:
-                    recovery_pct=round(100.0+100.0*abs(move)/abs(day1_move),1)
-
-            setup_type="REVERSION" if behavior=="REVERSION" else "CONTINUATION"
-            if setup_type=="REVERSION":
-                trade_direction="bearish" if reaction_sign>0 else "bullish"
-                directional_rotation=(f_out or t_out) if trade_direction=="bearish" else (f_in or t_in)
-                reversion_confirmed=bool((recovery_pct or 0)>=25 and directional_rotation)
-                if reversion_confirmed and sessions_now>=3:
-                    post_structure="REVERSION BASE"; structure_bonus=max(structure_bonus,8.0)
-            else:
-                trade_direction="bullish" if reaction_sign>0 else "bearish"
-                directional_rotation=(f_in or t_in) if trade_direction=="bullish" else (f_out or t_out)
-                reversion_confirmed=False
-                if post_structure=="POST-EARNINGS BASE" and directional_rotation:
-                    post_structure="SECOND-LEG SETUP"; structure_bonus=14.0; second_leg=True
-
-            # Direction-aware RRG: bullish trades want NE/strengthening rotation;
-            # bearish trades want SW/weakening rotation.
-            if trade_direction=="bullish":
-                rot_score=(12 if f_in else 0)+(8 if t_in else 0)+(5 if f.get("quadrant") in ("Leading","Improving") else 0)
-            else:
-                rot_score=(12 if f_out else 0)+(8 if t_out else 0)+(5 if f.get("quadrant") in ("Weakening","Lagging") else 0)
-
-            current_score=0.0
-            if setup_type=="CONTINUATION":
-                current_score+=min(8.0,abs(reaction_move)*1.1)
-                if move_consumed_pct<35: current_score+=12
-                elif move_consumed_pct<65: current_score+=9
-                elif move_consumed_pct<90: current_score+=4
-                else:
-                    # Do not punish a historically oversized move if the initial
-                    # earnings repricing has been retained and built a new base.
-                    current_score+=(-1 if post_structure in ("HOLDING REACTION","POST-EARNINGS BASE") else 4 if second_leg else -8)
-                current_score+=structure_bonus
-                if retained_pct is not None and retained_pct>=50 and not round_trip: current_score+=4
-                if round_trip: current_score-=15
-            else:
-                # Reversion setups become interesting after a meaningful initial
-                # expansion begins to unwind; support/reclaim is proxied here by
-                # recovery + directionally confirming RRG rather than blindly
-                # buying/selling against the original reaction.
-                current_score+=min(10.0,abs(reaction_move))
-                rp=float(recovery_pct or 0)
-                if 25<=rp<60: current_score+=8
-                elif 60<=rp<=125: current_score+=12
-                elif rp>125: current_score+=8
-                if reversion_confirmed: current_score+=8
-                else: current_score-=6
-                if abs(reaction_move)/expected>=0.65: current_score+=4
-
-            if window_progress_pct is not None and window_progress_pct>=100 and setup_type=="CONTINUATION" and post_structure not in ("POST-EARNINGS BASE","SECOND-LEG SETUP"):
-                current_score-=6
-
+        # Return the ranked tape/rotation candidates immediately. Historical
+        # profiles are intentionally lazy-loaded by /api/earnings-history when
+        # the user opens History; they must never hold this broad scan hostage.
+        rows=[]
+        for pre,sym,d,rot,cur in prelim[:12]:
             meta=recent_map.get(sym) or {}
-            surprise_pct=None
+            f=rot.get("fast") or {}; tr=rot.get("trend") or {}
+            move=float(cur.get("current_move_pct") or 0)
+            day1=_safe_float(cur.get("day1_move_pct"))
+            reaction=day1 if day1 is not None and abs(day1)>=0.75 else move
+            retention=_safe_float(cur.get("reaction_retained_pct"))
+            sessions=int(cur.get("sessions_since") or 0)
+            fading=bool(reaction and ((move*reaction)<0 or (retention is not None and retention<=25)))
+            setup_type="REVERSION" if fading else "CONTINUATION"
+            direction=("bearish" if reaction>=0 else "bullish") if fading else ("bullish" if reaction>=0 else "bearish")
+            if sessions<=2: stage="FRESH"
+            elif sessions<=5: stage="DEVELOPING"
+            elif sessions<=10: stage="MATURE"
+            else: stage="EXTENDED"
+            favorable=(f.get("quadrant") in (("Leading","Improving") if direction=="bullish" else ("Weakening","Lagging")))
+            score=max(0.0,min(100.0,35.0+min(30.0,abs(reaction)*2.0)+min(20.0,pre*.35)+(15.0 if favorable else 0.0)))
             est=_safe_float(meta.get("eps_estimate")); act=_safe_float(meta.get("eps_actual"))
-            if est not in (None,0) and act is not None:
-                surprise_pct=round((act-est)/abs(est)*100,1)
-                if setup_type=="CONTINUATION":
-                    aligned=(surprise_pct>0 and reaction_move>=0) or (surprise_pct<0 and reaction_move<0)
-                    if aligned: current_score+=min(8.0,abs(surprise_pct)*0.15)
-
-            total=max(0.0,min(100.0,.50*hist_score+current_score+rot_score))
-            return {
+            surprise=round((act-est)/abs(est)*100,1) if est not in (None,0) and act is not None else None
+            rows.append({
                 "ticker":sym,"name":all_holdings[sym].get("name"),
                 "earnings_date":d.strftime("%Y-%m-%d"),
                 "calendar_days_ago":max(0,(now-d).days),"parents":parent_map.get(sym,[]),
-                "earnings_time":meta.get("time"),
-                "profile":profile,"historical_score":round(hist_score,1),
-                "current":cur,"rotation":rot,"best_contract":None,
-                "options_execution":"Loading…","options_loading":True,
-                "expected_continuation_pct":round(expected,2),
-                "direction":trade_direction,"trade_direction":trade_direction,
-                "setup_type":setup_type,"setup_stage":setup_stage,
-                "reversion_confirmed":reversion_confirmed,"recovery_pct":recovery_pct,
-                "opportunity_score":round(float(total),1),"trade_score":None,
-                "eps_surprise_pct":surprise_pct,
-                "drift_window_sessions":expected_window,
-                "drift_window_progress_pct":window_progress_pct,
-                "move_consumed_pct":move_consumed_pct,
-                "remaining_runway_pct":remaining_runway_pct,
-                "remaining_runway_pct_uncapped":remaining_runway_pct_uncapped,
-                "remaining_runway_abs_pct":remaining_runway_abs,
-                "retained_pct_of_day1_move":retained_pct,
-                "round_trip":round_trip,
-                "post_earnings_structure":post_structure,
-                "structure_bonus":round(structure_bonus,1),
-                "second_leg":second_leg,
-                "reaction_retained_pct":reaction_retained,
-                "post_reaction_range_pct":post_range,
-                "drift_from_day1_pct":drift_day1,
-            }
-
-        rows=[]
-        with ThreadPoolExecutor(max_workers=4) as ex:
-            futs=[ex.submit(enrich,x) for x in prelim[:12]]
-            for f in as_completed(futs):
-                try:
-                    x=f.result()
-                    if x:rows.append(x)
-                except Exception:pass
+                "earnings_time":meta.get("time"),"profile":None,"history_pending":True,
+                "historical_score":None,"current":cur,"rotation":rot,
+                "best_contract":None,"options_execution":"Loading…","options_loading":True,
+                "expected_continuation_pct":round(abs(reaction),2),
+                "direction":direction,"trade_direction":direction,
+                "setup_type":setup_type,"setup_stage":stage,
+                "reversion_confirmed":fading,"recovery_pct":None,
+                "opportunity_score":round(score,1),"trade_score":None,
+                "eps_surprise_pct":surprise,"drift_window_sessions":None,
+                "drift_window_progress_pct":None,"move_consumed_pct":None,
+                "remaining_runway_pct":None,"remaining_runway_pct_uncapped":None,
+                "remaining_runway_abs_pct":None,"retained_pct_of_day1_move":retention,
+                "round_trip":fading,"post_earnings_structure":"REACTION FADING" if fading else "ACTIVE REACTION",
+                "structure_bonus":0.0,"second_leg":False,
+                "reaction_retained_pct":retention,
+                "post_reaction_range_pct":_safe_float(cur.get("post_reaction_range_pct")),
+                "drift_from_day1_pct":_safe_float(cur.get("drift_from_day1_pct")),
+            })
         rows.sort(key=lambda x:-x.get("opportunity_score",0))
         return {"results":rows[:12],"universe":len(tickers),
                 "recent_reporters":len(reporters),"recent_days":recent_days,
@@ -4638,7 +4529,7 @@ def api_postearnings_opportunities():
                 "options_deferred":True}
 
     try:
-        key=f"postearnings-opportunities-v3:{recent_days}"
+        key=f"postearnings-opportunities-v4:{recent_days}"
         payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
@@ -4652,13 +4543,9 @@ def api_postearnings_option(ticker):
         direction=request.args.get("direction","bullish")
         expected=_safe_float(request.args.get("expected"))
 
-        # Anchor DTE selection to this ticker's own historical drift window rather
-        # than reusing whatever chain window happens to be loaded elsewhere. A
-        # CONTINUATION name needs enough duration for the drift to actually play
-        # out; a REVERSION name shouldn't be biased toward extra duration at all.
-        profile=cached(f"peprofile-v1:{ticker}",
-                        lambda:earnings_profile(ticker,merged_historical_earnings_dates(ticker)),ttl=3600)
-        behavior=(profile or {}).get("behavior")
+        # The broad scan already classified the live reaction. Do not secretly
+        # recompute a four-year earnings profile merely to select an option DTE.
+        behavior=str(request.args.get("setup_type") or "").upper()
         if behavior=="CONTINUATION":
             min_dte,ideal_dte=21,30
         elif behavior=="REVERSION":
@@ -9179,7 +9066,7 @@ async function hydratePostEarningsOptions(){
    while(idx<queue.length){
      const x=queue[idx++];
      try{
-       const q=new URLSearchParams({direction:x.trade_direction||x.direction||"bullish",expected:String(x.expected_continuation_pct||0)});
+       const q=new URLSearchParams({direction:x.trade_direction||x.direction||"bullish",expected:String(x.expected_continuation_pct||0),setup_type:x.setup_type||""});
        const r=await fetch(`/api/postearnings-option/${encodeURIComponent(x.ticker)}?${q.toString()}`);
        const raw=await r.text();let j;
        try{j=JSON.parse(raw)}catch(e){throw Error(`Options response ${r.status}`)}
@@ -9194,7 +9081,7 @@ async function hydratePostEarningsOptions(){
      renderEarnings();
    }
  }
- await Promise.all([worker(),worker(),worker()]);
+ await Promise.all([worker(),worker()]);
  earnResults.sort((a,b)=>Number(b.trade_score??b.opportunity_score??0)-Number(a.trade_score??a.opportunity_score??0));
  renderEarnings();
 }

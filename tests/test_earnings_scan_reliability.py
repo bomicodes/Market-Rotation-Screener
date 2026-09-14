@@ -27,11 +27,38 @@ def test_earnings_failure_preserves_prior_results_and_is_not_unreadable():
     assert "Earnings service returned an unreadable response" not in loader
 
 
-def test_market_wide_earnings_work_is_bounded_to_returned_rows():
+def test_market_wide_earnings_scan_defers_all_historical_profiles():
     assert 'alpaca_multi_daily_closes(price_symbols,"18mo")' in APP_SOURCE
     assert 'dl_prices(price_symbols,"18mo",repair_missing=False,attempts=1)' in APP_SOURCE
-    assert "futs=[ex.submit(enrich,x) for x in prelim[:12]]" in APP_SOURCE
-    assert 'postearnings-opportunities-v3:' in APP_SOURCE
+    start = APP_SOURCE.index("def api_postearnings_opportunities()")
+    end = APP_SOURCE.index('@app.get("/api/postearnings-option/<ticker>")', start)
+    scanner = APP_SOURCE[start:end]
+    assert "for pre,sym,d,rot,cur in prelim[:12]:" in scanner
+    assert "earnings_profile(" not in scanner
+    assert "merged_historical_earnings_dates(" not in scanner
+    assert 'postearnings-opportunities-v4:' in scanner
+
+
+def test_options_hydration_does_not_recompute_history():
+    start = APP_SOURCE.index("def api_postearnings_option(ticker)")
+    end = APP_SOURCE.index('@app.get("/api/earnings-history/<ticker>")', start)
+    endpoint = APP_SOURCE[start:end]
+    assert 'request.args.get("setup_type")' in endpoint
+    assert "earnings_profile(" not in endpoint
+    assert "merged_historical_earnings_dates(" not in endpoint
+    assert 'setup_type:x.setup_type||""' in APP_SOURCE
+    assert "Promise.all([worker(),worker()])" in APP_SOURCE
+
+
+def test_scan_holdings_prefers_persistent_cache(monkeypatch):
+    saved = ([{"ticker": "META", "name": "Meta"}] * 5, "issuer", "2026-09-14T00:00:00Z")
+    monkeypatch.setattr(appmod, "_load_holdings_cache", lambda etf: saved)
+    monkeypatch.setattr(appmod, "get_fund_holdings", lambda etf: (_ for _ in ()).throw(AssertionError("live called")))
+
+    holdings, source = appmod.get_fund_holdings_scan("XLC")
+
+    assert holdings[0]["ticker"] == "META"
+    assert source.startswith("Cached holdings")
 
 
 def test_alpaca_multi_symbol_daily_close_parser(monkeypatch):
