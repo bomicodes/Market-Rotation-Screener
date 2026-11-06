@@ -1,3 +1,6 @@
+v30.1 — NIGHTLY GUARD PER CLOSE
+- /api/nightly/run now allows one run per market close (and never twice within 30 minutes). Previously, a manual run during the day blocked that afternoon's scheduled run through its 6-hour window.
+
 v30.0 — EXIT RULES + POSITION TRACKER, LAGGARD CATCH-UP LANE, REAL OPTION RESULTS
 - Directional plans are single-leg only; debit spreads were removed (the trader uses singles for directional trades and strangles for post-earnings moves).
 - Every plan carries an exit plan:
