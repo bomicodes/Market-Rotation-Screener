@@ -1,0 +1,38 @@
+name: Nightly screener scan
+
+# Runs after the US close on weekdays. 21:50 UTC is 3:50 PM Central in winter
+# (CST) and 4:50 PM Central in summer (CDT) — both after the 4:00 PM ET close.
+on:
+  schedule:
+    - cron: "50 21 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      APP_URL: https://market-rotation-screener.onrender.com
+    steps:
+      - name: Wake the service and start the nightly run
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /tmp/start.json -w "%{http_code}" -X POST "$APP_URL/api/nightly/run" || true)
+            echo "attempt $i -> HTTP $code: $(cat /tmp/start.json 2>/dev/null)"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 30
+          done
+          echo "Service did not accept the nightly run" && exit 1
+
+      - name: Wait for the run to finish (keeps the free instance awake)
+        run: |
+          for i in $(seq 1 90); do
+            sleep 30
+            body=$(curl -s "$APP_URL/api/nightly/status" || true)
+            echo "$body"
+            if echo "$body" | grep -q '"running":false'; then
+              echo "$body" | grep -q '"stage":"done"' && exit 0
+              echo "Nightly run ended without finishing" && exit 1
+            fi
+          done
+          echo "Timed out waiting for the nightly run" && exit 1
