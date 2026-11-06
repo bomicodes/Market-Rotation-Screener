@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.31"
+APP_VERSION = "27.32"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -513,6 +513,10 @@ def _yf_download_retry(ticker, period, interval="1d", timeout=12, attempts=2, pr
     fresh for five minutes and stale frames remain eligible for 24 hours if Yahoo
     is rate-limited or temporarily unavailable.
     """
+    # yfinance only accepts "1mo"/"3mo"/"6mo"; the app's internal shorthand
+    # ("1m"/"3m"/"6m") would otherwise be rejected outright (and "1m" is a
+    # 1-minute *interval* in yfinance, not a period).
+    period={"1m":"1mo","3m":"3mo","6m":"6mo"}.get(str(period or "").lower(),period)
     ticker=str(ticker or "").upper().strip()
     key=f"yf-frame-v25:{ticker}:{period}:{interval}:{1 if prepost else 0}"
     now=time.time(); hit=CACHE.get(key)
@@ -2513,7 +2517,11 @@ def alpaca_option_daily_bars(symbols, lookback_days=55):
     # normalized server time and then added a day; after UTC midnight this
     # could send Alpaca an end date nearly two calendar days in the future,
     # which the historical options endpoint rejects with HTTP 400.
-    end=pd.Timestamp.now(tz="UTC")-pd.Timedelta(minutes=1)
+    # Alpaca's free Basic plan rejects historical OPRA bars from the latest 15
+    # minutes with HTTP 403 ("subscription does not permit querying recent OPRA
+    # data"). Daily premium bars do not need that window, so stay 16 minutes back
+    # on every plan.
+    end=pd.Timestamp.now(tz="UTC")-pd.Timedelta(minutes=16)
     start=end-pd.Timedelta(days=max(25,int(lookback_days or 55)))
     params={"symbols":",".join(symbols),"timeframe":"1Day","start":start.isoformat().replace("+00:00","Z"),"end":end.isoformat().replace("+00:00","Z"),"limit":10000,"sort":"asc"}
     out={sym:[] for sym in symbols}; token=None

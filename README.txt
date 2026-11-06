@@ -1,3 +1,8 @@
+v27.32 — ALPACA FREE (BASIC) PLAN COMPATIBILITY
+- Render now runs with ALPACA_STOCK_FEED=iex and ALPACA_OPTIONS_FEED=indicative after the paid data subscription was cancelled; SIP/OPRA requests were returning HTTP 403 and failing every options-dependent layer.
+- Historical option bars (Premium Support) now end 16 minutes before now, since the Basic plan rejects the latest 15 minutes of OPRA history.
+- Yahoo fallback maps internal "1m"/"3m"/"6m" periods to yfinance's "1mo"/"3mo"/"6mo"; previously every Layer 2.5 early-reversal fallback fetch was rejected as an invalid period.
+
 v27.31 — CALENDAR-FIRST EARNINGS COVERAGE
 - Recent earnings are now discovered from the market calendar before ETF membership is applied. A reporter missing from a stale or partial ETF holdings file is no longer silently excluded.
 - Active U.S. reporters are prioritized by reported market cap and ETF context, then bounded to 120 names for the single Alpaca price job; the best 12 setups are still returned.
