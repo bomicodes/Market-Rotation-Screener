@@ -1,3 +1,12 @@
+v28.0 — PICK QUALITY + OPTIONS ENTRY REBUILD
+- Market regime now feeds Top Setups scoring. A "tape" state (Supportive / Caution / Risk-Off) is built from SPY's 1- and 5-day change, VIX level and 5-day change, and risk appetite. Bullish setups lose points in Caution/Risk-Off, and defensive groups (XLP/XLU/XLV/XLRE) get an extra caution because their relative strength may just be falling less than SPY.
+- Absolute trend is required as well as relative strength. Bullish setups need the stock above its 20/50-day averages, and a parent sector in an absolute downtrend fails the gate. Institutional context now returns `parent_trend`.
+- Scores no longer saturate at 100. The displayed score is normalized against the maximum attainable raw score; qualification still uses the underlying-setup score.
+- Reward/risk gate: a setup needs a plan with R/R ≥ 1.5. The structure now includes a pullback plan (entry ¼ ATR beyond the 20-day average, stop 1 ATR through it, target at the recent swing extreme). Extended names that only work on a pullback are labelled WAIT FOR PULLBACK instead of being shown as breakouts.
+- New counter-trend lane. Supply rejections (a long upper wick into the prior 1-year high that price has not reclaimed) and demand holds are detected against the stock's trend and shown in a COUNTER-TREND · REJECTIONS section with trigger/stop/targets and a put/call plan. The rejection also costs the trend-direction setup points.
+- New /api/entry-plan/<ticker>?direction=&plan=&budget=. Contracts (21–75 DTE) are repriced with Black-Scholes, calibrated to the live mid, at the underlying's entry, at the target after the expected hold's time decay, and at the stop. Delta is judged at the entry price. The MAX CONTRACT budget is enforced, and debit verticals (long near entry, short near target) are offered when no single fits or IV/realized vol ≥ 1.35. Cards show the contract, modeled premium at entry/target/stop, option R/R and cost.
+- Premium Support no longer calls a premium that is still falling into its 30-day low "AT SUPPORT". Those contracts are now FALLING · NO BASE with the score capped at 35.
+
 v27.32 — ALPACA FREE (BASIC) PLAN COMPATIBILITY
 - Render now runs with ALPACA_STOCK_FEED=iex and ALPACA_OPTIONS_FEED=indicative after the paid data subscription was cancelled; SIP/OPRA requests were returning HTTP 403 and failing every options-dependent layer.
 - Historical option bars (Premium Support) now end 16 minutes before now, since the Basic plan rejects the latest 15 minutes of OPRA history.

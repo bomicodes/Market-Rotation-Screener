@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "27.32"
+APP_VERSION = "28.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2567,11 +2567,22 @@ def _premium_support_metrics(bars,current_mid=None):
     if compression is not None:score+=15 if compression<=.75 else 10 if compression<=1.0 else 3 if compression<=1.2 else 0
     if reversal:score+=10
     score=max(0.0,min(100.0,score))
-    if distance is not None and distance<=20 and touches>=2:state="REVERSAL CONFIRMED" if reversal else "AT SUPPORT"
+    # v28: a premium sitting at its 30-day low because it is still falling
+    # (theta decay, or the underlying moving against the contract) is not a
+    # support test. Require the floor to have been set before the latest few
+    # bars and the series not to be in a steep decline into it.
+    floor_age=int(len(lows)-1-int(np.argmin(lows)))
+    lookback_close=float(closes[max(0,len(closes)-11)])
+    declining=bool(lookback_close>0 and closes[-1]<lookback_close*.75)
+    falling=bool((floor_age<=2 and declining) or (px<floor*.98 and declining))
+    if falling:
+        score=min(score,35.0)
+    if falling:state="FALLING · NO BASE"
+    elif distance is not None and distance<=20 and touches>=2:state="REVERSAL CONFIRMED" if reversal else "AT SUPPORT"
     elif distance is not None and distance<=35 and touches>=2:state="NEAR SUPPORT"
     elif distance is not None and distance<=20:state="CHEAP / UNPROVEN"
     else:state="AWAY FROM SUPPORT"
-    floor_reliable=touches>=2
+    floor_reliable=touches>=2 and not falling
     return {"available":True,"score":round(score,1),"state":state,"current_premium":round(px,4),"support_low":round(floor,4),"support_high":round(support_hi,4),"distance_from_support_pct":round(distance,1) if distance is not None else None,"support_touches":touches,"floor_reliable":floor_reliable,"prior_20d_high":round(prior_high,4),"prior_expansion_multiple":round(expansion,2) if expansion is not None else None,"range_compression_ratio":round(compression,2) if compression is not None else None,"reversal_confirmed":reversal,"bars_used":len(clean),"last_bar_date":str(clean[-1].get("t") or "")[:10] or None}
 
 
@@ -2634,6 +2645,178 @@ def premium_support_payload(ticker,direction="bullish",options_payload=None):
     if not scored:return {"ticker":ticker,"direction":direction,"available":False,"reason":"Historical premium bars were unavailable for the candidate contracts."}
     scored.sort(key=lambda r:(-r["premium_support_score"],r.get("distance_from_support_pct") if r.get("distance_from_support_pct") is not None else 999,r.get("mid") or 999))
     return {"ticker":ticker,"direction":direction,"available":True,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}","best_contract":scored[0],"candidates":scored[:8],"contracts_considered":len(premium_rows),"contracts_screened":len(selected),"dte_universe":"7-730","expiration_buckets":["7-35","36-60","61-90","91-180","181-365","366-730"],"history_lookback_days":100,"premium_bars_window":30,"note":"Premium support is contract-specific and decays with time/IV; it is a confirmation layer, not a static stock-like floor."}
+
+
+# ---------------------------------------------------------------------------
+# v28 OPTION ENTRY PLANNER
+# The entry is anchored on the UNDERLYING's level (pullback zone, breakout or
+# rejection trigger). Each candidate contract is repriced with Black-Scholes at
+# the entry, the target (after the expected hold's time decay) and the stop, so
+# the trade is judged on modeled option reward/risk and cost vs. the trader's
+# budget rather than on where the premium sits versus its own 30-day low.
+# ---------------------------------------------------------------------------
+def _norm_cdf(x):
+    return 0.5*(1.0+math.erf(x/math.sqrt(2.0)))
+
+
+def bs_price(spot, strike, t_years, iv, is_put, rate=0.04):
+    spot=float(spot); strike=float(strike)
+    if spot<=0 or strike<=0: return 0.0
+    intrinsic=max(0.0,strike-spot) if is_put else max(0.0,spot-strike)
+    if t_years<=0 or iv is None or iv<=0: return intrinsic
+    v=float(iv); st=v*math.sqrt(t_years)
+    d1=(math.log(spot/strike)+(rate+.5*v*v)*t_years)/st; d2=d1-st
+    disc=math.exp(-rate*t_years)
+    if is_put: return max(intrinsic*disc, strike*disc*_norm_cdf(-d2)-spot*_norm_cdf(-d1))
+    return max(intrinsic, spot*_norm_cdf(d1)-strike*disc*_norm_cdf(d2))
+
+
+def bs_implied_vol(price, spot, strike, t_years, is_put):
+    if not price or price<=0 or t_years<=0: return None
+    lo,hi=.01,4.0
+    if bs_price(spot,strike,t_years,hi,is_put)<price: return None
+    for _ in range(60):
+        mid=(lo+hi)/2
+        if bs_price(spot,strike,t_years,mid,is_put)>price: hi=mid
+        else: lo=mid
+    return (lo+hi)/2
+
+
+def _entry_levels_for(structure, direction, plan=None):
+    """Choose the underlying entry/stop/target for a direction."""
+    s=structure or {}; options=[]
+    pb=s.get("pullback")
+    if pb and pb.get("direction")==direction:
+        options.append(("pullback",pb["entry"],pb["stop"],pb["target"],pb.get("rr"),bool(pb.get("in_zone"))))
+    if s.get("plan_valid") and s.get("direction")==direction and s.get("trigger") is not None:
+        options.append(("breakout",s["trigger"],s["invalidation"],s["target2"],s.get("rr_to_target2"),False))
+    ct=s.get("counter")
+    if ct and ct.get("direction")==direction:
+        options.append(("rejection",ct["trigger"],ct["stop"],ct["target2"],ct.get("rr"),False))
+    if plan:
+        options=[o for o in options if o[0]==plan] or options
+    if not options: return None
+    name,entry,stop,target,rr,in_zone=max(options,key=lambda o:(o[4] or 0))
+    return {"plan":name,"entry":float(entry),"stop":float(stop),"target":float(target),"underlying_rr":rr,"in_zone":in_zone}
+
+
+def _model_leg(row, spot, entry, stop, target, is_put, days_to_entry, hold_days):
+    dte=int(row.get("dte") or 0); strike=float(row["strike"]); mid=float(row["mid"])
+    t=dte/365.0
+    iv=_safe_float(row.get("iv")); iv=(iv/100.0) if iv and iv>3 else iv
+    if not iv or iv<=0: iv=bs_implied_vol(mid,spot,strike,t,is_put)
+    if not iv: return None
+    model_now=bs_price(spot,strike,t,iv,is_put)
+    scale=(mid/model_now) if model_now>0.01 else 1.0
+    scale=min(1.6,max(.6,scale))
+    t_entry=max(1/365,t-days_to_entry/365.0)
+    p_entry=mid if abs(entry-spot)<1e-9 else bs_price(entry,strike,t_entry,iv,is_put)*scale
+    t_target=max(1/365,t_entry-hold_days/365.0)
+    p_target=bs_price(target,strike,t_target,iv,is_put)*scale
+    p_stop=bs_price(stop,strike,max(1/365,t_entry-hold_days/730.0),iv,is_put)*scale
+    p_flat=bs_price(entry,strike,t_target,iv,is_put)*scale
+    h=max(.01,entry*.001)
+    delta_entry=abs(bs_price(entry+h,strike,t_entry,iv,is_put)-bs_price(entry-h,strike,t_entry,iv,is_put))/(2*h)
+    return {"iv":iv,"entry":p_entry,"target":p_target,"stop":p_stop,"flat":p_flat,"delta_entry":delta_entry}
+
+
+def _leg_summary(row):
+    return {k:row.get(k) for k in ("symbol","type","expiration","dte","strike","bid","ask","mid","delta","iv","open_interest","volume","spread_pct","liquidity")}
+
+
+def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, structure=None, rows=None, spot=None, atr=None, rv20=None):
+    ticker=ticker.upper().strip(); direction="bearish" if str(direction).lower().startswith("bear") else "bullish"
+    is_put=direction=="bearish"; budget=max(25.0,float(budget or 250))
+    if structure is None: structure=_context_structure(ticker)
+    if not structure or not structure.get("available"):
+        return {"ticker":ticker,"available":False,"reason":"Price structure unavailable."}
+    spot=float(spot or structure.get("spot")); atr=float(atr or structure.get("atr14") or 0)
+    lv=_entry_levels_for(structure,direction,plan)
+    if not lv: return {"ticker":ticker,"direction":direction,"available":False,"reason":f"No valid {direction} entry plan on the underlying."}
+    entry,stop,target=lv["entry"],lv["stop"],lv["target"]
+    wrong=(is_put and not (stop>entry>target)) or ((not is_put) and not (stop<entry<target))
+    if wrong: return {"ticker":ticker,"direction":direction,"available":False,"reason":"Entry, stop and target are not in a valid order."}
+    # Pullback entries need price to come back to the zone; breakouts/rejections need a trigger.
+    days_to_entry=0 if (lv["in_zone"] or abs(entry-spot)<.1*max(atr,.01)) else 3
+    entry_used=spot if days_to_entry==0 else entry
+    hold_days=int(min(15,max(4,round(abs(target-entry_used)/max(atr*.6,.01)))))
+    if rows is None:
+        today=pd.Timestamp.now().normalize()
+        start=(today+pd.Timedelta(days=21)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=75)).strftime("%Y-%m-%d")
+        contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+        snaps=alpaca_option_chain(ticker,start,end,spot); rows=[]
+        for sym,snap in snaps.items():
+            if sym in meta: rows.append(option_contract_row(sym,snap,meta[sym],spot))
+    if rv20 is None:
+        try: rv20,_=realized_vol_20d(ticker)
+        except Exception: rv20=None
+    want="p" if is_put else "c"
+    chain=[r for r in rows if str(r.get("type") or "").lower().startswith(want) and r.get("strike") and r.get("mid") and r["mid"]>0
+           and r.get("dte") is not None and 21<=r["dte"]<=75 and r.get("spread_pct") is not None and r["spread_pct"]<=25]
+    if not chain: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No 21–75 DTE contracts with a usable quote."}
+    singles=[]
+    for r in chain:
+        m=_model_leg(r,spot,entry_used,stop,target,is_put,days_to_entry,hold_days)
+        if not m or m["entry"]<=0.05: continue
+        # Delta is judged at the ENTRY price, not today's spot: a strike that is
+        # 0.35 delta now can be a lottery ticket once the stock pulls back.
+        if not (.30<=m["delta_entry"]<=.70): continue
+        gain=m["target"]/m["entry"]-1; loss=1-m["stop"]/m["entry"]
+        theta=1-m["flat"]/m["entry"]
+        orr=gain/loss if loss>0.01 else None
+        cost=m["entry"]*100
+        dte=r["dte"]; dte_fit=1.0 if 30<=dte<=60 else .75
+        delta_fit=max(.2,1-abs(m["delta_entry"]-.50)*2)
+        quality=min(orr or 0,5.0)*delta_fit*dte_fit*(1.0 if (r.get("spread_pct") or 99)<=10 else .85)*(1.0 if (r.get("open_interest") or 0)>=100 else .8)
+        singles.append({"structure":"single","leg":_leg_summary(r),"cost":round(cost,0),"entry_premium":round(m["entry"],2),"premium_at_target":round(m["target"],2),
+                        "premium_at_stop":round(m["stop"],2),"gain_pct":round(gain*100),"loss_pct":round(loss*100),"theta_drag_pct":round(theta*100),
+                        "option_rr":round(orr,2) if orr is not None else None,"iv_used":round(m["iv"]*100,1),"delta_at_entry":round(m["delta_entry"],2),"_q":quality,"_row":r,"_m":m})
+    if not singles: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No contract with a 0.30–0.70 delta at the entry price."}
+    singles.sort(key=lambda z:-z["_q"])
+    affordable=[z for z in singles if z["cost"]<=budget]
+    iv_med=float(np.median([z["_m"]["iv"] for z in singles]))
+    iv_rv=round(iv_med/rv20,2) if rv20 else None
+    # Debit vertical: long a 0.30–0.65 delta strike, short the strike nearest the target.
+    spreads=[]
+    by_exp={}
+    for r in chain: by_exp.setdefault(r.get("expiration"),[]).append(r)
+    min_width=.4*abs(target-entry_used)
+    for z in singles[:16]:
+        L=z["_row"]; legs=by_exp.get(L.get("expiration"),[])
+        if z["_m"]["delta_entry"]<.40: continue
+        shorts=[r for r in legs if ((L["strike"]-r["strike"]) if is_put else (r["strike"]-L["strike"]))>=min_width]
+        if not shorts: continue
+        S=min(shorts,key=lambda r:abs(r["strike"]-target))
+        ms=_model_leg(S,spot,entry_used,stop,target,is_put,days_to_entry,hold_days)
+        if not ms: continue
+        e=z["_m"]["entry"]-ms["entry"]; tv=z["_m"]["target"]-ms["target"]; sv=z["_m"]["stop"]-ms["stop"]
+        width=abs(L["strike"]-S["strike"])
+        if e<=0.05 or e>=width: continue
+        gain=tv/e-1; loss=1-sv/e
+        orr=gain/loss if loss>0.01 else None
+        spreads.append({"structure":"debit_spread","long":_leg_summary(L),"short":_leg_summary(S),"cost":round(e*100,0),"entry_premium":round(e,2),
+                        "premium_at_target":round(tv,2),"premium_at_stop":round(sv,2),"max_value":round(width,2),"gain_pct":round(gain*100),
+                        "loss_pct":round(loss*100),"option_rr":round(orr,2) if orr is not None else None,"_q":min(orr or 0,5.0)*max(.2,1-abs(z["_m"]["delta_entry"]-.55)*2)})
+    spreads.sort(key=lambda z:-z["_q"])
+    best_single=affordable[0] if affordable else None
+    affordable_spreads=[z for z in spreads if z["cost"]<=budget]
+    best_spread=affordable_spreads[0] if affordable_spreads else None
+    notes=[]
+    if not best_single: notes.append(f"No single {('put' if is_put else 'call')} fits the ${budget:.0f} budget (cheapest modeled entry ${min(z['cost'] for z in singles):.0f}).")
+    if iv_rv and iv_rv>=1.35: notes.append(f"IV is {iv_rv:.2f}× realized volatility — premium is rich; a debit spread reduces the volatility you pay for.")
+    if days_to_entry: notes.append(f"Entry requires the stock to reach ${entry:.2f} first; premiums shown are modeled at that price.")
+    recommended=None
+    if best_single and best_spread:
+        recommended="debit_spread" if (iv_rv and iv_rv>=1.35) or (best_spread["option_rr"] or 0)>(best_single["option_rr"] or 0)*1.25 else "single"
+    elif best_single: recommended="single"
+    elif best_spread: recommended="debit_spread"
+    for z in singles+spreads:
+        for k in ("_q","_row","_m"): z.pop(k,None)
+    return {"ticker":ticker,"direction":direction,"available":True,"budget":budget,"plan":lv["plan"],"spot":round(spot,2),
+            "underlying":{"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":lv["underlying_rr"],"in_zone":days_to_entry==0},
+            "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":best_spread,"recommended":recommended,
+            "cheapest_single_cost":min(z["cost"] for z in singles),"notes":notes,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+            "method":"Black-Scholes repricing at entry/target/stop, calibrated to the live mid; hold-period theta included."}
 
 
 def modeled_dealer_positioning(rows, spot):
@@ -3440,6 +3623,76 @@ def _context_earnings_catalyst(ticker):
     return {"next_earnings":nxt.strftime("%Y-%m-%d"),"days_to_earnings":days,"risk":risk}
 
 
+def _pullback_plan(direction, spot, atr, sma20, recent_high, recent_low):
+    """v28: trend-direction entry on a pullback to the 20-day mean instead of
+    chasing a 20-day breakout. Entry sits a quarter ATR beyond the 20-day
+    average, the stop a full ATR through it, and the target is the recent
+    swing extreme (at least 2 ATR from entry)."""
+    if not (atr and atr>0 and sma20 and spot) or direction not in ("bullish","bearish"):
+        return None
+    if direction=="bullish":
+        entry=sma20+.25*atr; stop=sma20-1.0*atr
+        if spot<entry: entry=spot
+        target=max(recent_high, entry+2*atr)
+        risk=entry-stop; reward=target-entry
+        distance=(spot-entry)/atr
+    else:
+        entry=sma20-.25*atr; stop=sma20+1.0*atr
+        if spot>entry: entry=spot
+        target=min(recent_low, entry-2*atr)
+        risk=stop-entry; reward=entry-target
+        distance=(entry-spot)/atr
+    if risk<=0: return None
+    return {"type":"pullback","direction":direction,"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),
+            "rr":round(reward/risk,2),"in_zone":bool(distance<=.5),"distance_atr":round(abs(distance),2)}
+
+
+def _rejection_signal(df, atr, sma20):
+    """v28: detect a failed test of a major prior extreme within the last three
+    sessions — a long upper wick into the prior 1-year high zone (supply) or a
+    long lower wick into the 1-year low zone (demand) — that price has not
+    reclaimed. Returns a counter-trend plan, or None."""
+    if df is None or len(df)<60 or not atr or atr<=0: return None
+    o=df["Open"].astype(float).values; h=df["High"].astype(float).values; l=df["Low"].astype(float).values; c=df["Close"].astype(float).values
+    spot=float(c[-1]); n=len(df)
+    prior=slice(max(0,n-252),n-5)
+    if len(h[prior])<40: return None
+    prior_high=float(np.max(h[prior])); prior_low=float(np.min(l[prior]))
+    best=None
+    for side in ("supply","demand"):
+        idx=int(n-3+np.argmax(h[-3:])) if side=="supply" else int(n-3+np.argmin(l[-3:]))
+        H,L,O,C=float(h[idx]),float(l[idx]),float(o[idx]),float(c[idx]); rng=H-L
+        if rng<=0: continue
+        mid=(H+L)/2
+        if side=="supply":
+            wick=(H-max(O,C))/rng; close_pos=(C-L)/rng
+            tested=H>=prior_high-1.5*atr and H<=prior_high+.5*atr
+            holding=spot<=mid and all(float(x)<H for x in h[idx+1:])
+            if not (tested and wick>=.35 and close_pos<=.45 and holding): continue
+            trigger=L-.1*atr; stop=H+.25*atr; t1=trigger-1.5*atr
+            t2=max(min(sma20,t1-.5*atr),trigger-3.5*atr)
+            risk=stop-trigger; reward=trigger-t2; direction="bearish"
+            if spot<trigger-1.0*atr: continue
+        else:
+            wick=(min(O,C)-L)/rng; close_pos=(C-L)/rng
+            tested=L<=prior_low+1.5*atr and L>=prior_low-.5*atr
+            holding=spot>=mid and all(float(x)>L for x in l[idx+1:])
+            if not (tested and wick>=.35 and close_pos>=.55 and holding): continue
+            trigger=H+.1*atr; stop=L-.25*atr; t1=trigger+1.5*atr
+            t2=min(max(sma20,t1+.5*atr),trigger+3.5*atr)
+            risk=trigger-stop; reward=t2-trigger; direction="bullish"
+            if spot>trigger+1.0*atr: continue
+        if risk<=0: continue
+        extension=(spot-sma20)/atr if sma20 else None
+        sig={"type":"supply_rejection" if side=="supply" else "demand_rejection","direction":direction,
+             "level":round(prior_high if side=="supply" else prior_low,2),"bar_date":str(df.index[idx])[:10],
+             "bar_high":round(H,2),"bar_low":round(L,2),"wick_pct":round(wick*100),"close_position_pct":round(close_pos*100),
+             "trigger":round(trigger,2),"stop":round(stop,2),"target1":round(t1,2),"target2":round(t2,2),
+             "rr":round(reward/risk,2),"extension_atr":round(extension,2) if extension is not None else None}
+        if best is None or sig["rr"]>best["rr"]: best=sig
+    return best
+
+
 def _context_structure(ticker):
     df=dl_ohlc(ticker,"1y")
     if df is None or len(df)<55:return {"available":False}
@@ -3478,8 +3731,26 @@ def _context_structure(ticker):
             plan_valid=False;plan_error="Trigger is too far from current price (stale 20-day level after a large move)"
     if not plan_valid:
         trigger=confirmation=invalidation=hard_fail=target1=target2=None;risk=reward=None
+    pullback=_pullback_plan(direction,spot,atr,sma20,float(h.iloc[-20:].max()),float(l.iloc[-20:].min()))
+    try: counter=_rejection_signal(df,atr,sma20)
+    except Exception: counter=None
+    if counter and counter.get("direction")==direction: counter=None
     r20=_ctx_return(c,20);r50=_ctx_return(c,50);trend_strength=int(spot>sma20)+int(sma20>sma50)+int(r20 is not None and r20>0)+int(r50 is not None and r50>0)
-    return {"available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,"trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),"trigger":round(trigger,2) if trigger is not None else None,"confirmation":round(confirmation,2) if confirmation is not None else None,"invalidation":round(invalidation,2) if invalidation is not None else None,"hard_fail":round(hard_fail,2) if hard_fail is not None else None,"target1":round(target1,2) if target1 is not None else None,"target2":round(target2,2) if target2 is not None else None,"rr_to_target2":round(reward/risk,2) if risk else None,"plan_valid":plan_valid,"plan_error":plan_error,"return_20d":round(r20,2) if r20 is not None else None,"return_50d":round(r50,2) if r50 is not None else None}
+    return {"available":True,"spot":round(spot,2),"atr14":round(atr,2),"direction":direction,"trend_strength":trend_strength,"sma20":round(sma20,2),"sma50":round(sma50,2),"trigger":round(trigger,2) if trigger is not None else None,"confirmation":round(confirmation,2) if confirmation is not None else None,"invalidation":round(invalidation,2) if invalidation is not None else None,"hard_fail":round(hard_fail,2) if hard_fail is not None else None,"target1":round(target1,2) if target1 is not None else None,"target2":round(target2,2) if target2 is not None else None,"rr_to_target2":round(reward/risk,2) if risk else None,"plan_valid":plan_valid,"plan_error":plan_error,"pullback":pullback,"counter":counter,"return_20d":round(r20,2) if r20 is not None else None,"return_50d":round(r50,2) if r50 is not None else None}
+
+
+def _absolute_trend(series):
+    """v28: absolute (not SPY-relative) trend of a price series."""
+    try:
+        s=series.dropna().astype(float)
+        if len(s)<55: return None
+        spot=float(s.iloc[-1]); m20=float(s.rolling(20).mean().iloc[-1]); m50=float(s.rolling(50).mean().iloc[-1])
+        r20=_ctx_return(s,20)
+        strength=int(spot>m20)+int(m20>m50)+int(r20 is not None and r20>0)
+        return {"above_sma20":spot>m20,"sma20_above_sma50":m20>m50,"return_20d":round(r20,2) if r20 is not None else None,"strength":strength,
+                "label":"Uptrend" if strength==3 else ("Downtrend" if strength==0 else "Mixed")}
+    except Exception:
+        return None
 
 
 def institutional_context_payload(ticker,parent=None):
@@ -3495,6 +3766,7 @@ def institutional_context_payload(ticker,parent=None):
     persistence=round(100*positives/observed) if observed else None
     triple=bool(parent and all((rs[str(n)].get("vs_spy") if rs[str(n)].get("vs_spy") is not None else -999)>0 and (rs[str(n)].get("vs_parent") if rs[str(n)].get("vs_parent") is not None else -999)>0 for n in (5,10,20)))
     structure=_context_structure(ticker);catalyst=_context_earnings_catalyst(ticker)
+    parent_trend=_absolute_trend(par) if len(par) else None
     horizon="1–3 week swing" if structure.get("trend_strength",0)>=4 and persistence is not None and persistence>=67 else ("2–5 day swing" if structure.get("trend_strength",0)>=2 else "Tactical / wait for confirmation")
     signature=f"v24|{parent or 'NONE'}|{horizon}|{'triple' if triple else 'mixed-rs'}|{structure.get('direction','neutral')}"
     try:save_setup_snapshot({"ticker":ticker,"spot":structure.get("spot"),"bias":structure.get("direction"),"score":persistence,"signature":signature,"raw":{"parent":parent,"relative_strength":rs,"structure":structure,"horizon":horizon,"catalyst":catalyst}})
@@ -3505,7 +3777,7 @@ def institutional_context_payload(ticker,parent=None):
     except Exception as e:
         hist={"count":0,"returns":{},"error":str(e)};baseline={"count":0,"returns":{},"error":str(e)}
     macro=macro_risk_snapshot(7)
-    return {"ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,"triple_relative_strength":triple,"structure":structure,"horizon":horizon,"catalyst":catalyst,"macro_risk":macro,"signature":signature,"historical_expectancy":hist,"ticker_baseline_expectancy":baseline}
+    return {"ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,"triple_relative_strength":triple,"structure":structure,"parent_trend":parent_trend,"horizon":horizon,"catalyst":catalyst,"macro_risk":macro,"signature":signature,"historical_expectancy":hist,"ticker_baseline_expectancy":baseline}
 
 @app.get("/api/institutional-context/<ticker>")
 def api_institutional_context(ticker):
@@ -3806,6 +4078,21 @@ def api_premium_support(ticker):
         # a stale v25-9 cache entry would otherwise keep serving front-month-only
         # results under the old key's TTL after this deploy.
         payload,stale,err=cached_refresh_safe(f"premium-support-v26-1:{ticker.upper()}:{direction}",lambda:premium_support_payload(ticker,direction,base),ttl=1800)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+@app.get("/api/entry-plan/<ticker>")
+def api_entry_plan(ticker):
+    try:
+        direction=(request.args.get("direction") or "bullish").lower()
+        if direction not in ("bullish","bearish"):direction="bullish"
+        plan=(request.args.get("plan") or "").lower() or None
+        if plan not in (None,"pullback","breakout","rejection"):plan=None
+        try: budget=float(request.args.get("budget") or 250)
+        except Exception: budget=250.0
+        budget=max(25.0,min(100000.0,budget))
+        key=f"entry-plan-v28:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
+        payload,stale,err=cached_refresh_safe(key,lambda:option_entry_plan(ticker,direction,budget,plan),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -6771,7 +7058,7 @@ function applyMarketPayload(j,fromCache=false){
  installRRGTimelineHandlers();
  const st=document.getElementById("mstatus");
  if(st) st.textContent=fromCache?`Cached · through ${j.asof||"—"}`:(j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`);
- const i=j.internals||{};
+ const i=j.internals||{};window.__marketPayload=j;
 
  const arrow=v=>v==null?"→":v>0?"↑":v<0?"↓":"→";
  const tone=v=>v==null?"":v>0?"up":v<0?"down":"";
@@ -8299,7 +8586,7 @@ function topSetupEvaluation(x){
  if(!structureOk)gateFailures.push(ctx?.structure?.plan_error||"Invalid trade-plan structure");
  if(hardPass&&qualificationScore<45)gateFailures.push(`Underlying setup ${qualificationScore}/100 below the 45 qualification bar`);
 
- return {score,qualificationScore,reasons,va,stratPass,hardPass,alignment:align,premiumSupport:premium,gateFailures};
+ return {score,rawScore:raw,qualificationScore,reasons,va,stratPass,hardPass,alignment:align,premiumSupport:premium,gateFailures};
 }
 function groupTrajectoryPass(g){
  const f=g?.fast||g||{},t=g?.trend||{};
@@ -8814,7 +9101,7 @@ function renderEarlyTurnWatch(){
    const sourceLabel=source==="sector"?"SECTOR-LED":"STOCK-LED";
    const flow=x?._institutionalFlow||institutionalFlowForTicker(x.ticker),flowConfirmed=institutionalFlowConfirmed(flow);
    const flowBadge=flowConfirmed?`<span class="instGood" style="display:inline-block;margin-top:5px;padding:3px 7px;border-radius:999px;font-size:11px;font-weight:800">FLOW CONFIRMED · ${Number(flow.largest_multiple||0).toFixed(1)}× · ${Number(flow.repeat_days||0)}/4 sessions · activity ${Number(flow.activity_score||0).toFixed(1)}/10</span>`:"";
-   const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","AWAY FROM SUPPORT":"instBad"}[pc.state]||""):"";
+   const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","AWAY FROM SUPPORT":"instBad","FALLING · NO BASE":"instBad"}[pc.state]||""):"";
    const premiumLine=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM ENTRY · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">Entry-quality overlay · support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM ENTRY · <b>not required for signal</b></div>`;
    return `<div class="topSetupCard" data-early-turn="${x.ticker}">
      <div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus">${sourceLabel} · ${tailNote}${source!=="sector"&&x._parentTicker?` · ${x._parentTicker}`:""}</div>${flowBadge}</div></div>
@@ -8854,7 +9141,7 @@ function renderTopSetups(){
  g.innerHTML=rows.map(({x,e},i)=>{
  const va=e.va,complete=setupCompleteness(x,e),label=usingPremiumWatch?"PREMIUM SUPPORT WATCH":(e.score>=80&&va?.strength==="CONFIRMED"&&e.stratPass&&complete.complete?"A+ SETUP":"A-QUALITY WATCH"),alignmentLabel=e.alignment==="EARLY"?"EARLY ALIGNMENT":"FULL ALIGNMENT";
  const pc=e.premiumSupport?.best_contract;
- const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","CHEAP / UNPROVEN":"instWarn","AWAY FROM SUPPORT":"instBad"}[pc.state]||""):"";
+ const premiumStateClass=pc?({"REVERSAL CONFIRMED":"instGood","AT SUPPORT":"instGood","NEAR SUPPORT":"instWarn","CHEAP / UNPROVEN":"instWarn","AWAY FROM SUPPORT":"instBad","FALLING · NO BASE":"instBad"}[pc.state]||""):"";
  const floorNote=pc?(pc.floor_reliable===false?"floor unreliable (<2 historical touches)":`${pc.distance_from_support_pct==null?"—":Number(pc.distance_from_support_pct).toFixed(1)+"%"} above floor · ${pc.support_touches||0} tests`):"";
  const premiumHTML=pc?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>${pc.expiration} $${Number(pc.strike).toFixed(0)} ${String(pc.type||"").toLowerCase().startsWith("p")?"P":"C"} · $${Number(pc.mid||0).toFixed(2)} · <span class="${premiumStateClass}">${pc.state}</span></b><div class="tiny">support $${Number(pc.support_low).toFixed(2)}–$${Number(pc.support_high).toFixed(2)} · ${floorNote} · prior high $${Number(pc.prior_20d_high||0).toFixed(2)} (${pc.prior_expansion_multiple==null?"—":Number(pc.prior_expansion_multiple).toFixed(1)+"×"}) · score ${Number(pc.premium_support_score||0).toFixed(0)}/100</div></div>`:(e.premiumSupport?`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>history unavailable</b><div class="tiny">${e.premiumSupport.reason||"No qualifying historical contract"}</div></div>`:`<div class="topSetupTrigger" style="margin-top:7px">PREMIUM · <b>not evaluated</b></div>`);
  // Trigger must be actionable from CURRENT price. A historical VAH/VAL that price
@@ -9401,7 +9688,7 @@ async function loadInstitutionalContext(ticker,parent=null,quiet=false){
  }catch(e){if(el&&!quiet)el.innerHTML=`<span class="warn">Institutional layer: ${e.message}</span>`;return null}
 }
 function renderInstitutionalContext(ticker){const c=institutionalContextMap[ticker],el=ensureInstitutionalPanel();if(!c||!el)return;const rs=c.relative_strength||{},s=c.structure||{},cat=c.catalyst||{},macro=c.macro_risk||{},flow=flowEvidenceFor(ticker),gx=gexImplicationFor(ticker,c),hist=histExpectancyLabel(c.historical_expectancy),r5=rs["5"]||{},r10=rs["10"]||{},r20=rs["20"]||{},ct=cat.next_earnings?`${cat.next_earnings} · ${cat.days_to_earnings}d`:'No confirmed earnings date available',cc=cat.days_to_earnings==null?'instWarn':cat.days_to_earnings<=3?'instBad':cat.days_to_earnings<=10?'instWarn':'instGood';el.innerHTML=`<div class="instDecisionHead"><div><h3>${ticker} · Institutional Decision Layer</h3><div class="tiny">Observe → Rank → Explain → Execute → Invalidate → Measure</div></div><span class="horizon">${c.horizon||"—"}</span></div><div class="instGrid"><div class="instCard"><div class="k">ROTATION PERSISTENCE</div><div class="v ${Number(c.rotation_persistence)>=67?'instGood':''}">${c.rotation_persistence==null?'—':c.rotation_persistence+'/100'}</div><div class="d">5/10/20D relative leadership${c.triple_relative_strength?' · triple RS confirmed':''}</div></div><div class="instCard"><div class="k">RELATIVE STRENGTH</div><div class="v">${c.parent?`${instFmt(r20.vs_parent)} vs ${c.parent}`:instFmt(r20.vs_spy)}</div><div class="d">20D vs SPY ${instFmt(r20.vs_spy)} · 5D ${instFmt(r5.vs_spy)}</div></div><div class="instCard"><div class="k">FLOW EVIDENCE</div><div class="v">${flow.label}</div><div class="d">${flow.detail}</div></div><div class="instCard"><div class="k">GEX TRADE EFFECT</div><div class="v">${gx.label}</div><div class="d">${gx.detail}</div></div><div class="instCard"><div class="k">CATALYST RISK</div><div class="v ${cc}">${cat.risk||"Unknown"}</div><div class="d">${ct}</div></div><div class="instCard"><div class="k">MACRO RISK</div><div class="v ${macro.risk==="HIGH"?'instBad':macro.risk==="ELEVATED"?'instWarn':''}">${macro.risk||"—"}</div><div class="d">${(macro.events||[]).slice(0,2).map(e=>`${e.days_away}d · ${e.type} ${e.time||''}`).join(' · ')||'No major event in 7D'}</div></div><div class="instCard"><div class="k">HISTORICAL EXPECTANCY</div><div class="v">${hist.label}</div><div class="d">${hist.detail}</div></div><div class="instCard"><div class="k">PRICE STRUCTURE</div><div class="v">${s.direction||"—"}</div><div class="d">Trend ${s.trend_strength??'—'}/4 · ATR ${instMoney(s.atr14)}</div></div><div class="instCard"><div class="k">R:R TO TARGET 2</div><div class="v">${s.rr_to_target2==null?'—':Number(s.rr_to_target2).toFixed(1)+'×'}</div><div class="d">Structure/volatility heuristic</div></div></div><div class="instSection"><div class="instSectionTitle">RELATIVE LEADERSHIP</div><div class="instFactors"><div class="instFactor">5D vs SPY<strong>${instFmt(r5.vs_spy)}</strong></div><div class="instFactor">10D vs SPY<strong>${instFmt(r10.vs_spy)}</strong></div><div class="instFactor">20D vs SPY<strong>${instFmt(r20.vs_spy)}</strong></div><div class="instFactor">5D vs ${c.parent||'group'}<strong>${instFmt(r5.vs_parent)}</strong></div><div class="instFactor">20D vs ${c.parent||'group'}<strong>${instFmt(r20.vs_parent)}</strong></div></div></div><div class="instSection"><div class="instSectionTitle">STRUCTURE REVIEW · EXECUTION / INVALIDATION</div><div class="instLevelGrid"><div class="instLevel"><span>TRIGGER</span><b>${instMoney(s.trigger)}</b></div><div class="instLevel"><span>CONFIRMATION</span><b>${instMoney(s.confirmation)}</b></div><div class="instLevel"><span>INVALIDATION</span><b>${instMoney(s.invalidation)}</b></div><div class="instLevel"><span>HARD FAIL</span><b>${instMoney(s.hard_fail)}</b></div><div class="instLevel"><span>TARGET 1</span><b>${instMoney(s.target1)}</b></div><div class="instLevel"><span>TARGET 2</span><b>${instMoney(s.target2)}</b></div></div><div class="tiny" style="margin-top:6px">Confirmation is trigger ±0.15 ATR. Invalidation uses recent structure + 20D mean; hard fail uses broader 20D/50D structure. Decision heuristics, not stop instructions.</div></div>`}
-const _topSetupEvaluationV23=topSetupEvaluation;topSetupEvaluation=function(x){const b=_topSetupEvaluationV23(x),c=institutionalContextMap[x.ticker];if(!c)return {...b,factors:factorBreakdownFor(x,b,null)};let score=b.score,r20=c.relative_strength?.["20"]||{};if(c.triple_relative_strength)score+=6;else{if(Number(r20.vs_spy)>0)score+=3;if(Number(r20.vs_parent)>0)score+=3}if(c.rotation_persistence!=null&&Number(c.rotation_persistence)>=80)score+=4;else if(c.rotation_persistence!=null&&Number(c.rotation_persistence)<50)score-=4;if(c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=3)score-=10;const mr=c.macro_risk?.risk||"CLEAR";if(mr==="HIGH")score-=12;else if(mr==="ELEVATED")score-=6;else if(mr==="WATCH")score-=2;return {...b,score:Math.max(0,Math.min(100,Math.round(score))),context:c,factors:factorBreakdownFor(x,b,c)}};
+const _topSetupEvaluationV23=topSetupEvaluation;topSetupEvaluation=function(x){const b=_topSetupEvaluationV23(x),c=institutionalContextMap[x.ticker];if(!c)return {...b,factors:factorBreakdownFor(x,b,null)};let score=(b.rawScore!=null?b.rawScore:b.score),r20=c.relative_strength?.["20"]||{};if(c.triple_relative_strength)score+=6;else{if(Number(r20.vs_spy)>0)score+=3;if(Number(r20.vs_parent)>0)score+=3}if(c.rotation_persistence!=null&&Number(c.rotation_persistence)>=80)score+=4;else if(c.rotation_persistence!=null&&Number(c.rotation_persistence)<50)score-=4;if(c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=3)score-=10;const mr=c.macro_risk?.risk||"CLEAR";if(mr==="HIGH")score-=12;else if(mr==="ELEVATED")score-=6;else if(mr==="WATCH")score-=2;return {...b,rawScore:score,score:Math.max(0,Math.min(100,Math.round(score))),context:c,factors:factorBreakdownFor(x,b,c)}};
 const _renderTopSetupsV23=renderTopSetups;renderTopSetups=function(){_renderTopSetupsV23();const g=document.getElementById("topSetupsGrid");if(!g)return;(globalTopSetupData||[]).forEach(x=>{});g.querySelectorAll('[data-top-setup]').forEach(card=>{const ticker=card.dataset.topSetup,x=(globalTopSetupData||[]).find(z=>z.ticker===ticker);if(!x)return;const e=topSetupEvaluation(x),c=e.context;if(!c)return;const s=c.structure||{},old=card.querySelector('.topSetupInstitutional');if(old)old.remove();const d=document.createElement('div');d.className='topSetupInstitutional';d.innerHTML=`<div class="topSetupInstGrid">${(e.factors||[]).map(z=>`<div class="topSetupInstMetric">${z[0]}<b>${z[1]}/10</b></div>`).join('')}</div><div class="tiny" style="margin-top:6px">${c.horizon} · trigger ${instMoney(s.trigger)} · invalidation ${instMoney(s.invalidation)} · T2 ${instMoney(s.target2)} · R:R ${s.rr_to_target2??'—'}×${c.catalyst?.days_to_earnings!=null&&c.catalyst.days_to_earnings<=10?` · <span class="instWarn">earnings ${c.catalyst.days_to_earnings}d</span>`:''}</div>`;const actions=card.querySelector('.topSetupActions');card.insertBefore(d,actions||null);const score=card.querySelector('.topSetupScore');if(score)score.textContent=`${e.score}/100`})};
 const _runAutomaticTopSetupsV23=runAutomaticTopSetups;runAutomaticTopSetups=async function(force=false){await _runAutomaticTopSetupsV23(force);const rows=(globalTopSetupData||[]).slice(0,10);for(let n=0;n<rows.length;n+=3)await Promise.all(rows.slice(n,n+3).map(x=>loadInstitutionalContext(x.ticker,x._parentTicker||null,true)));renderTopSetups()};
 const _openSectorStockTickerV23=openSectorStockTicker;openSectorStockTicker=async function(rawTicker,opts={}){const ticker=normalizeStockTicker(rawTicker),parent=currentSector,out=await _openSectorStockTickerV23(rawTicker,opts);setTimeout(()=>loadInstitutionalContext(ticker,parent,false),350);return out};const _openTopSetupDeepDiveV23=openTopSetupDeepDive;openTopSetupDeepDive=function(ticker,parentTicker=null,target="chart"){const out=_openTopSetupDeepDiveV23(ticker,parentTicker,target);loadInstitutionalContext(ticker,parentTicker||currentSector,false);return out};const _renderFlowV23=renderFlow;renderFlow=function(x){const out=_renderFlowV23(x);if(x?.ticker&&institutionalContextMap[x.ticker])renderInstitutionalContext(x.ticker);return out};const _renderOptionsPanelV23=renderOptionsPanel;renderOptionsPanel=function(){const out=_renderOptionsPanelV23();if(activeOptionsData?.ticker&&institutionalContextMap[activeOptionsData.ticker])renderInstitutionalContext(activeOptionsData.ticker);return out};
@@ -9556,6 +9843,235 @@ runAutomaticTopSetups=async function(force=false){
    throw e;
  }
 };
+
+// ===========================================================================
+// v28: pick quality + options entry.
+//  - Market regime and absolute trend now feed the score (a defensive name
+//    "leading" on a -4% day is mostly falling less than SPY).
+//  - Scores are normalized against the maximum attainable raw score instead
+//    of saturating at 100.
+//  - A setup needs a plan with reward/risk >= 1.5; an extended name that only
+//    works on a pullback is labelled WAIT FOR PULLBACK.
+//  - Supply/demand rejections against the rotation get their own lane.
+//  - Contracts come from /api/entry-plan: anchored on the stock's level,
+//    budget-aware, with debit spreads when singles don't fit or IV is rich.
+// ===========================================================================
+const V28_RAW_MAX=130;
+const V28_DEFENSIVE=new Set(["XLP","XLU","XLV","XLRE"]);
+const V28_MIN_RR=1.5;
+window.entryPlanMap=window.entryPlanMap||{};
+function v28Regime(){
+ const j=window.__marketPayload||{},i=j.internals||{},spy=i.SPY||{},vix=i.VIX||{};
+ let stress=0;const why=[];
+ const d1=Number(spy.d1),d5=Number(spy.d5),vv=Number(vix.value),vd5=Number(vix.d5);
+ if(Number.isFinite(d1)&&d1<=-2){stress+=2;why.push(`SPY ${d1.toFixed(1)}% today`);}
+ else if(Number.isFinite(d1)&&d1<=-1){stress+=1;why.push(`SPY ${d1.toFixed(1)}% today`);}
+ if(Number.isFinite(d5)&&d5<=-2){stress+=1;why.push(`SPY ${d5.toFixed(1)}% 5d`);}
+ if(Number.isFinite(vv)&&vv>=25){stress+=1;why.push(`VIX ${vv.toFixed(1)}`);}
+ if(Number.isFinite(vd5)&&vd5>=30){stress+=1;why.push(`VIX +${vd5.toFixed(0)}% 5d`);}
+ if(j.risk_appetite==="Risk-Off"){stress+=2;why.push("risk appetite off");}
+ else if(j.risk_appetite==="Risk-On")stress-=1;
+ const state=!window.__marketPayload?"Unknown":stress>=3?"Risk-Off":stress>=1?"Caution":"Supportive";
+ return {state,stress,why};
+}
+function v28Direction(x,b){
+ const va=b?.va||valueAcceptanceMap[x.ticker];
+ if(va?.direction&&va.direction!=="neutral")return va.direction;
+ const st=stratSignalMap[x.ticker];
+ if(st&&(st.continuity==="bullish"||st.continuity==="bearish"))return st.continuity;
+ return "bullish";
+}
+const _topSetupEvaluationV28=topSetupEvaluation;
+topSetupEvaluation=function(x){
+ const b=_topSetupEvaluationV28(x);
+ const baseRaw=Number(b.rawScore!=null?b.rawScore:b.score);let raw=baseRaw;
+ const warn=[],good=[],gateFailures=(b.gateFailures||[]).slice();let hardPass=b.hardPass;
+ const dir=v28Direction(x,b),bull=dir==="bullish",reg=v28Regime();
+ if(bull&&reg.state==="Risk-Off"){raw-=12;warn.push([`Risk-off tape · ${reg.why.slice(0,2).join(" · ")}`,"warn"]);}
+ else if(bull&&reg.state==="Caution"){raw-=5;warn.push(["Cautious tape","warn"]);}
+ else if(!bull&&reg.state==="Risk-Off"){raw+=3;good.push(["Risk-off tape supports downside","good"]);}
+ if(bull&&(reg.state==="Risk-Off"||reg.state==="Caution")&&V28_DEFENSIVE.has(x._parentTicker)){raw-=6;warn.push([`${x._parentTicker} strength may just be defensive`,"warn"]);}
+ const c=institutionalContextMap[x.ticker],s=c?.structure,pt=c?.parent_trend;
+ let entryMode=null,bestRR=null,counter=null;
+ if(s?.available){
+   const ts=Number(s.trend_strength);
+   if(bull){
+     if(ts>=3)raw+=3;
+     else if(ts===2){raw-=5;warn.push(["Absolute trend mixed","warn"]);}
+     else{raw-=12;gateFailures.push("Absolute trend down (price below its 20/50-day averages)");hardPass=false;}
+   }
+   if(pt&&bull){
+     if(pt.strength===0){raw-=8;gateFailures.push(`${x._parentTicker||"Sector"} is in an absolute downtrend — strength is only relative`);hardPass=false;}
+     else if(pt.strength===1){raw-=4;warn.push([`${x._parentTicker||"Sector"} absolute trend weak`,"warn"]);}
+   }
+   const brr=(s.plan_valid&&s.direction===dir)?Number(s.rr_to_target2):NaN;
+   const prr=(s.pullback&&s.pullback.direction===dir)?Number(s.pullback.rr):NaN;
+   bestRR=Math.max(Number.isFinite(brr)?brr:-1,Number.isFinite(prr)?prr:-1);
+   if(bestRR<V28_MIN_RR){gateFailures.push(bestRR<0?"No valid entry plan on the stock":`Best reward/risk ${bestRR.toFixed(2)} is below ${V28_MIN_RR}`);hardPass=false;}
+   else if(!(brr>=V28_MIN_RR)){entryMode="pullback";warn.push([s.pullback?.in_zone?`In pullback zone · R/R ${prr.toFixed(1)}`:`Wait for pullback · R/R ${prr.toFixed(1)}`,s.pullback?.in_zone?"good":"warn"]);}
+   else entryMode="breakout";
+   const ct=s.counter;
+   if(ct&&ct.direction!==dir){counter=ct;raw-=12;warn.push([ct.type==="supply_rejection"?`Rejected at supply $${ct.level}`:`Held demand $${ct.level}`,"warn"]);}
+ }
+ const delta=raw-baseRaw;
+ const score=Math.max(0,Math.min(100,Math.round(raw*100/V28_RAW_MAX)));
+ const qualificationScore=Math.max(0,Math.min(100,Math.round(Number(b.qualificationScore||0)+delta)));
+ if(hardPass&&qualificationScore<45&&!gateFailures.some(g=>g.includes("qualification bar")))gateFailures.push(`Underlying setup ${qualificationScore}/100 below the 45 qualification bar`);
+ return {...b,rawScore:raw,score,qualificationScore,reasons:[...warn,...b.reasons,...good],gateFailures,hardPass,direction:dir,regime:reg,entryMode,bestRR,counter};
+};
+
+function v28PlanKey(t,d,p){return `${t}|${d}|${p||"auto"}|${v26Budget()}`}
+function v28PlanFor(t,d,p){return window.entryPlanMap[v28PlanKey(t,d,p)]}
+async function v28LoadEntryPlan(ticker,direction,plan){
+ const key=v28PlanKey(ticker,direction,plan);
+ const have=window.entryPlanMap[key];if(have&&!have._loading)return have;
+ window.entryPlanMap[key]={_loading:true};
+ try{
+   const j=await safeTickerFetchJson("/api/entry-plan",ticker,{direction,plan:plan||"",budget:v26Budget()},{ttl:600000,timeoutMs:60000,attempts:1});
+   window.entryPlanMap[key]=j||{ok:false,available:false,reason:"Empty response"};
+ }catch(err){window.entryPlanMap[key]={ok:false,available:false,reason:`Entry plan unavailable · ${err?.message||err}`};}
+ return window.entryPlanMap[key];
+}
+function v28PlanJobs(){
+ const jobs=[];
+ (globalTopSetupData||[]).slice(0,10).forEach(x=>{
+   const s=institutionalContextMap[x.ticker]?.structure;if(!s?.available)return;
+   const e=topSetupEvaluation(x);
+   if(e.hardPass&&e.qualificationScore>=45)jobs.push([x.ticker,e.direction,e.entryMode]);
+   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)jobs.push([x.ticker,e.counter.direction,"rejection"]);
+ });
+ return jobs;
+}
+let v28Hydrating=false;
+async function v28HydrateEntryPlans(){
+ if(v28Hydrating)return;v28Hydrating=true;
+ try{
+   const jobs=v28PlanJobs().filter(([t,d,p])=>{const h=v28PlanFor(t,d,p);return !h||h._loading;});
+   for(let n=0;n<jobs.length;n+=2){
+     await Promise.allSettled(jobs.slice(n,n+2).map(j=>v28LoadEntryPlan(...j)));
+     try{renderTopSetups()}catch(_e){}
+   }
+ }finally{v28Hydrating=false;}
+}
+const _runAutomaticTopSetupsV28=runAutomaticTopSetups;
+runAutomaticTopSetups=async function(force=false){
+ const out=await _runAutomaticTopSetupsV28(force);
+ try{renderTopSetups();await v28HydrateEntryPlans();}catch(e){console.warn("v28 entry plans",e)}
+ return out;
+};
+document.addEventListener("change",e=>{if(e.target&&e.target.id==="v26BudgetInput")setTimeout(()=>v28HydrateEntryPlans(),50);});
+
+function v28Money(v,d=0){const n=Number(v);return Number.isFinite(n)?`$${n.toFixed(d)}`:"—"}
+function v28Pick(p){if(!p||!p.available)return null;return p.recommended==="debit_spread"?(p.spread||p.single):(p.single||p.spread)}
+function v28ContractLabel(z){
+ if(!z)return "—";
+ if(z.structure==="debit_spread"){const L=z.long||{},S=z.short||{},k=String(L.type||"").toLowerCase().startsWith("p")?"P":"C";return `${L.expiration} $${Number(L.strike).toFixed(0)}/$${Number(S.strike).toFixed(0)}${k} spread`;}
+ const L=z.leg||{};return `${L.expiration} $${Number(L.strike).toFixed(0)}${String(L.type||"").toLowerCase().startsWith("p")?"P":"C"}`;
+}
+function v28PlanHTML(p,title){
+ if(!p||p._loading)return `<div class="v28Entry"><div class="v28EntryHead">${title}</div><div class="tiny">Modeling contracts at the entry level…</div></div>`;
+ if(!p.available)return `<div class="v28Entry v28EntryBad"><div class="v28EntryHead">${title}</div><div class="tiny">${p.reason||p.error||"Entry plan unavailable"}</div></div>`;
+ const u=p.underlying||{},z=v28Pick(p),dirUp=p.direction==="bullish";
+ const where=p.plan==="pullback"?(u.in_zone?`In the pullback zone now (stock ${v28Money(p.spot,2)})`:`Wait for a pullback to ${v28Money(u.entry,2)} (stock ${v28Money(p.spot,2)})`)
+   :p.plan==="rejection"?`Enter on a break ${dirUp?"above":"below"} ${v28Money(u.entry,2)}`:`Enter on a break ${dirUp?"above":"below"} ${v28Money(u.entry,2)}`;
+ const lines=[`<div class="v28EntryRow"><b>${where}</b></div>`,`<div class="v28EntryRow tiny">Stock stop ${v28Money(u.stop,2)} · target ${v28Money(u.target,2)} · stock R/R ${u.rr!=null?Number(u.rr).toFixed(1):"—"} · ~${p.hold_days_assumed}d hold assumed</div>`];
+ if(z){
+   const fits=Number(z.cost)<=Number(p.budget);
+   lines.push(`<div class="v28EntryRow"><span class="v28Contract">${v28ContractLabel(z)}</span> · entry ≈ ${v28Money(z.entry_premium,2)} (<b class="${fits?"instGood":"instBad"}">${v28Money(z.cost)}</b>/contract)</div>`);
+   lines.push(`<div class="v28EntryRow tiny">At target ≈ ${v28Money(z.premium_at_target,2)} (<span class="instGood">+${z.gain_pct}%</span>) · at stop ≈ ${v28Money(z.premium_at_stop,2)} (<span class="instBad">−${z.loss_pct}%</span>) · option R/R ${z.option_rr!=null?Number(z.option_rr).toFixed(1):"—"}${z.structure==="debit_spread"?` · max value ${v28Money(Number(z.max_value)*100)}`:""}${z.delta_at_entry!=null?` · Δ ${Number(z.delta_at_entry).toFixed(2)} at entry`:""}</div>`);
+ }else{
+   lines.push(`<div class="v28EntryRow instBad">Nothing fits the ${v28Money(p.budget)} budget · cheapest single ≈ ${v28Money(p.cheapest_single_cost)}</div>`);
+ }
+ if(p.iv_rv!=null)lines.push(`<div class="v28EntryRow tiny">IV / realized vol ${Number(p.iv_rv).toFixed(2)}×${(p.notes||[]).length?` · ${p.notes.join(" ")}`:""}</div>`);
+ lines.push(`<div class="v28EntryRow tiny v28Muted">Modeled with Black-Scholes from ${p.feed||"Alpaca"} quotes · indicative quotes on the free feed — confirm the live bid/ask in your broker.</div>`);
+ return `<div class="v28Entry"><div class="v28EntryHead">${title}</div>${lines.join("")}</div>`;
+}
+const _v26DecisionV28=v26Decision;
+v26Decision=function(x){
+ const d=_v26DecisionV28(x),e=d.e,p=v28PlanFor(x.ticker,e.direction,e.entryMode),z=v28Pick(p);
+ if(p&&p.available){
+   let trade=d.opt.liquidity==="Liquid"?30:d.opt.liquidity==="Tradable"?24:8;
+   trade+=z?(Number(z.cost)<=d.budget?40:4):4;
+   const orr=Number(z?.option_rr);trade+=orr>=3?20:orr>=2?15:orr>=1.5?10:4;
+   trade+=p.iv_rv!=null?(p.iv_rv<1.1?10:p.iv_rv<1.35?7:3):5;
+   d.trade=Math.max(0,Math.min(100,Math.round(trade)));d.cost=z?Number(z.cost):null;
+   d.combined=Math.round(.68*d.setup+.32*d.trade);
+   const risk=d.label==="WAIT · EVENT RISK";
+   if(!z){d.label="GOOD SETUP · NO CONTRACT FITS BUDGET";d.cls="v26Wait";}
+   else if(risk){d.label="WAIT · EVENT RISK";d.cls="v26Wait";}
+   else if(e.entryMode==="pullback"&&!p.underlying?.in_zone){d.label=`WAIT FOR PULLBACK · ${v28Money(p.underlying?.entry,2)}`;d.cls="v26Wait";}
+   else if(d.setup>=80&&d.trade>=70){d.label="A+ · TRADEABLE";d.cls="v26Go";}
+   else if(d.setup>=72&&d.trade>=58){d.label="A · WATCH / TRADEABLE";d.cls="v26Watch";}
+   else if(d.trade<50){d.label="WATCH · EXECUTION WEAK";d.cls="v26Wait";}
+   else{d.label="WATCH FOR ENTRY";d.cls="v26Watch";}
+ }
+ if(e.regime?.state==="Risk-Off"&&e.direction==="bullish"&&d.cls==="v26Go"){d.label="A · TRADEABLE (RISK-OFF TAPE — SIZE DOWN)";d.cls="v26Watch";}
+ d.entryPlan=p;d.pick=z;return d;
+};
+function v28DecorateCards(){
+ const g=document.getElementById("topSetupsGrid");if(!g)return;
+ g.querySelectorAll("[data-top-setup]").forEach(card=>{
+   const x=(globalTopSetupData||[]).find(z=>z.ticker===card.dataset.topSetup);if(!x)return;
+   const e=topSetupEvaluation(x),p=v28PlanFor(x.ticker,e.direction,e.entryMode),z=v28Pick(p);
+   const plan=card.querySelector(".v26Plan");
+   if(plan&&p&&p.available){
+     const spans=plan.querySelectorAll("span b");
+     if(spans[0])spans[0].textContent=z?`${v28ContractLabel(z)} · ${v28Money(z.cost)}/contract`:`none under ${v28Money(p.budget)}`;
+     if(spans[1])spans[1].textContent=v28Money(p.underlying?.entry,2);
+     if(spans[2])spans[2].textContent=v28Money(p.underlying?.stop,2);
+     const labels=plan.querySelectorAll("span");
+     if(labels[1]&&labels[1].firstChild&&labels[1].firstChild.nodeType===3)labels[1].firstChild.textContent=p.plan==="pullback"?"ENTRY ":"TRIGGER ";
+     if(labels[2]&&labels[2].firstChild&&labels[2].firstChild.nodeType===3)labels[2].firstChild.textContent="STOP ";
+   }
+   card.querySelector(".v28Entry")?.remove();
+   if(e.hardPass&&institutionalContextMap[x.ticker]?.structure?.available){
+     const holder=document.createElement("div");holder.innerHTML=v28PlanHTML(p,`ENTRY PLAN · ${e.entryMode==="pullback"?"PULLBACK":"BREAKOUT"} · ${e.direction==="bearish"?"PUTS":"CALLS"}`);
+     const strip=card.querySelector(".v26DecisionStrip");
+     if(strip&&strip.nextSibling)card.insertBefore(holder.firstChild,strip.nextSibling);else card.appendChild(holder.firstChild);
+   }
+ });
+}
+function v28RenderRegime(){
+ const board=document.getElementById("v26TraderBoard");if(!board)return;
+ let el=document.getElementById("v28RegimeBadge");
+ if(!el){el=document.createElement("div");el.id="v28RegimeBadge";el.className="v28Regime";board.insertBefore(el,board.lastElementChild);}
+ const r=v28Regime();
+ el.className=`v28Regime v28Reg${r.state.replace(/[^A-Za-z]/g,"")}`;
+ el.innerHTML=`<span class="tiny">TAPE</span> <b>${r.state}</b>${r.why.length?`<div class="tiny">${r.why.join(" · ")}</div>`:""}`;
+}
+function v28RenderCounter(){
+ const g=document.getElementById("topSetupsGrid");if(!g)return;
+ let sec=document.getElementById("v28CounterSection");
+ const rows=[];
+ (globalTopSetupData||[]).slice(0,10).forEach(x=>{const e=topSetupEvaluation(x);if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)rows.push({x,e,ct:e.counter});});
+ if(!rows.length){sec?.remove();return;}
+ if(!sec){sec=document.createElement("div");sec.id="v28CounterSection";sec.className="v28Counter";g.parentNode.insertBefore(sec,g.nextSibling);}
+ sec.innerHTML=`<div class="v28CounterHead"><b>COUNTER-TREND · REJECTIONS</b><span class="tiny">Price failed at a major prior ${rows.some(r=>r.ct.type==="supply_rejection")?"high":"level"} inside a group that is rotating the other way. Against the rotation — smaller size, faster exits.</span></div>`+
+   rows.map(({x,e,ct})=>{
+     const bear=ct.direction==="bearish",p=v28PlanFor(x.ticker,ct.direction,"rejection");
+     return `<div class="v28CounterCard"><div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus"><span class="v263Lane ${bear?"v28Bear":"v28Bull"}">${bear?"SUPPLY REJECTION":"DEMAND HOLD"}</span> · ${bear?"bearish fade":"bullish reversal"}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">R/R ${Number(ct.rr).toFixed(1)}</div></div>
+     <div class="tiny">${ct.bar_date}: ${bear?"high":"low"} ${v28Money(bear?ct.bar_high:ct.bar_low,2)} tested the prior ${bear?"1-year high":"1-year low"} zone (${v28Money(ct.level,2)}) and closed in the ${bear?"bottom":"top"} ${bear?ct.close_position_pct:100-ct.close_position_pct}% of its range with a ${ct.wick_pct}% ${bear?"upper":"lower"} wick.${ct.extension_atr!=null?` Price is ${Math.abs(ct.extension_atr).toFixed(1)} ATR ${ct.extension_atr>0?"above":"below"} its 20-day average.`:""}</div>
+     <div class="topSetupTrigger">TRIGGER · <b>break ${bear?"below":"above"} ${v28Money(ct.trigger,2)}</b> · stop ${v28Money(ct.stop,2)} · T1 ${v28Money(ct.target1,2)} · T2 ${v28Money(ct.target2,2)}</div>
+     ${v28PlanHTML(p,`ENTRY PLAN · ${bear?"PUTS":"CALLS"}`)}</div>`;
+   }).join("");
+}
+const _renderTopSetupsV28=renderTopSetups;
+renderTopSetups=function(){
+ const out=_renderTopSetupsV28();
+ try{v28RenderRegime();v28DecorateCards();v28RenderCounter();}catch(e){console.warn("v28 render",e)}
+ return out;
+};
+const v28Style=document.createElement("style");v28Style.textContent=`
+.v28Entry{margin:8px 0;padding:10px 11px;border:1px solid #24455c;border-left:4px solid #38bdf8;border-radius:9px;background:#08131b}
+.v28EntryBad{border-left-color:#f59e0b}.v28EntryHead{font-size:10px;font-weight:850;letter-spacing:.6px;color:#7dd3fc;margin-bottom:5px}
+.v28EntryRow{margin-top:4px;font-size:11.5px;color:#dbe7f1}.v28EntryRow.tiny{font-size:10px;color:#93a8ba}.v28Muted{opacity:.75}.v28Contract{font-weight:800;color:#f1f7fb}
+.v28Regime{padding:6px 10px;border-radius:8px;border:1px solid #31516a;background:#071018;min-width:120px}.v28Regime b{font-size:12px}
+.v28RegRiskOff{border-color:#7f1d1d;background:#1d0b0b}.v28RegRiskOff b{color:#f87171}.v28RegCaution{border-color:#78501a}.v28RegCaution b{color:#fbbf24}.v28RegSupportive b{color:#4ade80}
+.v28Counter{margin-top:14px;padding:12px;border:1px solid #4a2a2a;border-radius:11px;background:#120c0e}.v28CounterHead{display:flex;flex-direction:column;gap:3px;margin-bottom:8px}
+.v28CounterHead b{letter-spacing:.5px;color:#fca5a5}.v28CounterCard{padding:10px;border:1px solid #3a2626;border-radius:9px;margin-top:8px;background:#0d0909}
+.v28Bear{color:#fca5a5;border-color:#7f1d1d;background:#2a0b0b}.v28Bull{color:#6ee7a7;border-color:#167146;background:#082419}
+`;document.head.appendChild(v28Style);
+setTimeout(()=>{try{renderTopSetups()}catch(e){}},0);
 
 </script>
 """
