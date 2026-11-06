@@ -1,3 +1,15 @@
+v30.0 — EXIT RULES + POSITION TRACKER, LAGGARD CATCH-UP LANE, REAL OPTION RESULTS
+- Directional plans are single-leg only; debit spreads were removed (the trader uses singles for directional trades and strangles for post-earnings moves).
+- Every plan carries an exit plan:
+  - sell half when the premium reaches the modeled value with the stock halfway to target, or at +50%, whichever comes first, then move the stop to breakeven;
+  - sell the rest at the stock target;
+  - stop on a close through the stock stop, or a premium stop at the larger of −50% and the modeled value at the stop;
+  - time stop (not +20% after the assumed hold);
+  - exit-by date (14 days before expiry, or the session before earnings).
+- MY POSITIONS panel (/api/positions). "Log this trade" on any plan records the contract at your fill (the plan's premium levels are rescaled to the real fill), or you can add positions by hand, including post-earnings strangles. Open positions are marked from Alpaca option snapshots and checked against their rules (HOLD / WATCH / EXIT with the reason). Strangle rules: +40% take profit, −35% stop, 5-session time stop, out 7 days before expiry, and manage the other leg alone once one leg is under $0.10.
+- LAGGARD CATCH-UP lane (/api/laggards). Inside rotating-in groups it looks for holdings with 60-day correlation ≥ 0.55 to the group ETF, a 20-session catch-up gap ≤ −3% (stock return − β × group return), still above ~50-day, with relative strength vs the group turning up over 5 days. Names need liquid/tradable options and get the VP + STRAT read and a call entry plan. They are logged in the track record as lane `laggard`; the nightly job pre-computes them.
+- Track record: each logged contract is marked with its actual daily option closes from the fill day to the outcome day (option average return and option win rate per lane), plus a MY TRADES summary from closed positions.
+
 v29.1 — VP + STRAT REVERSALS IN THE COUNTER-TREND LANE
 - The counter-trend lane also shows VP + STRAT reversals: price at a volume-profile level in the opposite direction with a 1D/1W STRAT signal (for example a Failed 2U) confirming it, and an opposite-direction VP plan clearing 1.5 R/R. They are logged in the track record as lane `vp_counter`, and the nightly job pre-computes their entry plans.
 

@@ -78,20 +78,17 @@ def _structure(spot, atr, sma20):
             "pullback": appmod._pullback_plan("bullish", spot, atr, sma20, spot + 2.5 * atr, spot - 4 * atr)}
 
 
-def test_entry_plan_respects_budget_and_offers_spread():
+def test_entry_plan_is_single_leg_with_exit_rules():
     spot = 91.58
-    rows = [_row("call", k, 42, spot) for k in range(80, 106)]
+    rows = [_row("call", k, d, spot) for k in range(80, 106) for d in (28, 42, 63)]
     st = _structure(spot, 3.55, 82.08)
     out = appmod.option_entry_plan("LEN", "bullish", 250, None, st, rows, spot, 3.55, 0.30)
-    assert out["available"]
-    assert out["plan"] == "pullback"
-    if out["single"]:
-        assert out["single"]["cost"] <= 250
-    if out["spread"]:
-        assert out["spread"]["cost"] <= 250
-        assert out["spread"]["premium_at_target"] <= out["spread"]["max_value"] + 1e-6
-    assert out["single"] or out["spread"]
-    # IV 0.40 vs realized 0.30 -> rich premium flagged
+    assert out["available"] and out["plan"] == "pullback"
+    assert out["spread"] is None
+    assert out["single"] and out["single"]["cost"] <= 250 and out["recommended"] == "single"
+    ep = out["exit_plan"]
+    assert ep["premium_stop"] < out["single"]["entry_premium"] < ep["tp1_premium"] <= out["single"]["entry_premium"] * 1.5 + 1e-6
+    assert ep["exit_by"] and len(ep["rules"]) == 5
     assert out["iv_rv"] and out["iv_rv"] >= 1.3
 
 

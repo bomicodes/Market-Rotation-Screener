@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "29.1"
+APP_VERSION = "30.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v28:","premium-support-v26-1:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
+             "entry-plan-v30:","premium-support-v26-1:","earn-next-v30:","laggards-v30:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2841,7 +2841,7 @@ def _model_leg(row, spot, entry, stop, target, is_put, days_to_entry, hold_days)
     p_flat=bs_price(entry,strike,t_target,iv,is_put)*scale
     h=max(.01,entry*.001)
     delta_entry=abs(bs_price(entry+h,strike,t_entry,iv,is_put)-bs_price(entry-h,strike,t_entry,iv,is_put))/(2*h)
-    return {"iv":iv,"entry":p_entry,"target":p_target,"stop":p_stop,"flat":p_flat,"delta_entry":delta_entry}
+    return {"iv":iv,"entry":p_entry,"target":p_target,"stop":p_stop,"flat":p_flat,"delta_entry":delta_entry,"scale":scale}
 
 
 def _leg_summary(row):
@@ -2905,48 +2905,71 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     affordable=[z for z in singles if z["cost"]<=budget]
     iv_med=float(np.median([z["_m"]["iv"] for z in singles]))
     iv_rv=round(iv_med/rv20,2) if rv20 else None
-    # Debit vertical: long a 0.30–0.65 delta strike, short the strike nearest the target.
-    spreads=[]
-    by_exp={}
-    for r in chain: by_exp.setdefault(r.get("expiration"),[]).append(r)
-    min_width=.4*abs(target-entry_used)
-    for z in singles[:16]:
-        L=z["_row"]; legs=by_exp.get(L.get("expiration"),[])
-        if z["_m"]["delta_entry"]<.40: continue
-        shorts=[r for r in legs if ((L["strike"]-r["strike"]) if is_put else (r["strike"]-L["strike"]))>=min_width]
-        if not shorts: continue
-        S=min(shorts,key=lambda r:abs(r["strike"]-target))
-        ms=_model_leg(S,spot,entry_used,stop,target,is_put,days_to_entry,hold_days)
-        if not ms: continue
-        e=z["_m"]["entry"]-ms["entry"]; tv=z["_m"]["target"]-ms["target"]; sv=z["_m"]["stop"]-ms["stop"]
-        width=abs(L["strike"]-S["strike"])
-        if e<=0.05 or e>=width: continue
-        gain=tv/e-1; loss=1-sv/e
-        orr=gain/loss if loss>0.01 else None
-        spreads.append({"structure":"debit_spread","long":_leg_summary(L),"short":_leg_summary(S),"cost":round(e*100,0),"entry_premium":round(e,2),
-                        "premium_at_target":round(tv,2),"premium_at_stop":round(sv,2),"max_value":round(width,2),"gain_pct":round(gain*100),
-                        "loss_pct":round(loss*100),"option_rr":round(orr,2) if orr is not None else None,"_q":min(orr or 0,5.0)*max(.2,1-abs(z["_m"]["delta_entry"]-.55)*2)})
-    spreads.sort(key=lambda z:-z["_q"])
     best_single=affordable[0] if affordable else None
-    affordable_spreads=[z for z in spreads if z["cost"]<=budget]
-    best_spread=affordable_spreads[0] if affordable_spreads else None
+    # v30: directional trades are single-leg only (the trader does not use spreads).
+    try:
+        cat=cached_refresh_safe(f"earn-next-v30:{ticker}",lambda:_context_earnings_catalyst(ticker),ttl=6*3600)[0]
+    except Exception:
+        cat={}
+    exit_plan=None
+    if best_single:
+        exit_plan=option_exit_plan(best_single,entry_used,stop,target,is_put,hold_days,days_to_entry,cat.get("next_earnings"))
     notes=[]
     if not best_single: notes.append(f"No single {('put' if is_put else 'call')} fits the ${budget:.0f} budget (cheapest modeled entry ${min(z['cost'] for z in singles):.0f}).")
-    if iv_rv and iv_rv>=1.35: notes.append(f"IV is {iv_rv:.2f}× realized volatility — premium is rich; a debit spread reduces the volatility you pay for.")
+    if iv_rv and iv_rv>=1.35: notes.append(f"IV is {iv_rv:.2f}× realized volatility — premium is rich: size down, or wait for IV to cool before entering.")
     if days_to_entry: notes.append(f"Entry requires the stock to reach ${entry:.2f} first; premiums shown are modeled at that price.")
-    recommended=None
-    if best_single and best_spread:
-        recommended="debit_spread" if (iv_rv and iv_rv>=1.35) or (best_spread["option_rr"] or 0)>(best_single["option_rr"] or 0)*1.25 else "single"
-    elif best_single: recommended="single"
-    elif best_spread: recommended="debit_spread"
-    for z in singles+spreads:
+    if exit_plan and exit_plan.get("earnings_before_expiry"): notes.append(f"Earnings {exit_plan['earnings_date']} falls before expiry — plan exits the day before.")
+    for z in singles:
         for k in ("_q","_row","_m"): z.pop(k,None)
     return {"ticker":ticker,"direction":direction,"available":True,"budget":budget,"plan":lv["plan"],"spot":round(spot,2),
             "underlying":{"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":lv["underlying_rr"],"in_zone":days_to_entry==0},
             "vp_plan":(structure.get("vp_plans") or {}).get(direction) if lv["plan"]=="vp" else None,
-            "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":best_spread,"recommended":recommended,
+            "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":None,"recommended":"single" if best_single else None,
+            "exit_plan":exit_plan,"next_earnings":cat.get("next_earnings"),
             "cheapest_single_cost":min(z["cost"] for z in singles),"notes":notes,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
             "method":"Black-Scholes repricing at entry/target/stop, calibrated to the live mid; hold-period theta included."}
+
+
+def option_exit_plan(z, entry, stop, target, is_put, hold_days, days_to_entry, earnings_date=None):
+    """v30: exit rules for a single-leg directional option.
+    - TP1: sell half when the premium reaches the modeled value with the stock
+      halfway to target, or +50%, whichever comes first; then stop to breakeven.
+    - TP2: the rest at the stock target (modeled premium shown).
+    - Stop: stock closes beyond the stock stop, or premium falls to the larger of
+      50% of entry and the modeled value at the stock stop.
+    - Time stop: if the premium is not at least +20% after the assumed hold.
+    - Exit-by date: 14 days before expiry, or the session before earnings."""
+    leg=z["leg"]; m=z["_m"]; dte=int(leg.get("dte") or 0); strike=float(leg["strike"]); iv=m["iv"]; sc=m.get("scale",1.0)
+    p0=float(z["entry_premium"])
+    mid_px=entry+(target-entry)*.5
+    t_half=max(1/365,(dte-days_to_entry-hold_days/2)/365.0)
+    p_half=bs_price(mid_px,strike,t_half,iv,is_put)*sc
+    tp1=min(p_half,p0*1.5)
+    prem_stop=max(p0*.5,float(z["premium_at_stop"]))
+    exp=pd.Timestamp(str(leg.get("expiration"))[:10]) if leg.get("expiration") else None
+    exit_by=(exp-pd.Timedelta(days=14)) if exp is not None else None
+    earn_before=False
+    if earnings_date and exp is not None:
+        try:
+            ed=pd.Timestamp(str(earnings_date)[:10])
+            if pd.Timestamp.now().normalize()<=ed<=exp:
+                earn_before=True; eb=ed-pd.Timedelta(days=1)
+                exit_by=min(exit_by,eb) if exit_by is not None else eb
+        except Exception: pass
+    return {"tp1_premium":round(tp1,2),"tp1_pct":round((tp1/p0-1)*100) if p0>0 else None,"tp1_stock":round(mid_px,2),
+            "tp2_premium":round(float(z["premium_at_target"]),2),"tp2_stock":round(target,2),
+            "premium_stop":round(prem_stop,2),"premium_stop_pct":round((prem_stop/p0-1)*100) if p0>0 else None,"stock_stop":round(stop,2),
+            "time_stop_sessions":int(hold_days),"time_stop_min_gain_pct":20,
+            "exit_by":exit_by.strftime("%Y-%m-%d") if exit_by is not None else None,"earnings_date":str(earnings_date)[:10] if earnings_date else None,
+            "earnings_before_expiry":earn_before,
+            "rules":[f"Sell half at ${tp1:.2f} premium (stock ≈ ${mid_px:.2f}) or +50%, whichever comes first; then move the stop to breakeven.",
+                     f"Sell the rest near ${float(z['premium_at_target']):.2f} (stock target ${target:.2f}).",
+                     f"Exit if the stock closes {'above' if is_put else 'below'} ${stop:.2f} or the premium falls to ${prem_stop:.2f}.",
+                     f"Time stop: out if not up 20% after {int(hold_days)} sessions.",
+                     f"Exit by {exit_by.strftime('%b %d') if exit_by is not None else '—'}{' (before earnings)' if earn_before else ' (14 days before expiry)'}."]}
+
+
+STRANGLE_RULES={"take_profit_pct":40,"stop_pct":-35,"time_stop_sessions":5,"exit_days_before_expiry":7}
 
 
 def modeled_dealer_positioning(rows, spot):
@@ -4369,7 +4392,7 @@ def api_entry_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         budget=max(25.0,min(100000.0,budget))
-        key=f"entry-plan-v28:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
+        key=f"entry-plan-v30:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
         payload,stale,err=cached_refresh_safe(key,lambda:option_entry_plan(ticker,direction,budget,plan),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
@@ -4445,6 +4468,26 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
     return {"status":"timeout" if done else "open","r":round(r,2),"filled":str(after.index[fill_i])[:10],"days":int(min(len(after),fill_i+max_hold)-fill_i),"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
 
 
+def option_outcome(symbol, out, bars=None):
+    """v30: the logged contract's actual daily closes from the fill date to the
+    close (or latest bar while open)."""
+    if bars is None:
+        bars=alpaca_option_daily_bars([symbol],90).get(symbol) or []
+    rows=[]
+    for b in bars:
+        c=_safe_float(b.get("c")); t=str(b.get("t") or "")[:10]
+        if c and t: rows.append((t,c))
+    if not rows: return {"option_status":"no option bars"}
+    f=out.get("filled"); e=out.get("closed")
+    after=[x for x in rows if x[0]>=f]
+    if not after: return {"option_status":"no bars after fill"}
+    entry=after[0][1]
+    window=[x for x in after if (e is None or x[0]<=e)] or after[:1]
+    exitp=window[-1][1]; best=max(x[1] for x in window); worst=min(x[1] for x in window)
+    return {"option_entry":round(entry,2),"option_exit":round(exitp,2),"option_return_pct":round((exitp/entry-1)*100,1),
+            "option_best_pct":round((best/entry-1)*100,1),"option_worst_pct":round((worst/entry-1)*100,1),"option_status":"marked"}
+
+
 def update_setup_outcomes(days=45):
     backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d"); updated=0
     with _setup_db() as con:
@@ -4461,8 +4504,15 @@ def update_setup_outcomes(days=45):
             try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
             except Exception: frames[t]=None
         if frames[t] is None or not len(frames[t]): continue
-        try: out=evaluate_setup_outcome(json.loads(rr["payload"]),frames[t])
+        pl=json.loads(rr["payload"])
+        try: out=evaluate_setup_outcome(pl,frames[t])
         except Exception as e: out={"status":"error","error":str(e)}
+        try:
+            sym=((pl.get("contract") or {}).get("symbol"))
+            if sym and out.get("filled"):
+                out.update(option_outcome(sym,out))
+        except Exception as e:
+            out["option_error"]=str(e)
         now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
         with _setup_db() as con:
             if backend=="postgresql":
@@ -4494,14 +4544,32 @@ def track_record_payload(days=120):
         if st=="open": g["open"]+=1
         if st=="expired": g["expired"]+=1
         if st in ("win","loss","timeout") and oc.get("r") is not None: g["r_sum"]+=float(oc["r"]); g["r_n"]+=1
+        if st in ("win","loss","timeout") and oc.get("option_return_pct") is not None:
+            g.setdefault("opt",[]).append(float(oc["option_return_pct"]))
     lanes=[]
     for g in by.values():
         closed=g["wins"]+g["losses"]
         g["win_rate"]=round(100*g["wins"]/closed) if closed else None
         g["avg_r"]=round(g["r_sum"]/g["r_n"],2) if g["r_n"] else None
+        opt=g.pop("opt",[])
+        g["option_n"]=len(opt); g["option_avg_pct"]=round(float(np.mean(opt)),1) if opt else None
+        g["option_win_rate"]=round(100*sum(1 for x in opt if x>0)/len(opt)) if opt else None
         g.pop("r_sum");g.pop("r_n");lanes.append(g)
     lanes.sort(key=lambda g:-g["logged"])
-    return {"lanes":lanes,"recent":items[:25],"total":len(items),"since":cutoff}
+    try: mine=positions_payload_summary()
+    except Exception: mine=None
+    return {"lanes":lanes,"recent":items[:25],"total":len(items),"since":cutoff,"my_trades":mine}
+
+
+def positions_payload_summary():
+    closed=list_positions("closed")
+    res=[(c["kind"],float(c["close_info"]["pnl_pct"])) for c in closed if (c.get("close_info") or {}).get("pnl_pct") is not None]
+    if not res: return {"closed":0}
+    out={"closed":len(res),"win_rate":round(100*sum(1 for _,x in res if x>0)/len(res)),"avg_pnl_pct":round(float(np.mean([x for _,x in res])),1)}
+    for k in ("single","strangle"):
+        v=[x for kk,x in res if kk==k]
+        if v: out[k]={"n":len(v),"win_rate":round(100*sum(1 for x in v if x>0)/len(v)),"avg_pnl_pct":round(float(np.mean(v)),1)}
+    return out
 
 
 @app.post("/api/setup-log")
@@ -4516,6 +4584,310 @@ def api_setup_log():
 def api_track_record():
     try:return jsonify({"ok":True,**track_record_payload()})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
+# v30 LAGGARD CATCH-UP LANE
+# Inside groups that are rotating in, find stocks that normally move with the
+# group (60-day correlation and beta to the group ETF) but have not caught up
+# over 20 sessions, whose relative line against the group is turning up, and
+# that are not broken (near/above the 50-day). Shortlisted names are checked
+# for options liquidity, then the VP + STRAT read and an entry plan.
+# ---------------------------------------------------------------------------
+def laggard_metrics(stock, etf):
+    s=stock.dropna().astype(float); e=etf.dropna().astype(float)
+    idx=s.index.intersection(e.index); s=s.loc[idx]; e=e.loc[idx]
+    if len(s)<65: return None
+    rs=np.log(s).diff().dropna().tail(60); re_=np.log(e).diff().dropna().tail(60)
+    j=rs.index.intersection(re_.index); rs=rs.loc[j]; re_=re_.loc[j]
+    if len(rs)<40 or float(re_.var())<=0: return None
+    corr=float(np.corrcoef(rs,re_)[0,1]); beta=float(np.cov(rs,re_)[0,1]/re_.var())
+    r20s=float(s.iloc[-1]/s.iloc[-21]-1)*100; r20e=float(e.iloc[-1]/e.iloc[-21]-1)*100
+    gap=r20s-beta*r20e
+    ratio=s/e; turn5=float(ratio.iloc[-1]/ratio.iloc[-6]-1)*100; lag20=float(ratio.iloc[-1]/ratio.iloc[-21]-1)*100
+    sma50=float(s.rolling(50).mean().iloc[-1]); spot=float(s.iloc[-1])
+    return {"corr":round(corr,2),"beta":round(beta,2),"ret20":round(r20s,2),"group_ret20":round(r20e,2),"catch_up_gap":round(gap,2),
+            "rs_turn_5d":round(turn5,2),"rs_lag_20d":round(lag20,2),"above_sma50":spot>=sma50*.97,"spot":round(spot,2)}
+
+
+def laggards_payload(groups, budget=250, top=6):
+    groups=[g for g in dict.fromkeys(groups or []) if g in RRG_UNIVERSE][:10]
+    if not groups: return {"available":False,"reason":"No rotating-in groups supplied.","rows":[]}
+    members={}
+    for etf in groups:
+        try:
+            (holdings,_src),_,_=cached_refresh_safe(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+            for h in apply_sector_supplements(etf,holdings)[:20]:
+                members.setdefault(h["ticker"],etf)
+        except Exception: continue
+    prices=dl_prices(list(dict.fromkeys(["SPY",*groups,*members.keys()])),"6mo",repair_missing=False,attempts=1)
+    cands=[]
+    for t,etf in members.items():
+        if t not in prices or etf not in prices: continue
+        m=laggard_metrics(prices[t],prices[etf])
+        if not m: continue
+        if m["corr"]<.55 or m["catch_up_gap"]>-3 or not m["above_sma50"]: continue
+        m.update(ticker=t,parent=etf,turning=m["rs_turn_5d"]>0)
+        m["score"]=round(-m["catch_up_gap"]*m["corr"]+(3 if m["turning"] else 0)+min(3,max(0,m["rs_turn_5d"])),2)
+        cands.append(m)
+    cands.sort(key=lambda z:-z["score"]); rows=[]
+    for m in cands[:14]:
+        if len(rows)>=top: break
+        try:
+            liq=contract_liquidity_gate(m["ticker"],"0-30",allow_leaps=False)
+            if liq.get("liquidity") not in ("Liquid","Tradable"): continue
+            m["options_liquidity"]=liq.get("liquidity")
+        except Exception: continue
+        try:
+            vb=vp_bundle_cached(m["ticker"]); m["vp_strat"]=vb
+            vpp=(vb.get("plans") or {}).get("bullish") if vb.get("available") else None
+            sig=[z for z in ((vb.get("strat") or {}).get("signals") or []) if z.get("timeframe") in ("1D","1W") and z.get("direction") in ("bullish","either")]
+            m["setup_forming"]=bool(sig) or bool(vpp and vpp.get("in_zone"))
+            if m["setup_forming"]: m["score"]=round(m["score"]+3,2)
+            plan="vp" if (vpp and (vpp.get("rr") or 0)>=1.5) else None
+            m["entry_plan"]=option_entry_plan(m["ticker"],"bullish",budget,plan)
+        except Exception as e:
+            m["entry_plan"]={"available":False,"reason":str(e)}
+        rows.append(m)
+    rows.sort(key=lambda z:-z["score"])
+    return {"available":True,"groups":groups,"rows":rows,"screened":len(members),"candidates":len(cands)}
+
+
+@app.get("/api/laggards")
+def api_laggards():
+    try:
+        groups=[g.strip().upper() for g in (request.args.get("groups") or "").split(",") if g.strip()]
+        try: budget=int(float(request.args.get("budget") or 250))
+        except Exception: budget=250
+        key=f"laggards-v30:{','.join(sorted(set(groups)))}:{budget}"
+        payload,stale,err=cached_refresh_safe(key,lambda:laggards_payload(groups,budget),ttl=900)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
+# v30 POSITION TRACKER
+# Trades the trader actually takes: single-leg directional calls/puts (logged
+# from a plan card, carrying its exit rules) and post-earnings strangles.
+# Open positions are marked from Alpaca option snapshots and checked against
+# their exit rules on every load.
+# ---------------------------------------------------------------------------
+def occ_symbol(ticker, expiration, kind, strike):
+    d=pd.Timestamp(str(expiration)[:10])
+    return f"{ticker.upper().strip()}{d.strftime('%y%m%d')}{'P' if str(kind).lower().startswith('p') else 'C'}{int(round(float(strike)*1000)):08d}"
+
+
+def alpaca_option_snapshots(symbols):
+    symbols=[x for x in dict.fromkeys(symbols or []) if x]
+    out={}
+    for i in range(0,len(symbols),100):
+        r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/snapshots",params={"symbols":",".join(symbols[i:i+100]),"feed":ALPACA_OPTIONS_FEED},timeout=20)
+        if r.status_code in (401,403): raise RuntimeError(f"Alpaca option snapshots rejected ({r.status_code}).")
+        r.raise_for_status(); out.update((r.json() or {}).get("snapshots") or {})
+    return out
+
+
+def _positions_table(con, backend):
+    if backend=="postgresql":
+        con.execute("""CREATE TABLE IF NOT EXISTS positions(id BIGSERIAL PRIMARY KEY, opened_at TEXT NOT NULL, ticker TEXT NOT NULL, kind TEXT NOT NULL,
+          direction TEXT, legs TEXT NOT NULL, plan TEXT, state TEXT, status TEXT NOT NULL DEFAULT 'open', closed_at TEXT, close_info TEXT)""")
+    else:
+        con.execute("""CREATE TABLE IF NOT EXISTS positions(id INTEGER PRIMARY KEY AUTOINCREMENT, opened_at TEXT NOT NULL, ticker TEXT NOT NULL, kind TEXT NOT NULL,
+          direction TEXT, legs TEXT NOT NULL, plan TEXT, state TEXT, status TEXT NOT NULL DEFAULT 'open', closed_at TEXT, close_info TEXT)""")
+
+
+def _row_dict(r, cols):
+    return dict(r) if hasattr(r,"keys") else dict(zip(cols,r))
+
+
+def _default_exit_plan(kind, legs, fill_total):
+    exp=min(pd.Timestamp(str(l["expiration"])[:10]) for l in legs)
+    if kind=="strangle":
+        R=STRANGLE_RULES
+        return {"kind":"strangle","take_profit_pct":R["take_profit_pct"],"stop_pct":R["stop_pct"],"time_stop_sessions":R["time_stop_sessions"],
+                "exit_by":(exp-pd.Timedelta(days=R["exit_days_before_expiry"])).strftime("%Y-%m-%d"),
+                "rules":[f"Take profit at +{R['take_profit_pct']}% on the combined premium.",f"Stop at {R['stop_pct']}% combined.",
+                         f"Time stop: out after {R['time_stop_sessions']} sessions if neither has hit — post-earnings theta and IV crush work against you.",
+                         "If one leg is worth under $0.10, let it go and manage the other leg on its own.",
+                         f"Exit by {(exp-pd.Timedelta(days=R['exit_days_before_expiry'])).strftime('%b %d')} (7 days before expiry)."]}
+    p0=fill_total
+    return {"kind":"single","tp1_premium":round(p0*1.5,2),"tp1_pct":50,"tp2_premium":round(p0*2.0,2),"premium_stop":round(p0*.5,2),"premium_stop_pct":-50,
+            "time_stop_sessions":10,"time_stop_min_gain_pct":20,"exit_by":(exp-pd.Timedelta(days=14)).strftime("%Y-%m-%d"),
+            "rules":["Sell half at +50%, then move the stop to breakeven.","Sell the rest at +100% or your stock target.","Stop at −50% premium or a close through your stock stop.",
+                     "Time stop: out if not up 20% after 10 sessions.",f"Exit by {(exp-pd.Timedelta(days=14)).strftime('%b %d')} (14 days before expiry)."]}
+
+
+def open_position(body):
+    ticker=str(body.get("ticker") or "").upper().strip()
+    kind="strangle" if str(body.get("kind") or "").lower()=="strangle" else "single"
+    legs=[]
+    for l in body.get("legs") or []:
+        typ="put" if str(l.get("type") or "").lower().startswith("p") else "call"
+        strike=_safe_float(l.get("strike")); exp=str(l.get("expiration") or "")[:10]; fill=_safe_float(l.get("fill")); qty=int(_safe_float(l.get("qty")) or 1)
+        if not (ticker and strike and exp and fill and fill>0): raise ValueError("Each leg needs a type, strike, expiration and fill price.")
+        legs.append({"symbol":l.get("symbol") or occ_symbol(ticker,exp,typ,strike),"type":typ,"strike":strike,"expiration":exp,"qty":max(1,qty),"fill":fill})
+    if not legs: raise ValueError("At least one leg is required.")
+    if kind=="strangle" and len(legs)!=2: raise ValueError("A strangle needs one call and one put.")
+    fill_total=sum(l["fill"] for l in legs)
+    plan=dict(body.get("plan") or {})
+    ep=plan.get("exit_plan") or {}
+    if kind=="strangle" or not ep:
+        ep=_default_exit_plan(kind,legs,fill_total)
+    else:
+        # Rescale the modeled premium levels to the actual fill.
+        modeled=_safe_float(plan.get("modeled_entry_premium"))
+        if modeled and modeled>0 and abs(modeled-fill_total)/modeled>.02:
+            k=fill_total/modeled
+            for key in ("tp1_premium","tp2_premium","premium_stop"):
+                if _safe_float(ep.get(key)) is not None: ep[key]=round(float(ep[key])*k,2)
+        ep["kind"]="single"
+    plan["exit_plan"]=ep
+    direction="neutral" if kind=="strangle" else ("bearish" if legs[0]["type"]=="put" else "bullish")
+    now=datetime.utcnow().isoformat(timespec="seconds")+"Z"; backend=_setup_storage_backend()
+    with _setup_db() as con:
+        _positions_table(con,backend)
+        q="INSERT INTO positions(opened_at,ticker,kind,direction,legs,plan,state,status) VALUES(%s,%s,%s,%s,%s,%s,%s,'open')" if backend=="postgresql" else "INSERT INTO positions(opened_at,ticker,kind,direction,legs,plan,state,status) VALUES(?,?,?,?,?,?,?,'open')"
+        con.execute(q,(str(body.get("opened_at") or now),ticker,kind,direction,json.dumps(legs),json.dumps(plan,default=str),json.dumps({"tp1_done":False})))
+        con.commit()
+    return {"ticker":ticker,"kind":kind,"legs":legs,"exit_plan":ep}
+
+
+def _sessions_since(opened_at):
+    try:
+        d0=pd.Timestamp(str(opened_at)[:10]).date(); d1=pd.Timestamp.now().date()
+        return int(np.busday_count(d0,d1))
+    except Exception:
+        return 0
+
+
+def evaluate_position(pos, marks, spot):
+    """Pure function: current P/L and exit-rule alerts for one position."""
+    legs=pos["legs"]; ep=(pos.get("plan") or {}).get("exit_plan") or {}; st=pos.get("state") or {}
+    fill=sum(l["fill"] for l in legs); mark=None
+    leg_marks=[marks.get(l["symbol"]) for l in legs]
+    if all(m is not None for m in leg_marks): mark=sum(leg_marks)
+    pnl=(mark/fill-1)*100 if (mark is not None and fill>0) else None
+    sess=_sessions_since(pos.get("opened_at")); alerts=[]
+    today=pd.Timestamp.now().normalize()
+    exit_by=pd.Timestamp(ep["exit_by"]) if ep.get("exit_by") else None
+    if exit_by is not None:
+        if today>=exit_by: alerts.append(("exit","Exit-by date reached"))
+        elif (exit_by-today).days<=2: alerts.append(("warn",f"Exit-by date {exit_by.strftime('%b %d')} is close"))
+    if pos["kind"]=="strangle":
+        if pnl is not None and pnl>=ep.get("take_profit_pct",40): alerts.append(("exit",f"Take profit: +{pnl:.0f}% ≥ +{ep.get('take_profit_pct',40)}%"))
+        if pnl is not None and pnl<=ep.get("stop_pct",-35): alerts.append(("exit",f"Stop: {pnl:.0f}% ≤ {ep.get('stop_pct',-35)}%"))
+        if sess>=ep.get("time_stop_sessions",5) and not any(a[0]=="exit" for a in alerts): alerts.append(("exit",f"Time stop: {sess} sessions"))
+        for l,m in zip(legs,leg_marks):
+            if m is not None and m<.10: alerts.append(("info",f"{l['type'].title()} leg under $0.10 — manage the other leg alone"))
+    else:
+        bull=pos.get("direction")!="bearish"
+        stock_stop=_safe_float(ep.get("stock_stop") or (pos.get("plan") or {}).get("stock_stop"))
+        tp2_stock=_safe_float(ep.get("tp2_stock") or (pos.get("plan") or {}).get("target"))
+        if mark is not None:
+            if not st.get("tp1_done") and ep.get("tp1_premium") and mark>=float(ep["tp1_premium"]): alerts.append(("exit",f"TP1: premium ${mark:.2f} ≥ ${float(ep['tp1_premium']):.2f} — sell half, stop to breakeven"))
+            if ep.get("tp2_premium") and mark>=float(ep["tp2_premium"]): alerts.append(("exit",f"TP2: premium ${mark:.2f} ≥ ${float(ep['tp2_premium']):.2f} — close the rest"))
+            stop_line=fill if st.get("tp1_done") else _safe_float(ep.get("premium_stop"))
+            if stop_line and mark<=stop_line: alerts.append(("exit",f"{'Breakeven stop' if st.get('tp1_done') else 'Premium stop'}: ${mark:.2f} ≤ ${stop_line:.2f}"))
+        if spot is not None and stock_stop:
+            if (bull and spot<stock_stop) or ((not bull) and spot>stock_stop): alerts.append(("exit",f"Stock ${spot:.2f} is through the stop ${stock_stop:.2f} — exit on a close beyond it"))
+        if spot is not None and tp2_stock:
+            if (bull and spot>=tp2_stock) or ((not bull) and spot<=tp2_stock): alerts.append(("exit",f"Stock reached the target ${tp2_stock:.2f}"))
+        ts=int(ep.get("time_stop_sessions") or 10)
+        if sess>=ts and (pnl is None or pnl<float(ep.get("time_stop_min_gain_pct") or 20)): alerts.append(("exit",f"Time stop: {sess} sessions without +{ep.get('time_stop_min_gain_pct',20)}%"))
+    status="EXIT" if any(a[0]=="exit" for a in alerts) else ("WATCH" if any(a[0]=="warn" for a in alerts) else "HOLD")
+    return {"mark":round(mark,2) if mark is not None else None,"fill":round(fill,2),"pnl_pct":round(pnl,1) if pnl is not None else None,
+            "pnl_dollars":round((mark-fill)*100*min(l["qty"] for l in legs),0) if mark is not None else None,
+            "sessions":sess,"spot":round(spot,2) if spot is not None else None,"alerts":[{"level":a,"text":t} for a,t in alerts],"status":status}
+
+
+def list_positions(status="open"):
+    backend=_setup_storage_backend(); cols=("id","opened_at","ticker","kind","direction","legs","plan","state","status","closed_at","close_info")
+    with _setup_db() as con:
+        _positions_table(con,backend); con.commit()
+        if status=="all": rows=con.execute("SELECT * FROM positions ORDER BY id DESC").fetchall()
+        else:
+            q="SELECT * FROM positions WHERE status=%s ORDER BY id DESC" if backend=="postgresql" else "SELECT * FROM positions WHERE status=? ORDER BY id DESC"
+            rows=con.execute(q,(status,)).fetchall()
+    out=[]
+    for r in rows:
+        d=_row_dict(r,cols)
+        for k in ("legs","plan","state","close_info"): d[k]=json.loads(d[k]) if d.get(k) else ({} if k!="legs" else [])
+        out.append(d)
+    return out
+
+
+def positions_payload():
+    pos=list_positions("open")
+    syms=[l["symbol"] for p in pos for l in p["legs"]]; marks={}; err=None
+    try:
+        snaps=alpaca_option_snapshots(syms)
+        for sym,snap in snaps.items():
+            q=(snap or {}).get("latestQuote") or {}; bid=_safe_float(q.get("bp")); ask=_safe_float(q.get("ap"))
+            t=(snap or {}).get("latestTrade") or {}; last=_safe_float(t.get("p"))
+            marks[sym]=((bid+ask)/2) if (bid is not None and ask and ask>=bid and bid+ask>0) else last
+    except Exception as e:
+        err=str(e)
+    spots={}
+    for t in {p["ticker"] for p in pos}:
+        try:
+            df=dl_ohlc(t,"1m"); spots[t]=float(df["Close"].dropna().iloc[-1])
+        except Exception: spots[t]=None
+    for p in pos: p["live"]=evaluate_position(p,marks,spots.get(p["ticker"]))
+    closed=list_positions("closed")
+    res=[float(c["close_info"].get("pnl_pct")) for c in closed if (c.get("close_info") or {}).get("pnl_pct") is not None]
+    summary={"closed":len(closed),"wins":sum(1 for x in res if x>0),"win_rate":round(100*sum(1 for x in res if x>0)/len(res)) if res else None,
+             "avg_pnl_pct":round(float(np.mean(res)),1) if res else None,
+             "by_kind":{k:{"n":len(v),"avg_pnl_pct":round(float(np.mean(v)),1)} for k in ("single","strangle") for v in [[float(c["close_info"]["pnl_pct"]) for c in closed if c["kind"]==k and (c.get("close_info") or {}).get("pnl_pct") is not None]] if v}}
+    return {"open":pos,"recent_closed":closed[:10],"summary":summary,"mark_error":err,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
+
+
+def close_position(pid, body):
+    backend=_setup_storage_backend(); pos=[p for p in list_positions("open") if int(p["id"])==int(pid)]
+    if not pos: raise ValueError("Open position not found.")
+    p=pos[0]; fill=sum(l["fill"] for l in p["legs"])
+    exit_total=_safe_float(body.get("exit_premium"))
+    if exit_total is None or exit_total<0: raise ValueError("Exit premium (total per contract set) is required.")
+    info={"exit_premium":exit_total,"pnl_pct":round((exit_total/fill-1)*100,1) if fill>0 else None,"note":str(body.get("note") or "")[:200]}
+    now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+    with _setup_db() as con:
+        q="UPDATE positions SET status='closed',closed_at=%s,close_info=%s WHERE id=%s" if backend=="postgresql" else "UPDATE positions SET status='closed',closed_at=?,close_info=? WHERE id=?"
+        con.execute(q,(now,json.dumps(info),int(pid))); con.commit()
+    return info
+
+
+def update_position_state(pid, body):
+    backend=_setup_storage_backend(); pos=[p for p in list_positions("open") if int(p["id"])==int(pid)]
+    if not pos: raise ValueError("Open position not found.")
+    st=dict(pos[0].get("state") or {}); 
+    if "tp1_done" in body: st["tp1_done"]=bool(body["tp1_done"])
+    with _setup_db() as con:
+        q="UPDATE positions SET state=%s WHERE id=%s" if backend=="postgresql" else "UPDATE positions SET state=? WHERE id=?"
+        con.execute(q,(json.dumps(st),int(pid))); con.commit()
+    return st
+
+
+@app.get("/api/positions")
+def api_positions():
+    try:return jsonify({"ok":True,**positions_payload()})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+@app.post("/api/positions")
+def api_positions_open():
+    try:return jsonify({"ok":True,**open_position(request.get_json(silent=True) or {})})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),400
+
+
+@app.post("/api/positions/<int:pid>/close")
+def api_positions_close(pid):
+    try:return jsonify({"ok":True,**close_position(pid,request.get_json(silent=True) or {})})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),400
+
+
+@app.post("/api/positions/<int:pid>/state")
+def api_positions_state(pid):
+    try:return jsonify({"ok":True,"state":update_position_state(pid,request.get_json(silent=True) or {})})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),400
 
 
 # ---------------------------------------------------------------------------
@@ -4630,6 +5002,11 @@ def nightly_run():
             except Exception as e:
                 st["errors"].append(f"{t}: {e}")
         st["counts"]["deep_dive"]=done
+        if hints.get("groups"):
+            st["stage"]="laggards"
+            try:
+                lg=get(f"/api/laggards?groups={','.join(hints['groups'])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
+            except Exception as e: st["errors"].append(f"laggards: {e}")
         st["stage"]="outcomes"
         try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
         except Exception as e: st["errors"].append(f"outcomes: {e}")
@@ -10738,7 +11115,7 @@ function v28DecorateCards(){
    // The entry plan supersedes the legacy premium-history line on the card.
    if(p&&p.available)card.querySelectorAll(".topSetupTrigger").forEach(el=>{if(/^\s*PREMIUM/.test(el.textContent||""))el.style.display="none";});
    if(e.hardPass&&institutionalContextMap[x.ticker]?.structure?.available){
-     const holder=document.createElement("div");holder.innerHTML=v28PlanHTML(p,`ENTRY PLAN · ${e.entryMode==="vp"?"VOLUME PROFILE + STRAT":e.entryMode==="pullback"?"PULLBACK":"BREAKOUT"} · ${e.direction==="bearish"?"PUTS":"CALLS"}`,institutionalContextMap[x.ticker]?.vp_strat);
+     const holder=document.createElement("div");holder.innerHTML=v28PlanHTML(p,`ENTRY PLAN · ${e.entryMode==="vp"?"VOLUME PROFILE + STRAT":e.entryMode==="pullback"?"PULLBACK":"BREAKOUT"} · ${e.direction==="bearish"?"PUTS":"CALLS"}`,institutionalContextMap[x.ticker]?.vp_strat,e.entryMode);
      const strip=card.querySelector(".v26DecisionStrip");
      if(strip&&strip.nextSibling)card.insertBefore(holder.firstChild,strip.nextSibling);else card.appendChild(holder.firstChild);
    }
@@ -10852,6 +11229,190 @@ const v29Style=document.createElement("style");v29Style.textContent=`
 .v29Track summary b{letter-spacing:.5px;color:#9fd3ff}.v29Table{width:100%;border-collapse:collapse;font-size:11px}.v29Table th{color:#7f97a8;font-size:9.5px;text-align:left;padding:4px;border-bottom:1px solid #1f3446}
 .v29Table td{padding:4px;border-bottom:1px solid #132331;color:#d6e3ee}`;document.head.appendChild(v29Style);
 setTimeout(()=>{v29LoadTrackRecord();v29LoadNightlyStatus();},1500);
+
+// ===========================================================================
+// v30: exit rules + position tracker, laggard catch-up lane, real option
+// results in the track record. Directional plans are single-leg only.
+// ===========================================================================
+window.v30PlanRegistry=window.v30PlanRegistry||{};
+function v30Esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function v30SupportiveGroups(){
+ return (sectorData||[]).filter(g=>["Core Sector","Industry / Theme"].includes(g.group)).filter(g=>groupTrajectoryPass(g)||strongestLaggingSectors(Math.max(3,(sectorData||[]).length)).some(z=>z.ticker===g.ticker)).sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a)).map(g=>g.ticker);
+}
+function v30ExitHTML(p,lane){
+ const z=p?.single;if(!p?.available||!z)return "";
+ const ep=p.exit_plan,id=`${p.ticker}|${p.direction}|${p.plan}|${Date.now()%1e7}|${Math.random().toString(36).slice(2,6)}`;
+ window.v30PlanRegistry[id]={p,lane};
+ const rules=(ep?.rules||[]).map(r=>`<li>${v30Esc(r)}</li>`).join("");
+ return `${rules?`<div class="v28EntryRow tiny"><b>EXIT PLAN</b><ul class="v30Rules">${rules}</ul></div>`:""}
+ <div class="v30LogRow"><button type="button" class="v30Btn" data-v30-log="${v30Esc(id)}">Log this trade</button>
+ <span class="v30LogForm" data-v30-form="${v30Esc(id)}" hidden>fill $<input type="number" step="0.01" min="0.01" value="${Number(z.entry_premium).toFixed(2)}" data-v30-fill> qty <input type="number" step="1" min="1" value="1" data-v30-qty>
+ <button type="button" class="v30Btn v30Go" data-v30-save="${v30Esc(id)}">Save</button></span><span class="tiny" data-v30-msg="${v30Esc(id)}"></span></div>`;
+}
+// Append exit rules + log button inside every rendered entry plan.
+const _v28PlanHTMLV30=v28PlanHTML;
+v28PlanHTML=function(p,title,vs,lane){
+ const html=_v28PlanHTMLV30(p,title,vs);
+ if(!p||!p.available||!p.single)return html;
+ const tail=v30ExitHTML(p,lane||p.plan);
+ return html.replace(/<\/div>\s*$/,tail+"</div>");
+};
+async function v30PostJSON(url,body){const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});const j=await r.json().catch(()=>({ok:false,error:`HTTP ${r.status}`}));if(!j.ok)throw new Error(j.error||`HTTP ${r.status}`);return j}
+document.addEventListener("click",async ev=>{
+ const t=ev.target;if(!t||!t.closest)return;
+ // Typing a fill price inside a setup card must not open the deep dive.
+ if(t.closest(".v30LogRow")&&!t.closest("button"))ev.stopPropagation();
+ const logBtn=t.closest("[data-v30-log]");
+ if(logBtn){ev.preventDefault();ev.stopPropagation();const f=document.querySelector(`[data-v30-form="${CSS.escape(logBtn.dataset.v30Log)}"]`);if(f)f.hidden=!f.hidden;return;}
+ const save=t.closest("[data-v30-save]");
+ if(save){
+   ev.preventDefault();ev.stopPropagation();
+   const id=save.dataset.v30Save,reg=window.v30PlanRegistry[id],form=document.querySelector(`[data-v30-form="${CSS.escape(id)}"]`),msg=document.querySelector(`[data-v30-msg="${CSS.escape(id)}"]`);
+   if(!reg||!form)return;
+   const p=reg.p,z=p.single,L=z.leg||{},fill=Number(form.querySelector("[data-v30-fill]").value),qty=Number(form.querySelector("[data-v30-qty]").value)||1;
+   try{
+     await v30PostJSON("/api/positions",{ticker:p.ticker,kind:"single",legs:[{symbol:L.symbol,type:L.type,strike:L.strike,expiration:L.expiration,qty,fill}],
+       plan:{exit_plan:p.exit_plan,stock_stop:p.underlying?.stop,target:p.underlying?.target,entry:p.underlying?.entry,lane:reg.lane,modeled_entry_premium:z.entry_premium,setup_date:v29TradeDate()}});
+     if(msg)msg.textContent=" Logged ✓";form.hidden=true;v30LoadPositions();
+   }catch(e){if(msg)msg.textContent=` ${e.message}`;}
+   return;
+ }
+ const close=t.closest("[data-v30-close]");
+ if(close){ev.preventDefault();const f=document.querySelector(`[data-v30-closeform="${close.dataset.v30Close}"]`);if(f)f.hidden=!f.hidden;return;}
+ const closeSave=t.closest("[data-v30-closesave]");
+ if(closeSave){
+   ev.preventDefault();const pid=closeSave.dataset.v30Closesave,f=document.querySelector(`[data-v30-closeform="${pid}"]`);
+   try{await v30PostJSON(`/api/positions/${pid}/close`,{exit_premium:Number(f.querySelector("input").value)});v30LoadPositions();v29LoadTrackRecord();}catch(e){f.querySelector(".tiny").textContent=` ${e.message}`;}
+   return;
+ }
+ const tp1=t.closest("[data-v30-tp1]");
+ if(tp1){ev.preventDefault();try{await v30PostJSON(`/api/positions/${tp1.dataset.v30Tp1}/state`,{tp1_done:tp1.dataset.on!=="1"});v30LoadPositions();}catch(e){}return;}
+ const add=t.closest("#v30AddSave");
+ if(add){
+   ev.preventDefault();const f=document.getElementById("v30AddForm"),msg=f.querySelector(".v30AddMsg");
+   const v=n=>f.querySelector(`[name="${n}"]`)?.value;
+   const kind=v("kind"),ticker=String(v("ticker")||"").toUpperCase().trim(),exp=v("expiration"),qty=Number(v("qty"))||1;
+   const legs=kind==="strangle"
+     ?[{type:"call",strike:Number(v("call_strike")),expiration:exp,fill:Number(v("call_fill")),qty},{type:"put",strike:Number(v("put_strike")),expiration:exp,fill:Number(v("put_fill")),qty}]
+     :[{type:kind,strike:Number(v("strike")),expiration:exp,fill:Number(v("fill")),qty}];
+   try{await v30PostJSON("/api/positions",{ticker,kind:kind==="strangle"?"strangle":"single",legs,plan:{lane:kind==="strangle"?"post-earnings strangle":"manual"}});msg.textContent=" Added ✓";v30LoadPositions();}
+   catch(e){msg.textContent=` ${e.message}`;}
+   return;
+ }
+},true);
+document.addEventListener("change",ev=>{if(ev.target?.name==="kind"&&ev.target.closest("#v30AddForm")){const f=document.getElementById("v30AddForm"),s=ev.target.value==="strangle";f.querySelectorAll(".v30Single").forEach(x=>x.hidden=s);f.querySelectorAll(".v30Strangle").forEach(x=>x.hidden=!s);}});
+
+// ---- My positions panel ------------------------------------------------------
+async function v30LoadPositions(){
+ try{const r=await fetch("/api/positions");const j=await r.json();window.__positions=j;v30RenderPositions();}catch(e){window.__positions={ok:false,error:String(e)};v30RenderPositions();}
+}
+function v30LegsLabel(p){
+ if(p.kind==="strangle"){const c=p.legs.find(l=>l.type==="call"),q=p.legs.find(l=>l.type==="put");return `${c?.expiration||""} $${q?.strike}P / $${c?.strike}C strangle`;}
+ const l=p.legs[0]||{};return `${l.expiration} $${l.strike}${l.type==="put"?"P":"C"} ×${l.qty}`;
+}
+function v30RenderPositions(){
+ const board=document.getElementById("v26TraderBoard");if(!board)return;
+ let el=document.getElementById("v30Positions");
+ if(!el){el=document.createElement("div");el.id="v30Positions";el.className="v30Positions";board.parentNode.insertBefore(el,board);}
+ const j=window.__positions||{},open=j.open||[];
+ const rows=open.map(p=>{const L=p.live||{},cls=L.status==="EXIT"?"v30Exit":L.status==="WATCH"?"v30Watch":"v30Hold";
+   const alerts=(L.alerts||[]).map(a=>`<div class="tiny ${a.level==="exit"?"instBad":a.level==="warn"?"instWarn":""}">${v30Esc(a.text)}</div>`).join("");
+   return `<tr><td><b>${v30Esc(p.ticker)}</b><div class="tiny">${v30Esc(v30LegsLabel(p))}</div></td><td>$${Number(L.fill).toFixed(2)}</td><td>${L.mark==null?"—":"$"+Number(L.mark).toFixed(2)}</td>
+   <td class="${L.pnl_pct>0?"instGood":L.pnl_pct<0?"instBad":""}">${L.pnl_pct==null?"—":(L.pnl_pct>0?"+":"")+L.pnl_pct+"%"}${L.pnl_dollars!=null?`<div class="tiny">${L.pnl_dollars>=0?"+":""}$${L.pnl_dollars}</div>`:""}</td>
+   <td>${L.spot==null?"—":"$"+L.spot}</td><td>${L.sessions}</td><td><span class="v30Status ${cls}">${L.status||"—"}</span>${alerts}</td>
+   <td>${p.kind==="single"?`<button type="button" class="v30Btn" data-v30-tp1="${p.id}" data-on="${p.state?.tp1_done?1:0}">${p.state?.tp1_done?"TP1 ✓":"Mark TP1"}</button>`:""}
+   <button type="button" class="v30Btn" data-v30-close="${p.id}">Close</button><span data-v30-closeform="${p.id}" hidden> exit $<input type="number" step="0.01" min="0" style="width:64px" value="${L.mark??""}"> <button type="button" class="v30Btn v30Go" data-v30-closesave="${p.id}">Save</button><span class="tiny"></span></span></td></tr>`}).join("");
+ const sm=j.summary||{};
+ el.innerHTML=`<div class="v30Head"><b>MY POSITIONS</b><span class="tiny">${open.length} open${sm.closed?` · ${sm.closed} closed · win ${sm.win_rate}% · avg ${sm.avg_pnl_pct>0?"+":""}${sm.avg_pnl_pct}%`:""}${j.mark_error?` · <span class="instBad">marks unavailable: ${v30Esc(j.mark_error)}</span>`:""} · marks from ${v30Esc(j.feed||"Alpaca")} (indicative)</span><button type="button" class="v30Btn" onclick="v30LoadPositions()">↻</button></div>
+ ${open.length?`<table class="v29Table"><thead><tr><th>Position</th><th>Fill</th><th>Mark</th><th>P/L</th><th>Stock</th><th>Days</th><th>Status · exit rules</th><th></th></tr></thead><tbody>${rows}</tbody></table>`:`<div class="tiny">No open positions. Use “Log this trade” on a plan, or add one below (strangles included).</div>`}
+ <details class="v30Add"><summary class="tiny">+ Add a position (directional call/put or post-earnings strangle)</summary>
+ <div id="v30AddForm" class="v30AddForm">
+  <select name="kind"><option value="call">Call</option><option value="put">Put</option><option value="strangle">Strangle</option></select>
+  <input name="ticker" placeholder="Ticker" size="6"> <input name="expiration" type="date">
+  <span class="v30Single"><input name="strike" type="number" step="0.5" placeholder="Strike" style="width:72px"> fill $<input name="fill" type="number" step="0.01" style="width:64px"></span>
+  <span class="v30Strangle" hidden>put <input name="put_strike" type="number" step="0.5" placeholder="Strike" style="width:64px"> $<input name="put_fill" type="number" step="0.01" style="width:56px"> · call <input name="call_strike" type="number" step="0.5" placeholder="Strike" style="width:64px"> $<input name="call_fill" type="number" step="0.01" style="width:56px"></span>
+  qty <input name="qty" type="number" min="1" value="1" style="width:48px"> <button type="button" class="v30Btn v30Go" id="v30AddSave">Add</button><span class="tiny v30AddMsg"></span>
+  <div class="tiny">Directional trades added here get default rules (half at +50%, rest at +100%, stop −50%, 10-session time stop, out 14 days before expiry). Strangles: +40% take profit, −35% stop, 5-session time stop, out 7 days before expiry.</div>
+ </div></details>`;
+}
+
+// ---- Laggard catch-up lane ---------------------------------------------------
+let v30LaggardsLoading=false;
+async function v30LoadLaggards(){
+ if(v30LaggardsLoading)return;v30LaggardsLoading=true;
+ const groups=v30SupportiveGroups().slice(0,10);
+ window.__laggards={loading:true,groups};v30RenderLaggards();
+ try{
+   const r=await fetch(`/api/laggards?groups=${encodeURIComponent(groups.join(","))}&budget=${encodeURIComponent(v26Budget())}`);
+   window.__laggards=await r.json();
+ }catch(e){window.__laggards={ok:false,error:String(e)};}
+ finally{v30LaggardsLoading=false;v30RenderLaggards();v30LogLaggards();}
+}
+function v30RenderLaggards(){
+ const g=document.getElementById("topSetupsGrid");if(!g)return;
+ let sec=document.getElementById("v30Laggards");
+ if(!sec){sec=document.createElement("div");sec.id="v30Laggards";sec.className="v30Laggards";g.parentNode.insertBefore(sec,g.nextSibling);}
+ else if(sec.previousElementSibling!==g)g.parentNode.insertBefore(sec,g.nextSibling);
+ const j=window.__laggards||{};
+ const head=`<div class="v30Head"><b>LAGGARD CATCH-UP</b><span class="tiny">Stocks that normally move with a rotating-in group (60-day correlation & beta) but haven't caught up over 20 sessions, whose line vs the group is turning up, and that are still above their 50-day.${j.screened?` ${j.screened} holdings screened · ${j.candidates} lagging`:""}</span></div>`;
+ if(j.loading){sec.innerHTML=head+`<div class="tiny">Screening ${v30Esc((j.groups||[]).join(", "))}…</div>`;return;}
+ if(!j.ok||!j.available){sec.innerHTML=head+`<div class="tiny">${v30Esc(j.error||j.reason||"Laggard scan unavailable.")}</div>`;return;}
+ if(!(j.rows||[]).length){sec.innerHTML=head+`<div class="tiny">No liquid laggards in the rotating-in groups right now.</div>`;return;}
+ sec.innerHTML=head+`<div class="v30LagGrid">`+j.rows.map(m=>{
+   const p=m.entry_plan;
+   return `<div class="v28CounterCard v30LagCard"><div class="topSetupHead"><div><div class="topSetupTicker">${v30Esc(m.ticker)}</div><div class="topSetupStatus"><span class="v263Lane v28Bull">LAGGARD</span> · ${v30Esc(m.parent)} · options ${v30Esc(m.options_liquidity||"")}${m.setup_forming?' · <span class="instGood">setup forming</span>':""}</div></div><div class="topSetupScore">${Number(m.score).toFixed(1)}</div></div>
+   <div class="tiny">20d: stock ${m.ret20>0?"+":""}${m.ret20}% vs ${v30Esc(m.parent)} ${m.group_ret20>0?"+":""}${m.group_ret20}% · β ${m.beta} · corr ${m.corr} · catch-up gap <b>${m.catch_up_gap}%</b> · RS vs group ${m.rs_turn_5d>0?"+":""}${m.rs_turn_5d}% last 5d</div>
+   ${v28PlanHTML(p,"ENTRY PLAN · CALLS",m.vp_strat,"laggard")}</div>`;}).join("")+`</div>`;
+}
+let v30LaggardLogSig="";
+async function v30LogLaggards(){
+ try{
+   const j=window.__laggards||{},date=v29TradeDate(),rows=[];
+   (j.rows||[]).forEach(m=>{const p=m.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;
+     rows.push({ticker:m.ticker,trade_date:date,lane:"laggard",direction:"bullish",fill:(p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone))?"limit":"stop",
+       entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:m.score,regime:v28Regime().state,parent:m.parent,
+       contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
+   const sig=JSON.stringify(rows.map(r=>[r.ticker,r.trade_date]));
+   if(rows.length&&sig!==v30LaggardLogSig){v30LaggardLogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
+ }catch(e){console.warn("laggard log",e)}
+}
+const _runAutomaticTopSetupsV30=runAutomaticTopSetups;
+runAutomaticTopSetups=async function(force=false){const out=await _runAutomaticTopSetupsV30(force);try{v30LoadLaggards()}catch(e){}return out};
+document.addEventListener("change",e=>{if(e.target&&e.target.id==="v26BudgetInput")setTimeout(()=>v30LoadLaggards(),80);});
+
+// ---- Track record: option results + my trades -------------------------------
+const _v29RenderTrackRecordV30=v29RenderTrackRecord;
+v29RenderTrackRecord=function(){
+ _v29RenderTrackRecordV30();
+ const sec=document.getElementById("v29TrackRecord"),tr=window.__trackRecord;if(!sec||!tr)return;
+ const tbl=sec.querySelector("table.v29Table");
+ if(tbl&&!tbl.dataset.v30){
+   tbl.dataset.v30="1";
+   tbl.querySelector("thead tr")?.insertAdjacentHTML("beforeend","<th>Option avg</th><th>Option win %</th>");
+   [...tbl.querySelectorAll("tbody tr")].forEach((row,i)=>{const l=(tr.lanes||[])[i]||{};row.insertAdjacentHTML("beforeend",`<td>${l.option_avg_pct==null?"—":(l.option_avg_pct>0?"+":"")+l.option_avg_pct+"%"}${l.option_n?` <span class="tiny">(${l.option_n})</span>`:""}</td><td>${l.option_win_rate==null?"—":l.option_win_rate+"%"}</td>`);});
+ }
+ const mt=tr.my_trades;
+ if(mt&&!sec.querySelector(".v30Mine")){
+   const div=document.createElement("div");div.className="tiny v30Mine";div.style.marginTop="8px";
+   div.innerHTML=mt.closed?`<b>MY TRADES</b> · ${mt.closed} closed · win ${mt.win_rate}% · avg ${mt.avg_pnl_pct>0?"+":""}${mt.avg_pnl_pct}%${mt.single?` · directional ${mt.single.n} (${mt.single.win_rate}% · ${mt.single.avg_pnl_pct>0?"+":""}${mt.single.avg_pnl_pct}%)`:""}${mt.strangle?` · strangles ${mt.strangle.n} (${mt.strangle.win_rate}% · ${mt.strangle.avg_pnl_pct>0?"+":""}${mt.strangle.avg_pnl_pct}%)`:""}`:`<b>MY TRADES</b> · none closed yet`;
+   sec.appendChild(div);
+ }
+ const note=sec.querySelector("div.tiny");if(note&&!note.dataset.v30){note.dataset.v30="1";note.insertAdjacentText("beforeend"," Option avg uses the logged contract's actual daily closes from the fill day to the outcome day.");}
+};
+const _renderTopSetupsV30=renderTopSetups;
+renderTopSetups=function(){const out=_renderTopSetupsV30();try{v30RenderPositions();if(window.__laggards)v30RenderLaggards();}catch(e){console.warn("v30 render",e)}return out};
+const v30Style=document.createElement("style");v30Style.textContent=`
+.v30Positions{margin:6px 0 10px;padding:10px 12px;border:1px solid #2a4a3a;border-radius:11px;background:#0a1712}.v30Head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.v30Head b{letter-spacing:.5px;color:#86efac}.v30Btn{padding:3px 8px;border-radius:6px;border:1px solid #31516a;background:#0b1923;color:#dbe7f1;font-size:10.5px;cursor:pointer}
+.v30Go{border-color:#167146;color:#6ee7a7}.v30Status{display:inline-block;padding:1px 6px;border-radius:999px;font-size:9.5px;font-weight:900}.v30Hold{color:#93c5fd;border:1px solid #1e3a5f}
+.v30Watch{color:#fbbf24;border:1px solid #78501a}.v30Exit{color:#f87171;border:1px solid #7f1d1d;background:#1d0b0b}.v30Rules{margin:3px 0 0 14px;padding:0}.v30Rules li{margin:1px 0}
+.v30LogRow{margin-top:6px}.v30LogForm input{width:64px;background:#071018;border:1px solid #31516a;color:#eaf2f8;border-radius:5px;padding:2px 4px}
+.v30Add{margin-top:6px}.v30AddForm{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}.v30AddForm input,.v30AddForm select{background:#071018;border:1px solid #31516a;color:#eaf2f8;border-radius:5px;padding:3px 5px}
+.v30Laggards{margin-top:14px;padding:12px;border:1px solid #1f4a3a;border-radius:11px;background:#08130f}.v30Laggards .v30Head b{color:#6ee7a7}
+.v30LagGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:8px}@media(max-width:760px){.v30LagGrid{grid-template-columns:1fr}}
+.v30LagCard{border-color:#1d3b2f;background:#07100c}`;document.head.appendChild(v30Style);
+setTimeout(()=>{v30LoadPositions();},1200);
+setInterval(()=>{if(document.visibilityState==="visible")v30LoadPositions();},5*60*1000);
 
 </script>
 """
