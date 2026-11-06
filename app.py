@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.0"
+APP_VERSION = "30.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4129,7 +4129,7 @@ def auth_required():
 @app.before_request
 def protect_app():
     # v29: the nightly trigger/status endpoints are public but self-limiting
-    # (one run per 6h, no data returned beyond run status).
+    # (one run per market close, no data returned beyond run status).
     if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status") or request.path.startswith("/static/"):
         return None
     if auth_required():
@@ -5031,8 +5031,10 @@ def api_nightly_run():
     with NIGHTLY["lock"]:
         if NIGHTLY["running"]: return jsonify({"ok":True,"started":False,"reason":"already running",**_nightly_public_status()})
         last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
-        if last and time.time()-float(last)<6*3600 and request.args.get("force")!="1":
-            return jsonify({"ok":True,"started":False,"reason":"ran within the last 6 hours",**_nightly_public_status()})
+        # One run per market close: a manual run during the day must not block
+        # the scheduled after-close run. Also never more than once per 30 min.
+        if last and request.args.get("force")!="1" and (float(last)>=last_market_close_ts() or time.time()-float(last)<1800):
+            return jsonify({"ok":True,"started":False,"reason":"already ran since the latest close",**_nightly_public_status()})
         NIGHTLY["running"]=True
         threading.Thread(target=nightly_run,daemon=True,name="nightly").start()
     return jsonify({"ok":True,"started":True})

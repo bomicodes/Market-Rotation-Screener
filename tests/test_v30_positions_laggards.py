@@ -80,3 +80,17 @@ def test_option_outcome_uses_actual_bars():
             {"t": "2026-11-12T05:00:00Z", "c": 3.1}]
     o = appmod.option_outcome("X", {"filled": "2026-11-09", "closed": "2026-11-11"}, bars)
     assert o["option_entry"] == 2.0 and o["option_exit"] == 3.4 and o["option_return_pct"] == 70.0
+
+
+def test_nightly_guard_is_per_close(monkeypatch):
+    c = appmod.app.test_client()
+    started = []
+    monkeypatch.setattr(appmod.threading, "Thread", lambda target=None, **k: type("T", (), {"start": lambda self: started.append(1)})())
+    monkeypatch.setattr(appmod, "last_market_close_ts", lambda now=None: 1_000_000.0)
+    monkeypatch.setattr(appmod, "_kv_get", lambda k, d=None: d)
+    appmod.NIGHTLY.update(running=False, started=1_000_000.0 - 3600)   # ran before the close, 1h earlier
+    monkeypatch.setattr(appmod.time, "time", lambda: 1_000_000.0 + 3600)
+    assert c.post("/api/nightly/run").get_json()["started"] is True
+    appmod.NIGHTLY.update(running=False, started=1_000_000.0 + 60)       # already ran after the close
+    assert c.post("/api/nightly/run").get_json()["started"] is False
+    appmod.NIGHTLY.update(running=False, started=None)
