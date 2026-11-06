@@ -5029,12 +5029,12 @@ def _nightly_public_status():
 @app.post("/api/nightly/run")
 def api_nightly_run():
     with NIGHTLY["lock"]:
-        if NIGHTLY["running"]: return jsonify({"ok":True,"started":False,"reason":"already running",**_nightly_public_status()})
+        if NIGHTLY["running"]: return jsonify({"ok":True,"started":False,"reason":"already running","status":_nightly_public_status()})
         last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
         # One run per market close: a manual run during the day must not block
         # the scheduled after-close run. Also never more than once per 30 min.
         if last and request.args.get("force")!="1" and (float(last)>=last_market_close_ts() or time.time()-float(last)<1800):
-            return jsonify({"ok":True,"started":False,"reason":"already ran since the latest close",**_nightly_public_status()})
+            return jsonify({"ok":True,"started":False,"reason":"already ran since the latest close","status":_nightly_public_status()})
         NIGHTLY["running"]=True
         threading.Thread(target=nightly_run,daemon=True,name="nightly").start()
     return jsonify({"ok":True,"started":True})
