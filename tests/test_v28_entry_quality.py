@@ -173,5 +173,10 @@ def test_setup_log_roundtrip_and_track_record(tmp_path, monkeypatch):
 
 
 def test_l2_only_serves_after_close(monkeypatch):
+    monkeypatch.setattr(appmod, "L2_PREFIXES", ("market",))
     monkeypatch.setattr(appmod, "market_open_now", lambda now=None: True)
+    appmod.L2_MEMORY["market"] = (9e12, {"x": 1})
     assert appmod.l2_get("market") is None
+    monkeypatch.setattr(appmod, "market_open_now", lambda now=None: False)
+    monkeypatch.setattr(appmod, "_l2_preload", lambda: None)
+    assert appmod.l2_get("market")[1] == {"x": 1}
