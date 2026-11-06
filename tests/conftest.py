@@ -11,3 +11,8 @@ def _isolate_l2_cache(monkeypatch):
     appmod.L2_MEMORY.clear()
     yield
     appmod.L2_MEMORY.clear()
+
+
+@pytest.fixture(autouse=True)
+def _no_network_earnings(monkeypatch):
+    monkeypatch.setattr(appmod, "_context_earnings_catalyst", lambda t: {"next_earnings": None, "days_to_earnings": None, "risk": "Unknown"})
