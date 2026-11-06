@@ -104,3 +104,74 @@ def test_entry_plan_reports_when_nothing_fits_budget():
     assert out["available"] and out["plan"] == "rejection"
     assert out["single"] is None
     assert any("budget" in n for n in out["notes"])
+
+
+# ---------------------------------------------------------------- v29 ------
+def _daily(rows, start="2026-10-01"):
+    idx = pd.bdate_range(start, periods=len(rows))
+    o, h, l, c = zip(*rows)
+    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": 1e6}, index=idx)
+
+
+def test_strat_failed_2u_and_inside_bar():
+    df = _daily([(100, 102, 98, 101), (101, 105, 100, 104), (104, 107, 103, 103.5)])
+    sig = appmod.strat_actionable(df, "1D")
+    assert any(x["type"] == "Failed 2U" and x["direction"] == "bearish" for x in sig)
+    df2 = _daily([(100, 102, 98, 101), (101, 105, 100, 104), (103, 104.5, 101, 102)])
+    sig2 = appmod.strat_actionable(df2, "1D")
+    assert any(x["type"].endswith("pending") for x in sig2)
+
+
+def test_strat_ftfc_states():
+    rows = [(100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(70)]
+    st = appmod.strat_ftfc(_daily(rows, "2026-07-01"))
+    assert st["state"] == "bullish"
+
+
+def _visible(prices_by_session):
+    sessions = []
+    for i, prices in enumerate(prices_by_session):
+        bins = [{"price": p, "volume": v} for p, v in prices]
+        sessions.append({"date": f"2026-10-{i+1:02d}", "profile": {"bins": bins}})
+    weeks = [{"week": "2026-W41", "profile": {"vah": 104, "poc": 101, "val": 98}},
+             {"week": "2026-W42", "profile": {"vah": 106, "poc": 103, "val": 100}}]
+    return {"sessions": sessions, "weeks": weeks}
+
+
+def test_swing_profile_and_vp_strat_plan():
+    sess = []
+    for _ in range(15):
+        sess.append([(95 + k * .5, 2000 if 100 <= 95 + k * .5 <= 102 else (300 if 103 <= 95 + k * .5 <= 104 else 800)) for k in range(30)])
+    vp = appmod.swing_volume_profile(_visible(sess), 101.2)
+    assert vp["available"] and 99 <= vp["poc"] <= 103 and vp["val"] < vp["poc"] < vp["vah"]
+    bar = pd.Series({"Open": 100.8, "High": 101.6, "Low": 100.5, "Close": 101.2})
+    plan = appmod.vp_strat_plan("bullish", 101.2, 1.5, vp, bar, 108.0, 94.0)
+    assert plan and plan["stop"] < plan["level"] <= plan["entry"] < plan["target"]
+    assert plan["rr"] > 0
+
+
+def test_outcome_win_loss_and_expiry():
+    df = _daily([(100, 101, 99, 100), (100, 103, 99.5, 102.5), (102.5, 106.5, 102, 106), (106, 107, 105, 106)], "2026-10-05")
+    row = {"trade_date": "2026-10-05", "lane": "breakout", "direction": "bullish", "entry": 102.0, "stop": 99.0, "target": 106.0}
+    out = appmod.evaluate_setup_outcome(row, df)
+    assert out["status"] == "win" and out["r"] > 1
+    row2 = dict(row, stop=101.0, target=110.0)
+    df2 = _daily([(100, 101, 99, 100), (100, 103, 100.5, 102.5), (102.5, 102.8, 100.8, 101)], "2026-10-05")
+    assert appmod.evaluate_setup_outcome(row2, df2)["status"] == "loss"
+    row3 = dict(row, lane="pullback", entry=90.0, stop=88.0, target=96.0)
+    flat = _daily([(100, 101, 99, 100)] * 13, "2026-10-05")
+    assert appmod.evaluate_setup_outcome(row3, flat)["status"] == "expired"
+
+
+def test_setup_log_roundtrip_and_track_record(tmp_path, monkeypatch):
+    monkeypatch.setattr(appmod, "DATABASE_URL", "")
+    monkeypatch.setattr(appmod, "SETUP_DB_PATH", str(tmp_path / "t.sqlite3"))
+    n = appmod.log_setups([{"ticker": "LEN", "trade_date": "2026-11-05", "lane": "pullback", "direction": "bullish", "entry": 83, "stop": 78.5, "target": 95}])
+    assert n == 1
+    tr = appmod.track_record_payload(days=3650)
+    assert tr["total"] == 1 and tr["lanes"][0]["lane"] == "pullback"
+
+
+def test_l2_only_serves_after_close(monkeypatch):
+    monkeypatch.setattr(appmod, "market_open_now", lambda now=None: True)
+    assert appmod.l2_get("market") is None

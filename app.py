@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "28.1"
+APP_VERSION = "29.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -380,12 +380,132 @@ def cached(key, fn, ttl=CACHE_TTL):
         return val
 
 
+# ---------------------------------------------------------------------------
+# v29 PERSISTENT (L2) CACHE
+# Selected endpoint payloads are also written to Postgres (SQLite locally).
+# Outside regular market hours, a payload saved after the most recent close is
+# served from there, so a board computed by the nightly job (or an earlier
+# evening visit) survives the free Render instance going to sleep. During
+# market hours nothing is read from L2 and behaviour is unchanged.
+# ---------------------------------------------------------------------------
+L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
+             "entry-plan-v28:","premium-support-v26-1:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
+L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
+
+
+def _et_now():
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York"))
+
+
+def market_open_now(now=None):
+    now=now or _et_now()
+    if now.weekday()>=5: return False
+    mins=now.hour*60+now.minute
+    return 570<=mins<960
+
+
+def last_market_close_ts(now=None):
+    """Epoch seconds of the most recent 16:00 ET weekday close (holidays ignored)."""
+    now=now or _et_now()
+    d=now
+    if now.weekday()<5 and (now.hour*60+now.minute)>=960:
+        close=now.replace(hour=16,minute=0,second=0,microsecond=0)
+    else:
+        d=now-timedelta(days=1)
+        while d.weekday()>=5: d=d-timedelta(days=1)
+        close=d.replace(hour=16,minute=0,second=0,microsecond=0)
+    return close.timestamp()
+
+
+def _l2_enabled(key):
+    return any(str(key).startswith(p) for p in L2_PREFIXES)
+
+
+def _l2_table(con, backend):
+    if backend=="postgresql":
+        con.execute("CREATE TABLE IF NOT EXISTS l2_cache(key TEXT PRIMARY KEY, saved_at DOUBLE PRECISION NOT NULL, payload TEXT NOT NULL)")
+    else:
+        con.execute("CREATE TABLE IF NOT EXISTS l2_cache(key TEXT PRIMARY KEY, saved_at REAL NOT NULL, payload TEXT NOT NULL)")
+
+
+def _l2_preload():
+    """Load every L2 entry saved after the latest close into memory, once per close."""
+    close=last_market_close_ts()
+    if L2_STATE["loaded_for"]==close: return
+    with L2_STATE["lock"]:
+        if L2_STATE["loaded_for"]==close: return
+        rows=[]
+        try:
+            backend=_setup_storage_backend()
+            with _setup_db() as con:
+                _l2_table(con,backend); con.commit()
+                q="SELECT key,saved_at,payload FROM l2_cache WHERE saved_at>=%s" if backend=="postgresql" else "SELECT key,saved_at,payload FROM l2_cache WHERE saved_at>=?"
+                rows=con.execute(q,(close,)).fetchall()
+        except Exception as e:
+            L2_STATE["errors"]+=1; _mark_source("l2_cache",False,e)
+        L2_MEMORY.clear()
+        for r in rows:
+            try:
+                k=r["key"] if hasattr(r,"keys") else r[0]; ts=r["saved_at"] if hasattr(r,"keys") else r[1]; raw=r["payload"] if hasattr(r,"keys") else r[2]
+                L2_MEMORY[k]=(float(ts),json.loads(raw))
+            except Exception:
+                continue
+        L2_STATE["loaded_for"]=close
+
+
+def l2_get(key):
+    if not _l2_enabled(key) or market_open_now(): return None
+    _l2_preload()
+    hit=L2_MEMORY.get(key)
+    if hit and hit[0]>=last_market_close_ts(): return hit
+    return None
+
+
+def _l2_writer_loop():
+    while True:
+        try:
+            if not L2_STATE["queue"]:
+                time.sleep(.5); continue
+            batch=[]
+            while L2_STATE["queue"] and len(batch)<25: batch.append(L2_STATE["queue"].popleft())
+            backend=_setup_storage_backend()
+            with _setup_db() as con:
+                _l2_table(con,backend)
+                for key,ts,raw in batch:
+                    if backend=="postgresql":
+                        con.execute("INSERT INTO l2_cache(key,saved_at,payload) VALUES(%s,%s,%s) ON CONFLICT(key) DO UPDATE SET saved_at=EXCLUDED.saved_at,payload=EXCLUDED.payload",(key,ts,raw))
+                    else:
+                        con.execute("INSERT OR REPLACE INTO l2_cache(key,saved_at,payload) VALUES(?,?,?)",(key,ts,raw))
+                con.commit()
+        except Exception as e:
+            L2_STATE["errors"]+=1; _mark_source("l2_cache",False,e); time.sleep(2)
+
+
+def l2_put(key, val, ts=None):
+    if not _l2_enabled(key): return
+    try: raw=json.dumps(val,separators=(",",":"),default=str,allow_nan=False)
+    except Exception:
+        try: raw=json.dumps(json.loads(json.dumps(val,default=str).replace("NaN","null").replace("Infinity","null")),separators=(",",":"))
+        except Exception: return
+    ts=float(ts or time.time())
+    if ts>=last_market_close_ts(): L2_MEMORY[key]=(ts,json.loads(raw))
+    L2_STATE["queue"].append((key,ts,raw))
+    if L2_STATE["writer"] is None or not L2_STATE["writer"].is_alive():
+        t=threading.Thread(target=_l2_writer_loop,daemon=True,name="l2-writer"); L2_STATE["writer"]=t; t.start()
+
+
 def cached_refresh_safe(key, fn, force=False, ttl=CACHE_TTL):
     """Refresh without destroying the last known-good payload."""
     now = time.time()
     hit = CACHE.get(key)
     if hit and not force and now - hit[0] < ttl:
         return hit[1], False, None
+    if not force:
+        l2=l2_get(key)
+        if l2 is not None:
+            CACHE[key]=(now,l2[1])
+            return l2[1], False, None
     with _cache_lock(key):
         now = time.time()
         hit = CACHE.get(key)
@@ -394,6 +514,7 @@ def cached_refresh_safe(key, fn, force=False, ttl=CACHE_TTL):
         try:
             val = fn()
             CACHE[key] = (now, val)
+            l2_put(key, val, now)
             return val, False, None
         except Exception as e:
             if hit:
@@ -2693,6 +2814,9 @@ def _entry_levels_for(structure, direction, plan=None):
     ct=s.get("counter")
     if ct and ct.get("direction")==direction:
         options.append(("rejection",ct["trigger"],ct["stop"],ct["target2"],ct.get("rr"),False))
+    vpp=(s.get("vp_plans") or {}).get(direction)
+    if vpp:
+        options.append(("vp",vpp["entry"],vpp["stop"],vpp["target"],vpp.get("rr"),bool(vpp.get("in_zone")) and abs(vpp["entry"]-float(s.get("spot") or vpp["entry"]))<1e-9))
     if plan:
         options=[o for o in options if o[0]==plan] or options
     if not options: return None
@@ -2727,7 +2851,12 @@ def _leg_summary(row):
 def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, structure=None, rows=None, spot=None, atr=None, rv20=None):
     ticker=ticker.upper().strip(); direction="bearish" if str(direction).lower().startswith("bear") else "bullish"
     is_put=direction=="bearish"; budget=max(25.0,float(budget or 250))
-    if structure is None: structure=_context_structure(ticker)
+    if structure is None:
+        structure=_context_structure(ticker)
+        try:
+            vpb=vp_bundle_cached(ticker)
+            if structure.get("available") and vpb.get("available"): structure["vp_plans"]=vpb.get("plans")
+        except Exception: pass
     if not structure or not structure.get("available"):
         return {"ticker":ticker,"available":False,"reason":"Price structure unavailable."}
     spot=float(spot or structure.get("spot")); atr=float(atr or structure.get("atr14") or 0)
@@ -2814,6 +2943,7 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
         for k in ("_q","_row","_m"): z.pop(k,None)
     return {"ticker":ticker,"direction":direction,"available":True,"budget":budget,"plan":lv["plan"],"spot":round(spot,2),
             "underlying":{"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":lv["underlying_rr"],"in_zone":days_to_entry==0},
+            "vp_plan":(structure.get("vp_plans") or {}).get(direction) if lv["plan"]=="vp" else None,
             "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":best_spread,"recommended":recommended,
             "cheapest_single_cost":min(z["cost"] for z in singles),"notes":notes,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
             "method":"Black-Scholes repricing at entry/target/stop, calibrated to the live mid; hold-period theta included."}
@@ -3623,6 +3753,146 @@ def _context_earnings_catalyst(ticker):
     return {"next_earnings":nxt.strftime("%Y-%m-%d"),"days_to_earnings":days,"risk":risk}
 
 
+def swing_volume_profile(visible, spot, sessions_n=20, rows=50):
+    """v29: composite profile over the last ~20 RTH sessions built from the
+    per-session profiles, plus prior/current-week value areas, HVN/LVN nodes and
+    the acceptance state relative to the prior week's value area."""
+    sess=[x.get("profile") for x in (visible or {}).get("sessions") or [] if x.get("profile")][-sessions_n:]
+    weeks=[x.get("profile") for x in (visible or {}).get("weeks") or [] if x.get("profile")]
+    pts=[]
+    for p in sess:
+        for b in p.get("bins") or []:
+            pr=_safe_float(b.get("price")); v=_safe_float(b.get("volume"))
+            if pr and v and v>0: pts.append((pr,v))
+    if len(pts)<20: return {"available":False,"reason":"Not enough intraday profile data."}
+    prices=np.array([x[0] for x in pts]); vols=np.array([x[1] for x in pts])
+    lo,hi=float(prices.min()),float(prices.max())
+    if hi<=lo: return {"available":False,"reason":"Flat profile."}
+    edges=np.linspace(lo,hi,rows+1); centers=(edges[:-1]+edges[1:])/2
+    hist=np.zeros(rows)
+    ix=np.clip(np.searchsorted(edges,prices,side="right")-1,0,rows-1)
+    np.add.at(hist,ix,vols)
+    poc_i=int(np.argmax(hist)); total=float(hist.sum()); chosen={poc_i}; acc=float(hist[poc_i]); L,R=poc_i-1,poc_i+1
+    while acc<.70*total and (L>=0 or R<rows):
+        lv=hist[L] if L>=0 else -1; rv=hist[R] if R<rows else -1
+        if rv>lv: chosen.add(R); acc+=rv; R+=1
+        else: chosen.add(L); acc+=lv; L-=1
+    val=float(edges[min(chosen)]); vah=float(edges[max(chosen)+1]); poc=float(centers[poc_i])
+    sm=np.convolve(hist,np.ones(3)/3,mode="same"); med=float(np.median(sm[sm>0])) if (sm>0).any() else 0
+    hvn=[float(centers[i]) for i in range(1,rows-1) if sm[i]>=sm[i-1] and sm[i]>=sm[i+1] and sm[i]>=1.25*med]
+    lvn=[float(centers[i]) for i in range(1,rows-1) if sm[i]<=sm[i-1] and sm[i]<=sm[i+1] and sm[i]<=.6*med]
+    pw=weeks[-2] if len(weeks)>=2 else None; cw=weeks[-1] if weeks else None
+    state="unknown"; detail=None
+    if pw:
+        pvah,pval=_safe_float(pw.get("vah")),_safe_float(pw.get("val"))
+        recent_closes=[_safe_float(p.get("close")) for p in sess[-5:]]
+        if pvah and pval and spot:
+            if spot>pvah: state="accepting above prior-week value"
+            elif spot<pval: state="accepting below prior-week value"
+            else: state="inside prior-week value"
+    def rnd(v): return round(float(v),2) if v is not None else None
+    return {"available":True,"poc":rnd(poc),"vah":rnd(vah),"val":rnd(val),"hvn":[rnd(x) for x in hvn][:8],"lvn":[rnd(x) for x in lvn][:8],
+            "prior_week":{"vah":rnd(_safe_float(pw.get("vah"))),"poc":rnd(_safe_float(pw.get("poc"))),"val":rnd(_safe_float(pw.get("val")))} if pw else None,
+            "current_week":{"vah":rnd(_safe_float(cw.get("vah"))),"poc":rnd(_safe_float(cw.get("poc"))),"val":rnd(_safe_float(cw.get("val")))} if cw else None,
+            "sessions":len(sess),"state":state}
+
+
+def vp_failed_auction(daily, prior_week):
+    """Price closed above (below) the prior week's value area within the last
+    five sessions and is now back inside it: the breakout was not accepted."""
+    try:
+        if not prior_week or daily is None or len(daily)<6: return None
+        vah,val=_safe_float(prior_week.get("vah")),_safe_float(prior_week.get("val"))
+        closes=[float(x) for x in daily["Close"].dropna().iloc[-6:]]
+        highs=[float(x) for x in daily["High"].dropna().iloc[-6:]]; lows=[float(x) for x in daily["Low"].dropna().iloc[-6:]]
+        spot=closes[-1]
+        if vah and val and val<spot<vah:
+            if any(h>vah for h in highs[-5:]) and max(closes[-5:-1] or [spot])>=vah*.995 or (highs[-1]>vah and spot<vah):
+                return {"direction":"bearish","type":"failed auction above prior-week value","level":round(vah,2)}
+            if any(l<val for l in lows[-5:]) and min(closes[-5:-1] or [spot])<=val*1.005 or (lows[-1]<val and spot>val):
+                return {"direction":"bullish","type":"failed auction below prior-week value","level":round(val,2)}
+    except Exception:
+        return None
+    return None
+
+
+def vp_strat_plan(direction, spot, atr, vp, daily_bar, recent_high, recent_low):
+    """v29: entry anchored on a volume-profile level, triggered by STRAT.
+    Bullish: nearest VP support at/below price (composite VAH/POC, prior-week
+    VAH/POC, HVNs). If price is already at it, the trigger is a 2U through the
+    current daily bar's high; otherwise the plan waits at the level for a 2U /
+    failed-2D there. Stop goes under the next VP level (or 1 ATR), the target is
+    the next VP level overhead with at least 1.5R."""
+    if not vp or not vp.get("available") or not atr or atr<=0 or direction not in ("bullish","bearish"): return None
+    named=[("composite VAH",vp.get("vah")),("composite POC",vp.get("poc")),("composite VAL",vp.get("val"))]
+    for nm,src in (("prior-week",vp.get("prior_week")),("this-week",vp.get("current_week"))):
+        if src:
+            named+= [(f"{nm} VAH",src.get("vah")),(f"{nm} POC",src.get("poc")),(f"{nm} VAL",src.get("val"))]
+    named+=[("HVN",x) for x in vp.get("hvn") or []]
+    levels=sorted([(n,float(v)) for n,v in named if v],key=lambda z:z[1])
+    bull=direction=="bullish"
+    if bull:
+        cands=[z for z in levels if z[1]<=spot+.1*atr and spot-z[1]<=2.0*atr]
+        if not cands: return None
+        name,lvl=max(cands,key=lambda z:z[1])
+        at=spot-lvl<=.5*atr
+        entry=(float(daily_bar["High"])+.01) if at else lvl
+        below=[z for z in levels if z[1]<lvl-.25*atr]
+        stop=max(below,key=lambda z:z[1])[1]-.25*atr if below else lvl-1.0*atr
+        stop=max(stop,lvl-2.0*atr); stop=min(stop,lvl-.5*atr)
+        risk=entry-stop
+        above=[z for z in levels if z[1]>=entry+1.5*risk]+[("recent high",float(recent_high))]
+        above=[z for z in above if z[1]>entry]
+        tname,target=min(above,key=lambda z:z[1]) if above else ("2 ATR",entry+2*atr)
+        trig=f"2U above {entry:.2f} (today's high) while holding {name} {lvl:.2f}" if at else f"wait for price at {name} {lvl:.2f}, then a 2U / failed 2D there"
+    else:
+        cands=[z for z in levels if z[1]>=spot-.1*atr and z[1]-spot<=2.0*atr]
+        if not cands: return None
+        name,lvl=min(cands,key=lambda z:z[1])
+        at=lvl-spot<=.5*atr
+        entry=(float(daily_bar["Low"])-.01) if at else lvl
+        above=[z for z in levels if z[1]>lvl+.25*atr]
+        stop=min(above,key=lambda z:z[1])[1]+.25*atr if above else lvl+1.0*atr
+        stop=min(stop,lvl+2.0*atr); stop=max(stop,lvl+.5*atr)
+        risk=stop-entry
+        below=[z for z in levels if z[1]<=entry-1.5*risk]+[("recent low",float(recent_low))]
+        below=[z for z in below if z[1]<entry]
+        tname,target=max(below,key=lambda z:z[1]) if below else ("2 ATR",entry-2*atr)
+        trig=f"2D below {entry:.2f} (today's low) while capped by {name} {lvl:.2f}" if at else f"wait for price at {name} {lvl:.2f}, then a 2D / failed 2U there"
+    if risk<=0: return None
+    reward=(target-entry) if bull else (entry-target)
+    return {"type":"vp","direction":direction,"level_name":name,"level":round(lvl,2),"entry":round(entry,2),"stop":round(stop,2),
+            "target":round(target,2),"target_name":tname,"rr":round(reward/risk,2),"in_zone":bool(at),"trigger":trig}
+
+
+def vp_bundle(ticker):
+    """v29: swing volume profile + STRAT read + VP/STRAT plans for both directions."""
+    ticker=ticker.upper().strip()
+    df=dl_ohlc(ticker,"1y")
+    if df is None or len(df)<30: return {"available":False,"reason":"No daily history."}
+    df=df.dropna(subset=["Open","High","Low","Close"])
+    c=df["Close"].astype(float);h=df["High"].astype(float);l=df["Low"].astype(float)
+    prev=c.shift(1);tr=pd.concat([(h-l).abs(),(h-prev).abs(),(l-prev).abs()],axis=1).max(axis=1);atr=float(tr.rolling(14).mean().iloc[-1])
+    spot=float(c.iloc[-1])
+    visible,_,_=cached_refresh_safe(f"visible-v25-1:{ALPACA_STOCK_FEED}:{ticker}:1m:1d",lambda:alpaca_visible_profiles(ticker,"1m","1d"),ttl=120)
+    vp=swing_volume_profile(visible,spot)
+    try: strat,_,_=cached_refresh_safe(f"strat-v25-1:{ticker}",lambda:strat_payload(ticker),ttl=120)
+    except Exception: strat={}
+    fa=vp_failed_auction(df,(vp or {}).get("prior_week")) if vp.get("available") else None
+    plans={}
+    for d in ("bullish","bearish"):
+        try: plans[d]=vp_strat_plan(d,spot,atr,vp,df.iloc[-1],float(h.iloc[-20:].max()),float(l.iloc[-20:].min()))
+        except Exception: plans[d]=None
+    return {"available":True,"ticker":ticker,"spot":round(spot,2),"atr14":round(atr,2),"vp":vp,"failed_auction":fa,
+            "strat":{"ftfc":(strat or {}).get("ftfc"),"signals":(strat or {}).get("signals") or [],"continuity":(strat or {}).get("continuity"),
+                     "frames":[{k:f.get(k) for k in ("timeframe","scenario","pattern","direction")} for f in (strat or {}).get("frames") or []]},
+            "plans":plans}
+
+
+def vp_bundle_cached(ticker):
+    return cached_refresh_safe(f"vp-bundle-v29:{ticker.upper()}",lambda:vp_bundle(ticker),ttl=900)[0]
+
+
 def _pullback_plan(direction, spot, atr, sma20, recent_high, recent_low):
     """v28: trend-direction entry on a pullback to the 20-day mean instead of
     chasing a 20-day breakout. Entry sits a quarter ATR beyond the 20-day
@@ -3767,6 +4037,12 @@ def institutional_context_payload(ticker,parent=None):
     triple=bool(parent and all((rs[str(n)].get("vs_spy") if rs[str(n)].get("vs_spy") is not None else -999)>0 and (rs[str(n)].get("vs_parent") if rs[str(n)].get("vs_parent") is not None else -999)>0 for n in (5,10,20)))
     structure=_context_structure(ticker);catalyst=_context_earnings_catalyst(ticker)
     parent_trend=_absolute_trend(par) if len(par) else None
+    try:
+        vpb=vp_bundle_cached(ticker)
+        if structure.get("available") and vpb.get("available"):
+            structure["vp_plans"]=vpb.get("plans")
+    except Exception as e:
+        vpb={"available":False,"reason":str(e)}
     horizon="1–3 week swing" if structure.get("trend_strength",0)>=4 and persistence is not None and persistence>=67 else ("2–5 day swing" if structure.get("trend_strength",0)>=2 else "Tactical / wait for confirmation")
     signature=f"v24|{parent or 'NONE'}|{horizon}|{'triple' if triple else 'mixed-rs'}|{structure.get('direction','neutral')}"
     try:save_setup_snapshot({"ticker":ticker,"spot":structure.get("spot"),"bias":structure.get("direction"),"score":persistence,"signature":signature,"raw":{"parent":parent,"relative_strength":rs,"structure":structure,"horizon":horizon,"catalyst":catalyst}})
@@ -3777,7 +4053,7 @@ def institutional_context_payload(ticker,parent=None):
     except Exception as e:
         hist={"count":0,"returns":{},"error":str(e)};baseline={"count":0,"returns":{},"error":str(e)}
     macro=macro_risk_snapshot(7)
-    return {"ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,"triple_relative_strength":triple,"structure":structure,"parent_trend":parent_trend,"horizon":horizon,"catalyst":catalyst,"macro_risk":macro,"signature":signature,"historical_expectancy":hist,"ticker_baseline_expectancy":baseline}
+    return {"ticker":ticker,"parent":parent,"relative_strength":rs,"rotation_persistence":persistence,"triple_relative_strength":triple,"structure":structure,"parent_trend":parent_trend,"vp_strat":vpb,"horizon":horizon,"catalyst":catalyst,"macro_risk":macro,"signature":signature,"historical_expectancy":hist,"ticker_baseline_expectancy":baseline}
 
 @app.get("/api/institutional-context/<ticker>")
 def api_institutional_context(ticker):
@@ -3829,7 +4105,9 @@ def auth_required():
 
 @app.before_request
 def protect_app():
-    if request.path in ("/health", "/login") or request.path.startswith("/static/"):
+    # v29: the nightly trigger/status endpoints are public but self-limiting
+    # (one run per 6h, no data returned beyond run status).
+    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status") or request.path.startswith("/static/"):
         return None
     if auth_required():
         if request.path.startswith("/api/"):
@@ -4087,7 +4365,7 @@ def api_entry_plan(ticker):
         direction=(request.args.get("direction") or "bullish").lower()
         if direction not in ("bullish","bearish"):direction="bullish"
         plan=(request.args.get("plan") or "").lower() or None
-        if plan not in (None,"pullback","breakout","rejection"):plan=None
+        if plan not in (None,"pullback","breakout","rejection","vp"):plan=None
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         budget=max(25.0,min(100000.0,budget))
@@ -4095,6 +4373,309 @@ def api_entry_plan(ticker):
         payload,stale,err=cached_refresh_safe(key,lambda:option_entry_plan(ticker,direction,budget,plan),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+# ---------------------------------------------------------------------------
+# v29 SETUP LOG + OUTCOME TRACKING
+# Every Top Setup / counter-trend card the board shows is logged once per
+# trading day with its plan. The nightly job walks forward through daily bars:
+# did price reach the entry, and after that which came first, stop or target
+# (same-bar ties count as the stop)? Results are reported in R multiples.
+# ---------------------------------------------------------------------------
+def _setup_log_table(con, backend):
+    if backend=="postgresql":
+        con.execute("""CREATE TABLE IF NOT EXISTS setup_log(trade_date TEXT NOT NULL, ticker TEXT NOT NULL, lane TEXT NOT NULL,
+          direction TEXT, created_at TEXT, payload TEXT NOT NULL, outcome TEXT, updated_at TEXT, PRIMARY KEY(trade_date,ticker,lane))""")
+    else:
+        con.execute("""CREATE TABLE IF NOT EXISTS setup_log(trade_date TEXT NOT NULL, ticker TEXT NOT NULL, lane TEXT NOT NULL,
+          direction TEXT, created_at TEXT, payload TEXT NOT NULL, outcome TEXT, updated_at TEXT, PRIMARY KEY(trade_date,ticker,lane))""")
+
+
+def log_setups(rows):
+    backend=_setup_storage_backend(); now=datetime.utcnow().isoformat(timespec="seconds")+"Z"; n=0
+    with _setup_db() as con:
+        _setup_log_table(con,backend)
+        for r in rows or []:
+            t=str(r.get("ticker") or "").upper().strip(); d=str(r.get("trade_date") or "")[:10]; lane=str(r.get("lane") or "")[:24]
+            if not t or not d or not lane: continue
+            if not all(_safe_float(r.get(k)) for k in ("entry","stop","target")): continue
+            vals=(d,t,lane,str(r.get("direction") or "bullish"),now,json.dumps(r,default=str))
+            if backend=="postgresql":
+                con.execute("""INSERT INTO setup_log(trade_date,ticker,lane,direction,created_at,payload) VALUES(%s,%s,%s,%s,%s,%s)
+                  ON CONFLICT(trade_date,ticker,lane) DO NOTHING""",vals)
+            else:
+                con.execute("INSERT OR IGNORE INTO setup_log(trade_date,ticker,lane,direction,created_at,payload) VALUES(?,?,?,?,?,?)",vals)
+            n+=1
+        con.commit()
+    return n
+
+
+def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
+    """Pure function: walk daily bars after the setup date."""
+    bull=str(row.get("direction") or "bullish")!="bearish"
+    entry,stop,target=float(row["entry"]),float(row["stop"]),float(row["target"])
+    lane=row.get("lane"); d0=pd.Timestamp(str(row["trade_date"])[:10])
+    after=df[df.index>d0]
+    if not len(after): return {"status":"pending","sessions":0}
+    risk=abs(entry-stop) or 1e-9
+    # Pullback / VP-level plans fill at or better than the level; breakout and
+    # rejection plans need price to trade through the trigger.
+    fill=row.get("fill") or ("limit" if lane=="pullback" else "stop")
+    def touched(bar):
+        if fill=="limit": return (bar["Low"]<=entry) if bull else (bar["High"]>=entry)
+        return (bar["High"]>=entry) if bull else (bar["Low"]<=entry)
+    fill_i=None
+    for i in range(min(max_wait,len(after))):
+        if touched(after.iloc[i]): fill_i=i; break
+    if fill_i is None:
+        return {"status":"expired" if len(after)>=max_wait else "waiting","sessions":int(len(after))}
+    mfe=0.0; mae=0.0
+    for j in range(fill_i,min(len(after),fill_i+max_hold)):
+        b=after.iloc[j]; hi,lo=float(b["High"]),float(b["Low"])
+        fav=(hi-entry) if bull else (entry-lo); adv=(entry-lo) if bull else (hi-entry)
+        mfe=max(mfe,fav/risk); mae=max(mae,adv/risk)
+        hit_stop=(lo<=stop) if bull else (hi>=stop); hit_tgt=(hi>=target) if bull else (lo<=target)
+        if hit_stop:
+            return {"status":"loss","r":-1.0,"filled":str(after.index[fill_i])[:10],"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+        if hit_tgt:
+            rr=abs(target-entry)/risk
+            return {"status":"win","r":round(rr,2),"filled":str(after.index[fill_i])[:10],"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+    last=after.iloc[min(len(after),fill_i+max_hold)-1]; close=float(last["Close"])
+    r=((close-entry) if bull else (entry-close))/risk
+    done=len(after)>=fill_i+max_hold
+    return {"status":"timeout" if done else "open","r":round(r,2),"filled":str(after.index[fill_i])[:10],"days":int(min(len(after),fill_i+max_hold)-fill_i),"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+
+
+def update_setup_outcomes(days=45):
+    backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d"); updated=0
+    with _setup_db() as con:
+        _setup_log_table(con,backend); con.commit()
+        q="SELECT trade_date,ticker,lane,payload,outcome FROM setup_log WHERE trade_date>=%s" if backend=="postgresql" else "SELECT trade_date,ticker,lane,payload,outcome FROM setup_log WHERE trade_date>=?"
+        rows=con.execute(q,(cutoff,)).fetchall()
+    frames={}
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","lane","payload","outcome"),r))
+        prior=json.loads(rr["outcome"]) if rr.get("outcome") else {}
+        if prior.get("status") in ("win","loss","timeout","expired"): continue
+        t=rr["ticker"]
+        if t not in frames:
+            try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
+            except Exception: frames[t]=None
+        if frames[t] is None or not len(frames[t]): continue
+        try: out=evaluate_setup_outcome(json.loads(rr["payload"]),frames[t])
+        except Exception as e: out={"status":"error","error":str(e)}
+        now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+        with _setup_db() as con:
+            if backend=="postgresql":
+                con.execute("UPDATE setup_log SET outcome=%s,updated_at=%s WHERE trade_date=%s AND ticker=%s AND lane=%s",(json.dumps(out),now,rr["trade_date"],t,rr["lane"]))
+            else:
+                con.execute("UPDATE setup_log SET outcome=?,updated_at=? WHERE trade_date=? AND ticker=? AND lane=?",(json.dumps(out),now,rr["trade_date"],t,rr["lane"]))
+            con.commit()
+        updated+=1
+    return updated
+
+
+def track_record_payload(days=120):
+    backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    with _setup_db() as con:
+        _setup_log_table(con,backend); con.commit()
+        q="SELECT trade_date,ticker,lane,direction,payload,outcome FROM setup_log WHERE trade_date>=%s ORDER BY trade_date DESC" if backend=="postgresql" else "SELECT trade_date,ticker,lane,direction,payload,outcome FROM setup_log WHERE trade_date>=? ORDER BY trade_date DESC"
+        rows=con.execute(q,(cutoff,)).fetchall()
+    items=[];by={}
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","lane","direction","payload","outcome"),r))
+        pl=json.loads(rr["payload"]); oc=json.loads(rr["outcome"]) if rr.get("outcome") else {"status":"pending"}
+        items.append({"trade_date":rr["trade_date"],"ticker":rr["ticker"],"lane":rr["lane"],"direction":rr["direction"],"entry":pl.get("entry"),"stop":pl.get("stop"),"target":pl.get("target"),"score":pl.get("score"),"regime":pl.get("regime"),"contract":pl.get("contract"),"outcome":oc})
+        g=by.setdefault(rr["lane"],{"lane":rr["lane"],"logged":0,"filled":0,"wins":0,"losses":0,"timeouts":0,"open":0,"expired":0,"r_sum":0.0,"r_n":0})
+        g["logged"]+=1; st=oc.get("status")
+        if st in ("win","loss","timeout","open"): g["filled"]+=1
+        if st=="win": g["wins"]+=1
+        if st=="loss": g["losses"]+=1
+        if st=="timeout": g["timeouts"]+=1
+        if st=="open": g["open"]+=1
+        if st=="expired": g["expired"]+=1
+        if st in ("win","loss","timeout") and oc.get("r") is not None: g["r_sum"]+=float(oc["r"]); g["r_n"]+=1
+    lanes=[]
+    for g in by.values():
+        closed=g["wins"]+g["losses"]
+        g["win_rate"]=round(100*g["wins"]/closed) if closed else None
+        g["avg_r"]=round(g["r_sum"]/g["r_n"],2) if g["r_n"] else None
+        g.pop("r_sum");g.pop("r_n");lanes.append(g)
+    lanes.sort(key=lambda g:-g["logged"])
+    return {"lanes":lanes,"recent":items[:25],"total":len(items),"since":cutoff}
+
+
+@app.post("/api/setup-log")
+def api_setup_log():
+    try:
+        body=request.get_json(silent=True) or {}
+        return jsonify({"ok":True,"logged":log_setups((body.get("rows") or [])[:30])})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+@app.get("/api/track-record")
+def api_track_record():
+    try:return jsonify({"ok":True,**track_record_payload()})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
+# v29 NIGHTLY JOB
+# Triggered after the close (GitHub Actions cron -> POST /api/nightly/run).
+# It replays the board's own requests in-process so every expensive payload is
+# computed once and written to the L2 cache, then updates setup outcomes.
+# ---------------------------------------------------------------------------
+NIGHTLY={"running":False,"started":None,"finished":None,"stage":None,"counts":{},"errors":[],"lock":threading.Lock()}
+
+
+def _kv_get(key, default=None):
+    hit=CACHE.get(f"kv:{key}")
+    if hit: return hit[1]
+    try:
+        backend=_setup_storage_backend()
+        with _setup_db() as con:
+            _l2_table(con,backend); con.commit()
+            q="SELECT payload FROM l2_cache WHERE key=%s" if backend=="postgresql" else "SELECT payload FROM l2_cache WHERE key=?"
+            r=con.execute(q,(f"kv:{key}",)).fetchone()
+        if r:
+            v=json.loads(r["payload"] if hasattr(r,"keys") else r[0]); CACHE[f"kv:{key}"]=(time.time(),v); return v
+    except Exception:
+        pass
+    return default
+
+
+def _kv_put(key, val):
+    CACHE[f"kv:{key}"]=(time.time(),val)
+    raw=json.dumps(val,default=str)
+    L2_STATE["queue"].append((f"kv:{key}",time.time(),raw))
+    if L2_STATE["writer"] is None or not L2_STATE["writer"].is_alive():
+        t=threading.Thread(target=_l2_writer_loop,daemon=True,name="l2-writer"); L2_STATE["writer"]=t; t.start()
+
+
+def _loose_rrg_rank(x):
+    f=x.get("fast") or x; t=x.get("trend") or {}
+    sc=0
+    if f.get("quadrant") in ("Leading","Improving"): sc+=2
+    if t.get("quadrant") in ("Leading","Improving"): sc+=2
+    if f.get("tail_trajectory")=="Rotating In": sc+=2
+    if t.get("tail_trajectory")=="Rotating In": sc+=1
+    if f.get("tail_trajectory")=="Rotating Out": sc-=2
+    if t.get("tail_trajectory")=="Rotating Out": sc-=2
+    return sc
+
+
+def nightly_run():
+    st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
+    client=app.test_client()
+    with client.session_transaction() as sess: sess["authenticated"]=True
+    def get(url):
+        r=client.get(url); return r.get_json(silent=True) or {}
+    def post(url,body):
+        r=client.post(url,json=body); return r.get_json(silent=True) or {}
+    try:
+        hints=_kv_get("nightly-hints",{}) or {}
+        budget=int(float(hints.get("budget") or 250))
+        st["stage"]="market"; m=get("/api/market?refresh=1")
+        groups=[r["ticker"] for r in (m.get("sectors") or []) if r.get("group") in ("Core Sector","Industry / Theme")]
+        st["counts"]["groups"]=len(groups)
+        st["stage"]="universe"
+        uni=top_setup_universe_payload(groups,20)
+        l2_put("top-setup-universe-all:20",uni)
+        if hints.get("groups"):
+            hg=[g for g in hints["groups"] if g in RRG_UNIVERSE][:20]
+            if hg:
+                gm={g.get("sector"):g for g in uni.get("groups") or []}
+                if all(g in gm for g in hg):
+                    key=f"top-setup-universe-v27-26:{','.join(hg)}:20"; payload={"groups":[gm[g] for g in hg],"failures":[],"symbols_downloaded":uni.get("symbols_downloaded")}
+                    CACHE[key]=(time.time(),payload); l2_put(key,payload)
+        parent={};pool=[]
+        for g in uni.get("groups") or []:
+            for x in g.get("results") or []:
+                t=x.get("ticker")
+                if not t: continue
+                parent.setdefault(t,g.get("sector"))
+                pool.append((_loose_rrg_rank(x),t))
+        pool.sort(key=lambda z:-z[0])
+        ranked=list(dict.fromkeys([t for sc,t in pool if sc>0]))
+        hinted=[str(t).upper() for t in (hints.get("candidates") or [])]
+        finals=[str(t).upper() for t in (hints.get("finalists") or [])]
+        for t,pt in (hints.get("parents") or {}).items(): parent[str(t).upper()]=pt
+        reversal=list(dict.fromkeys(hinted+ranked))[:90]
+        st["stage"]="early reversal"; get("/api/early-reversal-scan?tickers="+",".join(reversal)); st["counts"]["early_reversal"]=len(reversal)
+        opt=list(dict.fromkeys(finals+hinted+ranked))[:60]
+        st["stage"]="options"
+        liquid=[]
+        for i in range(0,len(opt),20):
+            res=post("/api/options-scan",{"symbols":opt[i:i+20]})
+            for r in res.get("results") or []:
+                if r.get("ok")!=False and r.get("liquidity") in ("Liquid","Tradable"): liquid.append(r.get("ticker"))
+        st["counts"]["options"]=len(opt)
+        deep=list(dict.fromkeys(finals+[t for t in hinted if t in liquid]+[t for t in ranked if t in liquid]))[:24]
+        st["stage"]="deep dive"; done=0
+        for t in deep:
+            try:
+                get(f"/api/chart-preview/{t}?period=1m&timeframe=1d")
+                get(f"/api/strat/{t}")
+                pt=parent.get(t) or ""
+                ctx=get(f"/api/institutional-context/{t}?parent={pt}")
+                s=ctx.get("structure") or {}
+                d=s.get("direction") if s.get("direction") in ("bullish","bearish") else "bullish"
+                for plan in ("","pullback","breakout","vp"):
+                    get(f"/api/entry-plan/{t}?direction={d}&plan={plan}&budget={budget}")
+                ct=s.get("counter")
+                if ct: get(f"/api/entry-plan/{t}?direction={ct.get('direction')}&plan=rejection&budget={budget}")
+                get(f"/api/premium-support/{t}?direction={d}")
+                done+=1
+            except Exception as e:
+                st["errors"].append(f"{t}: {e}")
+        st["counts"]["deep_dive"]=done
+        st["stage"]="outcomes"
+        try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
+        except Exception as e: st["errors"].append(f"outcomes: {e}")
+        st["stage"]="done"
+    except Exception as e:
+        st["errors"].append(str(e)); st["stage"]="failed"
+    finally:
+        st["running"]=False; st["finished"]=time.time()
+        try: _kv_put("nightly-status",{k:v for k,v in st.items() if k!="lock"})
+        except Exception: pass
+
+
+def _nightly_public_status():
+    st=NIGHTLY if (NIGHTLY["started"] or NIGHTLY["running"]) else (_kv_get("nightly-status",{}) or {})
+    fmt=lambda t:datetime.fromtimestamp(t).astimezone(_et_now().tzinfo).isoformat(timespec="minutes") if t else None
+    return {"running":bool(st.get("running")),"stage":st.get("stage"),"started":fmt(st.get("started")),"finished":fmt(st.get("finished")),
+            "counts":st.get("counts") or {},"errors":(st.get("errors") or [])[:5],"fresh_for_close":bool(st.get("finished") and st.get("finished")>=last_market_close_ts())}
+
+
+@app.post("/api/nightly/run")
+def api_nightly_run():
+    with NIGHTLY["lock"]:
+        if NIGHTLY["running"]: return jsonify({"ok":True,"started":False,"reason":"already running",**_nightly_public_status()})
+        last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
+        if last and time.time()-float(last)<6*3600 and request.args.get("force")!="1":
+            return jsonify({"ok":True,"started":False,"reason":"ran within the last 6 hours",**_nightly_public_status()})
+        NIGHTLY["running"]=True
+        threading.Thread(target=nightly_run,daemon=True,name="nightly").start()
+    return jsonify({"ok":True,"started":True})
+
+
+@app.get("/api/nightly/status")
+def api_nightly_status():
+    return jsonify({"ok":True,**_nightly_public_status()})
+
+
+@app.post("/api/nightly/hints")
+def api_nightly_hints():
+    try:
+        b=request.get_json(silent=True) or {}
+        clean=lambda xs,n:[str(x).upper()[:12] for x in (xs or []) if str(x).strip()][:n]
+        hints={"groups":clean(b.get("groups"),20),"candidates":clean(b.get("candidates"),60),"finalists":clean(b.get("finalists"),16),
+               "parents":{str(k).upper()[:12]:str(v).upper()[:12] for k,v in list((b.get("parents") or {}).items())[:60]},
+               "budget":max(25,min(100000,int(float(b.get("budget") or 250)))),"saved":time.time()}
+        _kv_put("nightly-hints",hints)
+        return jsonify({"ok":True})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),400
+
 
 @app.get("/api/options/<ticker>")
 def api_options(ticker):
@@ -4216,8 +4797,8 @@ def api_early_reversal_scan():
     signals={}; failed=[]
     def one(t):
         try:
-            px=dl_ohlc(t,"1m")
-            return t,_early_reversal_signal_from_ohlc(px),None
+            box,_,_=cached_refresh_safe(f"early-rev-v29:{t}",lambda t=t:{"signal":_early_reversal_signal_from_ohlc(dl_ohlc(t,"1m"))},ttl=600)
+            return t,(box or {}).get("signal"),None
         except Exception as e:
             return t,None,str(e)
     workers=min(3,len(tickers))
@@ -4434,7 +5015,68 @@ def strat_payload(ticker):
     bulls=sum(1 for x in frames if x.get("ftc")=="bullish")
     bears=sum(1 for x in frames if x.get("ftc")=="bearish")
     continuity="bullish" if bulls>bears else ("bearish" if bears>bulls else "mixed")
-    return {"ticker":ticker,"frames":frames,"bullish_count":bulls,"bearish_count":bears,"continuity":continuity}
+    ftfc=strat_ftfc(daily)
+    signals=[]
+    for tf,frame in (("1D",daily),("1W",weekly),("4H",fourh)):
+        try: signals.extend(strat_actionable(frame,tf))
+        except Exception: pass
+    return {"ticker":ticker,"frames":frames,"bullish_count":bulls,"bearish_count":bears,"continuity":continuity,"ftfc":ftfc,"signals":signals}
+
+
+def strat_ftfc(daily):
+    """v29: Full Timeframe Continuity in the STRAT sense — is price above or
+    below the OPEN of the current day, week, month and quarter?"""
+    try:
+        d=daily.dropna(subset=["Open","Close"]).sort_index()
+        if len(d)<2: return {"state":"unknown","frames":{}}
+        idx=pd.DatetimeIndex(d.index); last=idx[-1]; spot=float(d["Close"].iloc[-1])
+        def first_open(mask):
+            sub=d[mask]
+            return float(sub["Open"].iloc[0]) if len(sub) else None
+        iso=idx.isocalendar()
+        opens={
+            "D":float(d["Open"].iloc[-1]),
+            "W":first_open((iso.year.values==last.isocalendar()[0])&(iso.week.values==last.isocalendar()[1])),
+            "M":first_open((idx.year==last.year)&(idx.month==last.month)),
+            "Q":first_open((idx.year==last.year)&(((idx.month-1)//3)==((last.month-1)//3))),
+        }
+        frames={k:{"open":round(v,4),"above":spot>v} for k,v in opens.items() if v is not None}
+        ups=sum(1 for v in frames.values() if v["above"]); n=len(frames)
+        state="bullish" if ups==n else ("bearish" if ups==0 else "mixed")
+        return {"state":state,"spot":round(spot,4),"frames":frames,"above":ups,"count":n}
+    except Exception as e:
+        return {"state":"unknown","frames":{},"error":str(e)}
+
+
+def strat_actionable(df, tf):
+    """v29: actionable STRAT setups on the most recent completed bar of a frame:
+    inside bars (2-1-2 / 3-1-2 pending), failed 2s, and shooter/hammer shapes.
+    Each comes with the next-bar trigger and the opposite-side stop."""
+    out=[]
+    if df is None or len(df)<3: return out
+    d=df.dropna(subset=["Open","High","Low","Close"]).sort_index()
+    if len(d)<3: return out
+    prev,cur=d.iloc[-2],d.iloc[-1]
+    sc=_strat_scenario(prev,cur)
+    prior_sc=_strat_scenario(d.iloc[-3],prev)
+    o,h,l,c=float(cur["Open"]),float(cur["High"]),float(cur["Low"]),float(cur["Close"]); rng=h-l
+    if sc=="1":
+        kind="3-1-2" if prior_sc=="3" else "2-1-2"
+        out.append({"timeframe":tf,"type":f"{kind} pending","direction":"either","bull_trigger":round(h,4),"bear_trigger":round(l,4),
+                    "detail":f"{tf} inside bar · break above {h:.2f} = 2U, below {l:.2f} = 2D"})
+    if sc=="2U" and c<o:
+        out.append({"timeframe":tf,"type":"Failed 2U","direction":"bearish","trigger":round(l,4),"stop":round(h,4),
+                    "detail":f"{tf} took out the prior high then closed red · 2D below {l:.2f} confirms"})
+    if sc=="2D" and c>o:
+        out.append({"timeframe":tf,"type":"Failed 2D","direction":"bullish","trigger":round(h,4),"stop":round(l,4),
+                    "detail":f"{tf} took out the prior low then closed green · 2U above {h:.2f} confirms"})
+    if rng>0:
+        body=abs(c-o); upper=h-max(o,c); lower=min(o,c)-l
+        if upper>=2*max(body,1e-9) and upper>=.5*rng and (c-l)/rng<=.4:
+            out.append({"timeframe":tf,"type":"Shooter","direction":"bearish","trigger":round(l,4),"stop":round(h,4),"detail":f"{tf} shooter · long upper wick"})
+        if lower>=2*max(body,1e-9) and lower>=.5*rng and (c-l)/rng>=.6:
+            out.append({"timeframe":tf,"type":"Hammer","direction":"bullish","trigger":round(h,4),"stop":round(l,4),"detail":f"{tf} hammer · long lower wick"})
+    return out
 
 @app.get("/api/strat/<ticker>")
 def api_strat(ticker):
@@ -4579,6 +5221,17 @@ def api_top_setup_universe():
         if not requested:return jsonify({"ok":False,"error":"No valid supportive groups supplied."}),400
         limit=max(5,min(25,int(body.get("limit",20))))
         key=f"top-setup-universe-v27-26:{','.join(requested)}:{limit}"
+        # v29: a nightly all-groups universe can answer any subset of groups
+        # (each group's stock RRG is computed independently).
+        sup=None
+        hit=CACHE.get(key)
+        if not (hit and time.time()-hit[0]<600):
+            sup=l2_get(f"top-setup-universe-all:{limit}")
+        if sup is not None:
+            groups={g.get("sector"):g for g in (sup[1].get("groups") or [])}
+            if all(t in groups for t in requested):
+                payload={"groups":[groups[t] for t in requested],"failures":[],"symbols_downloaded":sup[1].get("symbols_downloaded"),"from_nightly":True}
+                return jsonify({"ok":True,**payload,"stale":False,"refresh_error":None})
         payload,stale,err=cached_refresh_safe(key,lambda:top_setup_universe_payload(requested,limit),ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
@@ -9869,6 +10522,10 @@ function v28Regime(){
  if(Number.isFinite(d5)&&d5<=-2){stress+=1;why.push(`SPY ${d5.toFixed(1)}% 5d`);}
  if(Number.isFinite(vv)&&vv>=25){stress+=1;why.push(`VIX ${vv.toFixed(1)}`);}
  if(Number.isFinite(vd5)&&vd5>=30){stress+=1;why.push(`VIX +${vd5.toFixed(0)}% 5d`);}
+ // v29: credit. HYG/LQD falling = high-yield underperforming investment grade = spreads widening.
+ const cr=i.CREDIT||{},c5=Number(cr.d5),c20=Number(cr.d20);
+ if(Number.isFinite(c5)&&c5<=-0.5){stress+=1;why.push(`credit widening (HYG/LQD ${c5.toFixed(2)}% 5d)`);}
+ if(Number.isFinite(c20)&&c20<=-1.0){stress+=1;why.push(`credit trend weak (${c20.toFixed(2)}% 20d)`);}
  if(j.risk_appetite==="Risk-Off"){stress+=2;why.push("risk appetite off");}
  else if(j.risk_appetite==="Risk-On")stress-=1;
  const state=!window.__marketPayload?"Unknown":stress>=3?"Risk-Off":stress>=1?"Caution":"Supportive";
@@ -9910,10 +10567,31 @@ topSetupEvaluation=function(x){
    }
    const brr=(s.plan_valid&&s.direction===dir)?Number(s.rr_to_target2):NaN;
    const prr=(s.pullback&&s.pullback.direction===dir)?Number(s.pullback.rr):NaN;
-   bestRR=Math.max(Number.isFinite(brr)?brr:-1,Number.isFinite(prr)?prr:-1);
+   const vpp=s.vp_plans?.[dir],vrr=vpp?Number(vpp.rr):NaN;
+   bestRR=Math.max(Number.isFinite(brr)?brr:-1,Number.isFinite(prr)?prr:-1,Number.isFinite(vrr)?vrr:-1);
    if(bestRR<V28_MIN_RR){gateFailures.push(bestRR<0?"No valid entry plan on the stock":`Best reward/risk ${bestRR.toFixed(2)} is below ${V28_MIN_RR}`);hardPass=false;}
+   // v29: the volume-profile level + STRAT trigger plan is preferred whenever it clears the R/R bar.
+   else if(vrr>=V28_MIN_RR){entryMode="vp";(vpp.in_zone?good:warn).push([vpp.in_zone?`At ${vpp.level_name} $${vpp.level} · R/R ${vrr.toFixed(1)}`:`Wait for ${vpp.level_name} $${vpp.level} · R/R ${vrr.toFixed(1)}`,vpp.in_zone?"good":"warn"]);}
    else if(!(brr>=V28_MIN_RR)){entryMode="pullback";warn.push([s.pullback?.in_zone?`In pullback zone · R/R ${prr.toFixed(1)}`:`Wait for pullback · R/R ${prr.toFixed(1)}`,s.pullback?.in_zone?"good":"warn"]);}
    else entryMode="breakout";
+   // v29: STRAT and volume-profile context.
+   const vs=c?.vp_strat;
+   if(vs?.available){
+     const ft=vs.strat?.ftfc;
+     if(ft&&ft.state===dir){raw+=6;good.push([`FTFC ${dir} (${ft.above}/${ft.count} TFs ${dir==="bullish"?"above":"below"} open)`,"good"]);}
+     else if(ft&&(ft.state==="bullish"||ft.state==="bearish")&&ft.state!==dir){raw-=8;warn.push([`FTFC ${ft.state} against the setup`,"warn"]);}
+     const sigs=(vs.strat?.signals||[]).filter(z=>z.timeframe==="1D"||z.timeframe==="1W");
+     const against=sigs.find(z=>z.direction&&z.direction!=="either"&&z.direction!==dir);
+     const withs=sigs.find(z=>z.direction===dir||(z.direction==="either"&&vpp?.in_zone));
+     if(against){raw-=8;warn.push([`${against.timeframe} ${against.type}`,"warn"]);}
+     if(withs){raw+=5;good.push([`${withs.timeframe} ${withs.type}`,"good"]);}
+     const fa=vs.failed_auction;
+     if(fa&&fa.direction!==dir){raw-=8;warn.push([`VP: ${fa.type} ($${fa.level})`,"warn"]);}
+     else if(fa&&fa.direction===dir){raw+=4;good.push([`VP: ${fa.type}`,"good"]);}
+     const vst=vs.vp?.state||"";
+     if(dir==="bullish"&&vst.startsWith("accepting above")){raw+=4;good.push(["Accepting above prior-week value","good"]);}
+     if(dir==="bearish"&&vst.startsWith("accepting below")){raw+=4;good.push(["Accepting below prior-week value","good"]);}
+   }
    const vaDir=(b.va||valueAcceptanceMap[x.ticker])?.direction;
    if(vaDir&&vaDir!=="neutral"&&vaDir!==dir){raw-=6;warn.push([`Value acceptance ${vaDir} vs ${dir} trend`,"warn"]);}
    const ct=s.counter;
@@ -9974,13 +10652,25 @@ function v28ContractLabel(z){
  if(z.structure==="debit_spread"){const L=z.long||{},S=z.short||{},k=String(L.type||"").toLowerCase().startsWith("p")?"P":"C";return `${L.expiration} $${Number(L.strike).toFixed(0)}/$${Number(S.strike).toFixed(0)}${k} spread`;}
  const L=z.leg||{};return `${L.expiration} $${Number(L.strike).toFixed(0)}${String(L.type||"").toLowerCase().startsWith("p")?"P":"C"}`;
 }
-function v28PlanHTML(p,title){
+function v29VpStratHTML(vs){
+ if(!vs?.available)return "";
+ const v=vs.vp||{},pw=v.prior_week,ft=vs.strat?.ftfc,fr=vs.strat?.frames||[];
+ const f=x=>x==null?"—":`$${Number(x).toFixed(2)}`;
+ const frames=fr.map(z=>`${z.timeframe} ${z.scenario}`).join(" · ");
+ const ftTxt=ft&&ft.frames?Object.entries(ft.frames).map(([k,z])=>`${k}${z.above?"↑":"↓"}`).join(" "):"";
+ const sigs=(vs.strat?.signals||[]).filter(z=>z.timeframe!=="4H").slice(0,3).map(z=>z.type+" ("+z.timeframe+")").join(" · ");
+ return `<div class="v28EntryRow tiny"><b>VP</b> 20-session POC ${f(v.poc)} · VA ${f(v.val)}–${f(v.vah)}${pw?` · prior-week VA ${f(pw.val)}–${f(pw.vah)}`:""}${v.state&&v.state!=="unknown"?` · ${v.state}`:""}${vs.failed_auction?` · <span class="instBad">${vs.failed_auction.type}</span>`:""}</div>
+ <div class="v28EntryRow tiny"><b>STRAT</b> ${frames}${ftTxt?` · FTFC ${ft.state} (${ftTxt})`:""}${sigs?` · ${sigs}`:""}</div>`;
+}
+function v28PlanHTML(p,title,vs){
  if(!p||p._loading)return `<div class="v28Entry"><div class="v28EntryHead">${title}</div><div class="tiny">Modeling contracts at the entry level…</div></div>`;
  if(!p.available)return `<div class="v28Entry v28EntryBad"><div class="v28EntryHead">${title}</div><div class="tiny">${p.reason||p.error||"Entry plan unavailable"}</div></div>`;
  const u=p.underlying||{},z=v28Pick(p),dirUp=p.direction==="bullish";
  const where=p.plan==="pullback"?(u.in_zone?`In the pullback zone now (stock ${v28Money(p.spot,2)})`:`Wait for a pullback to ${v28Money(u.entry,2)} (stock ${v28Money(p.spot,2)})`)
    :p.plan==="rejection"?`Enter on a break ${dirUp?"above":"below"} ${v28Money(u.entry,2)}`:`Enter on a break ${dirUp?"above":"below"} ${v28Money(u.entry,2)}`;
- const lines=[`<div class="v28EntryRow"><b>${where}</b></div>`,`<div class="v28EntryRow tiny">Stock stop ${v28Money(u.stop,2)} · target ${v28Money(u.target,2)} · stock R/R ${u.rr!=null?Number(u.rr).toFixed(1):"—"} · ~${p.hold_days_assumed}d hold assumed</div>`];
+ const vpPlan=p.vp_plan;
+ const whereFinal=vpPlan?(vpPlan.in_zone?`At ${vpPlan.level_name} ${v28Money(vpPlan.level,2)} · trigger: ${vpPlan.trigger}`:`Wait for ${vpPlan.level_name} ${v28Money(vpPlan.level,2)} (stock ${v28Money(p.spot,2)}) · then ${vpPlan.direction==="bullish"?"a 2U / failed 2D":"a 2D / failed 2U"} there`):where;
+ const lines=[`<div class="v28EntryRow"><b>${whereFinal}</b></div>`,`<div class="v28EntryRow tiny">Stock stop ${v28Money(u.stop,2)} · target ${v28Money(u.target,2)} · stock R/R ${u.rr!=null?Number(u.rr).toFixed(1):"—"} · ~${p.hold_days_assumed}d hold assumed</div>`];
  if(z){
    const fits=Number(z.cost)<=Number(p.budget);
    lines.push(`<div class="v28EntryRow"><span class="v28Contract">${v28ContractLabel(z)}</span> · entry ≈ ${v28Money(z.entry_premium,2)} (<b class="${fits?"instGood":"instBad"}">${v28Money(z.cost)}</b>/contract)</div>`);
@@ -9989,6 +10679,7 @@ function v28PlanHTML(p,title){
    lines.push(`<div class="v28EntryRow instBad">Nothing fits the ${v28Money(p.budget)} budget · cheapest single ≈ ${v28Money(p.cheapest_single_cost)}</div>`);
  }
  if(p.iv_rv!=null)lines.push(`<div class="v28EntryRow tiny">IV / realized vol ${Number(p.iv_rv).toFixed(2)}×${(p.notes||[]).length?` · ${p.notes.join(" ")}`:""}</div>`);
+ if(vs)lines.push(v29VpStratHTML(vs));
  lines.push(`<div class="v28EntryRow tiny v28Muted">Modeled with Black-Scholes from ${p.feed||"Alpaca"} quotes · indicative quotes on the free feed — confirm the live bid/ask in your broker.</div>`);
  return `<div class="v28Entry"><div class="v28EntryHead">${title}</div>${lines.join("")}</div>`;
 }
@@ -10006,13 +10697,15 @@ v26Decision=function(x){
    if(!z){d.label="GOOD SETUP · NO CONTRACT FITS BUDGET";d.cls="v26Wait";}
    else if(risk){d.label="WAIT · EVENT RISK";d.cls="v26Wait";}
    else if(e.entryMode==="pullback"&&!p.underlying?.in_zone){d.label=`WAIT FOR PULLBACK · ${v28Money(p.underlying?.entry,2)}`;d.cls="v26Wait";}
+   else if(e.entryMode==="vp"&&p.vp_plan&&!p.vp_plan.in_zone){d.label=`WAIT FOR ${String(p.vp_plan.level_name).toUpperCase()} · ${v28Money(p.vp_plan.level,2)}`;d.cls="v26Wait";}
+   else if(e.entryMode==="vp"&&p.vp_plan?.in_zone){d.label=`AT LEVEL · STRAT TRIGGER ${v28Money(p.underlying?.entry,2)}`;d.cls="v26Watch";}
    else if(d.setup>=80&&d.trade>=70){d.label="A+ · TRADEABLE";d.cls="v26Go";}
    else if(d.setup>=72&&d.trade>=58){d.label="A · WATCH / TRADEABLE";d.cls="v26Watch";}
    else if(d.trade<50){d.label="WATCH · EXECUTION WEAK";d.cls="v26Wait";}
    else{d.label="WATCH FOR ENTRY";d.cls="v26Watch";}
  }
  // Setup quality should reflect the same tape / trend / rejection penalties as the score.
- const pen=(e.direction==="bullish"?(e.regime?.state==="Risk-Off"?10:e.regime?.state==="Caution"?4:0):0)+(e.counter?8:0)+(e.entryMode==="pullback"&&!p?.underlying?.in_zone?4:0);
+ const pen=(e.direction==="bullish"?(e.regime?.state==="Risk-Off"?10:e.regime?.state==="Caution"?4:0):0)+(e.counter?8:0)+((e.entryMode==="pullback"||e.entryMode==="vp")&&!p?.underlying?.in_zone?4:0);
  if(pen){d.setup=Math.max(0,d.setup-pen);d.combined=Math.round(.68*d.setup+.32*d.trade);}
  if(e.regime?.state==="Risk-Off"&&e.direction==="bullish"&&d.cls==="v26Go"){d.label="A · TRADEABLE (RISK-OFF TAPE — SIZE DOWN)";d.cls="v26Watch";}
  d.entryPlan=p;d.pick=z;return d;
@@ -10036,7 +10729,7 @@ function v28DecorateCards(){
    // The entry plan supersedes the legacy premium-history line on the card.
    if(p&&p.available)card.querySelectorAll(".topSetupTrigger").forEach(el=>{if(/^\s*PREMIUM/.test(el.textContent||""))el.style.display="none";});
    if(e.hardPass&&institutionalContextMap[x.ticker]?.structure?.available){
-     const holder=document.createElement("div");holder.innerHTML=v28PlanHTML(p,`ENTRY PLAN · ${e.entryMode==="pullback"?"PULLBACK":"BREAKOUT"} · ${e.direction==="bearish"?"PUTS":"CALLS"}`);
+     const holder=document.createElement("div");holder.innerHTML=v28PlanHTML(p,`ENTRY PLAN · ${e.entryMode==="vp"?"VOLUME PROFILE + STRAT":e.entryMode==="pullback"?"PULLBACK":"BREAKOUT"} · ${e.direction==="bearish"?"PUTS":"CALLS"}`,institutionalContextMap[x.ticker]?.vp_strat);
      const strip=card.querySelector(".v26DecisionStrip");
      if(strip&&strip.nextSibling)card.insertBefore(holder.firstChild,strip.nextSibling);else card.appendChild(holder.firstChild);
    }
@@ -10063,7 +10756,7 @@ function v28RenderCounter(){
      return `<div class="v28CounterCard"><div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus"><span class="v263Lane ${bear?"v28Bear":"v28Bull"}">${bear?"SUPPLY REJECTION":"DEMAND HOLD"}</span> · ${bear?"bearish fade":"bullish reversal"}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">R/R ${Number(ct.rr).toFixed(1)}</div></div>
      <div class="tiny">${ct.bar_date}: ${bear?"high":"low"} ${v28Money(bear?ct.bar_high:ct.bar_low,2)} tested the prior ${bear?"1-year high":"1-year low"} zone (${v28Money(ct.level,2)}) and closed in the ${bear?"bottom":"top"} ${bear?ct.close_position_pct:100-ct.close_position_pct}% of its range with a ${ct.wick_pct}% ${bear?"upper":"lower"} wick.${ct.extension_atr!=null?` Price is ${Math.abs(ct.extension_atr).toFixed(1)} ATR ${ct.extension_atr>0?"above":"below"} its 20-day average.`:""}</div>
      <div class="topSetupTrigger">TRIGGER · <b>break ${bear?"below":"above"} ${v28Money(ct.trigger,2)}</b> · stop ${v28Money(ct.stop,2)} · T1 ${v28Money(ct.target1,2)} · T2 ${v28Money(ct.target2,2)}</div>
-     ${v28PlanHTML(p,`ENTRY PLAN · ${bear?"PUTS":"CALLS"}`)}</div>`;
+     ${v28PlanHTML(p,`ENTRY PLAN · ${bear?"PUTS":"CALLS"}`,institutionalContextMap[x.ticker]?.vp_strat)}</div>`;
    }).join("");
 }
 const _renderTopSetupsV28=renderTopSetups;
@@ -10083,6 +10776,67 @@ const v28Style=document.createElement("style");v28Style.textContent=`
 .v28Bear{color:#fca5a5;border-color:#7f1d1d;background:#2a0b0b}.v28Bull{color:#6ee7a7;border-color:#167146;background:#082419}
 `;document.head.appendChild(v28Style);
 setTimeout(()=>{try{renderTopSetups()}catch(e){}},0);
+
+// ===========================================================================
+// v29: setup logging, nightly hints, track record and nightly status.
+// ===========================================================================
+function v29TradeDate(){return String(window.__marketPayload?.asof||new Date().toISOString().slice(0,10)).slice(0,10)}
+function v29LogRows(){
+ const rows=[],date=v29TradeDate();
+ (globalTopSetupData||[]).slice(0,10).forEach(x=>{
+   const e=topSetupEvaluation(x),reg=e.regime?.state;
+   const add=(direction,plan,lane,score)=>{
+     const p=v28PlanFor(x.ticker,direction,plan);if(!p||!p.available||!p.underlying)return;
+     const z=v28Pick(p),u=p.underlying;
+     const fill=(lane==="pullback"||(lane==="vp"&&p.vp_plan&&!p.vp_plan.in_zone))?"limit":"stop";
+     rows.push({ticker:x.ticker,trade_date:date,lane,direction,fill,entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score,regime:reg,parent:x._parentTicker||null,
+       contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||z.long||{}).symbol||null}:null});
+   };
+   if(e.hardPass&&e.qualificationScore>=45&&e.entryMode)add(e.direction,e.entryMode,e.entryMode,e.score);
+   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)add(e.counter.direction,"rejection","rejection",null);
+ });
+ return rows;
+}
+let v29LastLogSig="";
+async function v29PostLogAndHints(){
+ try{
+   const rows=v29LogRows(),sig=JSON.stringify(rows.map(r=>[r.ticker,r.lane,r.trade_date]));
+   if(rows.length&&sig!==v29LastLogSig){v29LastLogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
+   const groups=(sectorData||[]).filter(g=>["Core Sector","Industry / Theme"].includes(g.group)).filter(g=>groupTrajectoryPass(g)||strongestLaggingSectors(Math.max(3,(sectorData||[]).length)).some(z=>z.ticker===g.ticker)).sort((a,b)=>sectorHeatScore(b)-sectorHeatScore(a)).map(g=>g.ticker);
+   const fin=(globalTopSetupData||[]),cands=(window.allSupportiveCandidates||[]);
+   const parents={};[...fin,...cands].forEach(x=>{if(x?.ticker&&x._parentTicker)parents[x.ticker]=x._parentTicker});
+   await fetch("/api/nightly/hints",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({groups,candidates:cands.map(x=>x.ticker),finalists:fin.map(x=>x.ticker),parents,budget:v26Budget()})});
+ }catch(e){console.warn("v29 log/hints",e)}
+}
+async function v29LoadTrackRecord(){
+ try{const r=await fetch("/api/track-record");const j=await r.json();if(j.ok){window.__trackRecord=j;v29RenderTrackRecord();}}catch(e){console.warn("track record",e)}
+}
+async function v29LoadNightlyStatus(){
+ try{const r=await fetch("/api/nightly/status");const j=await r.json();if(j.ok){window.__nightly=j;v29RenderTrackRecord();}}catch(e){}
+}
+function v29RenderTrackRecord(){
+ const g=document.getElementById("topSetupsGrid");if(!g)return;
+ let sec=document.getElementById("v29TrackRecord");
+ if(!sec){sec=document.createElement("details");sec.id="v29TrackRecord";sec.className="v29Track";const anchor=document.getElementById("v28CounterSection")||g;anchor.parentNode.insertBefore(sec,anchor.nextSibling);}
+ else{const anchor=document.getElementById("v28CounterSection")||g;if(sec.previousElementSibling!==anchor)anchor.parentNode.insertBefore(sec,anchor.nextSibling);}
+ const tr=window.__trackRecord,n=window.__nightly;
+ const nightly=n?(n.running?`Nightly scan running · ${n.stage||""}`:n.finished?`Nightly scan ${n.fresh_for_close?"finished":"last ran"} ${String(n.finished).replace("T"," ").slice(0,16)} ET${n.counts?.deep_dive!=null?` · ${n.counts.deep_dive} names pre-computed`:""}${(n.errors||[]).length?` · ${n.errors.length} errors`:""}`:"Nightly scan has not run yet"):"";
+ const lanes=(tr?.lanes||[]).map(l=>`<tr><td>${l.lane}</td><td>${l.logged}</td><td>${l.filled}</td><td>${l.wins}</td><td>${l.losses}</td><td>${l.win_rate==null?"—":l.win_rate+"%"}</td><td>${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r+"R"}</td><td>${l.open}</td><td>${l.expired}</td></tr>`).join("");
+ const recent=(tr?.recent||[]).slice(0,10).map(r=>{const o=r.outcome||{},cls=o.status==="win"?"instGood":o.status==="loss"?"instBad":"";return `<tr><td>${r.trade_date}</td><td>${r.ticker}</td><td>${r.lane}</td><td>${r.direction==="bearish"?"↓":"↑"}</td><td>${Number(r.entry).toFixed(2)}</td><td>${Number(r.stop).toFixed(2)}</td><td>${Number(r.target).toFixed(2)}</td><td class="${cls}">${o.status||"pending"}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td></tr>`}).join("");
+ sec.innerHTML=`<summary><b>TRACK RECORD</b> <span class="tiny">${tr?`${tr.total} logged since ${tr.since}`:"loading…"} · ${nightly}</span></summary>
+ <div class="tiny" style="margin:6px 0">Every setup the board shows is logged once per day with its plan. After the close, the nightly job checks whether price reached the entry and then which came first, the stop or the target (same-day ties count as the stop). R = reward in units of the planned risk.</div>
+ ${lanes?`<table class="v29Table"><thead><tr><th>Lane</th><th>Logged</th><th>Filled</th><th>Wins</th><th>Losses</th><th>Win %</th><th>Avg R</th><th>Open</th><th>Never filled</th></tr></thead><tbody>${lanes}</tbody></table>`:`<div class="tiny">No completed outcomes yet — results start appearing after setups have had a few sessions to play out.</div>`}
+ ${recent?`<table class="v29Table" style="margin-top:8px"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th></th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th></tr></thead><tbody>${recent}</tbody></table>`:""}`;
+}
+const _v28HydrateEntryPlansV29=v28HydrateEntryPlans;
+v28HydrateEntryPlans=async function(){const out=await _v28HydrateEntryPlansV29();setTimeout(v29PostLogAndHints,200);return out};
+const _renderTopSetupsV29=renderTopSetups;
+renderTopSetups=function(){const out=_renderTopSetupsV29();try{v29RenderTrackRecord()}catch(e){}return out};
+const v29Style=document.createElement("style");v29Style.textContent=`
+.v29Track{margin-top:14px;padding:10px 12px;border:1px solid #27445a;border-radius:11px;background:#0a141d}.v29Track summary{cursor:pointer}
+.v29Track summary b{letter-spacing:.5px;color:#9fd3ff}.v29Table{width:100%;border-collapse:collapse;font-size:11px}.v29Table th{color:#7f97a8;font-size:9.5px;text-align:left;padding:4px;border-bottom:1px solid #1f3446}
+.v29Table td{padding:4px;border-bottom:1px solid #132331;color:#d6e3ee}`;document.head.appendChild(v29Style);
+setTimeout(()=>{v29LoadTrackRecord();v29LoadNightlyStatus();},1500);
 
 </script>
 """
