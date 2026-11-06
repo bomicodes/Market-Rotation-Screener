@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "28.0"
+APP_VERSION = "28.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -9875,6 +9875,10 @@ function v28Regime(){
  return {state,stress,why};
 }
 function v28Direction(x,b){
+ // The stock's own trend structure decides direction when it has one; value
+ // acceptance / STRAT only break ties (they disagree often on extended names).
+ const sd=institutionalContextMap[x.ticker]?.structure?.direction;
+ if(sd==="bullish"||sd==="bearish")return sd;
  const va=b?.va||valueAcceptanceMap[x.ticker];
  if(va?.direction&&va.direction!=="neutral")return va.direction;
  const st=stratSignalMap[x.ticker];
@@ -9910,6 +9914,8 @@ topSetupEvaluation=function(x){
    if(bestRR<V28_MIN_RR){gateFailures.push(bestRR<0?"No valid entry plan on the stock":`Best reward/risk ${bestRR.toFixed(2)} is below ${V28_MIN_RR}`);hardPass=false;}
    else if(!(brr>=V28_MIN_RR)){entryMode="pullback";warn.push([s.pullback?.in_zone?`In pullback zone · R/R ${prr.toFixed(1)}`:`Wait for pullback · R/R ${prr.toFixed(1)}`,s.pullback?.in_zone?"good":"warn"]);}
    else entryMode="breakout";
+   const vaDir=(b.va||valueAcceptanceMap[x.ticker])?.direction;
+   if(vaDir&&vaDir!=="neutral"&&vaDir!==dir){raw-=6;warn.push([`Value acceptance ${vaDir} vs ${dir} trend`,"warn"]);}
    const ct=s.counter;
    if(ct&&ct.direction!==dir){counter=ct;raw-=12;warn.push([ct.type==="supply_rejection"?`Rejected at supply $${ct.level}`:`Held demand $${ct.level}`,"warn"]);}
  }
@@ -10005,6 +10011,9 @@ v26Decision=function(x){
    else if(d.trade<50){d.label="WATCH · EXECUTION WEAK";d.cls="v26Wait";}
    else{d.label="WATCH FOR ENTRY";d.cls="v26Watch";}
  }
+ // Setup quality should reflect the same tape / trend / rejection penalties as the score.
+ const pen=(e.direction==="bullish"?(e.regime?.state==="Risk-Off"?10:e.regime?.state==="Caution"?4:0):0)+(e.counter?8:0)+(e.entryMode==="pullback"&&!p?.underlying?.in_zone?4:0);
+ if(pen){d.setup=Math.max(0,d.setup-pen);d.combined=Math.round(.68*d.setup+.32*d.trade);}
  if(e.regime?.state==="Risk-Off"&&e.direction==="bullish"&&d.cls==="v26Go"){d.label="A · TRADEABLE (RISK-OFF TAPE — SIZE DOWN)";d.cls="v26Watch";}
  d.entryPlan=p;d.pick=z;return d;
 };
@@ -10024,6 +10033,8 @@ function v28DecorateCards(){
      if(labels[2]&&labels[2].firstChild&&labels[2].firstChild.nodeType===3)labels[2].firstChild.textContent="STOP ";
    }
    card.querySelector(".v28Entry")?.remove();
+   // The entry plan supersedes the legacy premium-history line on the card.
+   if(p&&p.available)card.querySelectorAll(".topSetupTrigger").forEach(el=>{if(/^\s*PREMIUM/.test(el.textContent||""))el.style.display="none";});
    if(e.hardPass&&institutionalContextMap[x.ticker]?.structure?.available){
      const holder=document.createElement("div");holder.innerHTML=v28PlanHTML(p,`ENTRY PLAN · ${e.entryMode==="pullback"?"PULLBACK":"BREAKOUT"} · ${e.direction==="bearish"?"PUTS":"CALLS"}`);
      const strip=card.querySelector(".v26DecisionStrip");

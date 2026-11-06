@@ -1,3 +1,8 @@
+v28.1 — DIRECTION + CARD POLISH
+- A setup's direction now comes from the stock's own trend structure. Previously a bearish value-acceptance read on an uptrending, rotating-in name (LEN) made it look for a bearish plan and fail with "No valid entry plan". The conflict now shows as a warning (−6).
+- Trader-board Setup Quality now includes the same tape, rejection and pullback penalties as the card score.
+- The legacy premium-history line is hidden on cards once the entry plan has loaded.
+
 v28.0 — PICK QUALITY + OPTIONS ENTRY REBUILD
 - Market regime now feeds Top Setups scoring. A "tape" state (Supportive / Caution / Risk-Off) is built from SPY's 1- and 5-day change, VIX level and 5-day change, and risk appetite. Bullish setups lose points in Caution/Risk-Off, and defensive groups (XLP/XLU/XLV/XLRE) get an extra caution because their relative strength may just be falling less than SPY.
 - Absolute trend is required as well as relative strength. Bullish setups need the stock above its 20/50-day averages, and a parent sector in an absolute downtrend fails the gate. Institutional context now returns `parent_trend`.
