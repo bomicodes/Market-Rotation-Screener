@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "29.0"
+APP_VERSION = "29.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4623,6 +4623,8 @@ def nightly_run():
                     get(f"/api/entry-plan/{t}?direction={d}&plan={plan}&budget={budget}")
                 ct=s.get("counter")
                 if ct: get(f"/api/entry-plan/{t}?direction={ct.get('direction')}&plan=rejection&budget={budget}")
+                opp="bearish" if d=="bullish" else "bullish"
+                if (s.get("vp_plans") or {}).get(opp): get(f"/api/entry-plan/{t}?direction={opp}&plan=vp&budget={budget}")
                 get(f"/api/premium-support/{t}?direction={d}")
                 done+=1
             except Exception as e:
@@ -10594,8 +10596,15 @@ topSetupEvaluation=function(x){
    }
    const vaDir=(b.va||valueAcceptanceMap[x.ticker])?.direction;
    if(vaDir&&vaDir!=="neutral"&&vaDir!==dir){raw-=6;warn.push([`Value acceptance ${vaDir} vs ${dir} trend`,"warn"]);}
+   // v29.1: VP + STRAT reversal against the setup — price at a volume-profile level
+   // in the opposite direction with a 1D/1W STRAT signal confirming it.
+   const opp=dir==="bullish"?"bearish":"bullish",ovp=s.vp_plans?.[opp];
+   const osig=(c?.vp_strat?.strat?.signals||[]).find(z=>(z.timeframe==="1D"||z.timeframe==="1W")&&z.direction===opp);
+   if(!s.counter&&ovp&&ovp.in_zone&&Number(ovp.rr)>=V28_MIN_RR&&osig){
+     counter={type:"vp_strat_reversal",direction:opp,plan:"vp",lane:"vp_counter",level:ovp.level,level_name:ovp.level_name,trigger:ovp.entry,stop:ovp.stop,target1:null,target2:ovp.target,target_name:ovp.target_name,rr:ovp.rr,signal:osig};
+   }
    const ct=s.counter;
-   if(ct&&ct.direction!==dir){counter=ct;raw-=12;warn.push([ct.type==="supply_rejection"?`Rejected at supply $${ct.level}`:`Held demand $${ct.level}`,"warn"]);}
+   if(ct&&ct.direction!==dir){counter={...ct,plan:"rejection",lane:"rejection"};raw-=12;warn.push([ct.type==="supply_rejection"?`Rejected at supply $${ct.level}`:`Held demand $${ct.level}`,"warn"]);}
  }
  const delta=raw-baseRaw;
  const score=Math.max(0,Math.min(100,Math.round(raw*100/V28_RAW_MAX)));
@@ -10622,7 +10631,7 @@ function v28PlanJobs(){
    const s=institutionalContextMap[x.ticker]?.structure;if(!s?.available)return;
    const e=topSetupEvaluation(x);
    if(e.hardPass&&e.qualificationScore>=45)jobs.push([x.ticker,e.direction,e.entryMode]);
-   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)jobs.push([x.ticker,e.counter.direction,"rejection"]);
+   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)jobs.push([x.ticker,e.counter.direction,e.counter.plan||"rejection"]);
  });
  return jobs;
 }
@@ -10750,9 +10759,15 @@ function v28RenderCounter(){
  (globalTopSetupData||[]).slice(0,10).forEach(x=>{const e=topSetupEvaluation(x);if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)rows.push({x,e,ct:e.counter});});
  if(!rows.length){sec?.remove();return;}
  if(!sec){sec=document.createElement("div");sec.id="v28CounterSection";sec.className="v28Counter";g.parentNode.insertBefore(sec,g.nextSibling);}
- sec.innerHTML=`<div class="v28CounterHead"><b>COUNTER-TREND · REJECTIONS</b><span class="tiny">Price failed at a major prior ${rows.some(r=>r.ct.type==="supply_rejection")?"high":"level"} inside a group that is rotating the other way. Against the rotation — smaller size, faster exits.</span></div>`+
+ sec.innerHTML=`<div class="v28CounterHead"><b>COUNTER-TREND · REJECTIONS + VP/STRAT REVERSALS</b><span class="tiny">Price failed at a major prior level, or is pinned at a volume-profile level with a daily/weekly STRAT reversal, inside a group that is rotating the other way. Against the rotation — smaller size, faster exits.</span></div>`+
    rows.map(({x,e,ct})=>{
-     const bear=ct.direction==="bearish",p=v28PlanFor(x.ticker,ct.direction,"rejection");
+     const bear=ct.direction==="bearish",p=v28PlanFor(x.ticker,ct.direction,ct.plan||"rejection");
+     if(ct.type==="vp_strat_reversal"){
+       return `<div class="v28CounterCard"><div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus"><span class="v263Lane ${bear?"v28Bear":"v28Bull"}">VP + STRAT ${bear?"FADE":"REVERSAL"}</span> · ${bear?"bearish":"bullish"} against the rotation${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">R/R ${Number(ct.rr).toFixed(1)}</div></div>
+       <div class="tiny">${ct.signal.detail||ct.signal.type} · price is ${bear?"capped by":"holding"} the ${ct.level_name} at ${v28Money(ct.level,2)}.</div>
+       <div class="topSetupTrigger">TRIGGER · <b>${bear?"2D below":"2U above"} ${v28Money(ct.trigger,2)}</b> · stop ${v28Money(ct.stop,2)} · target ${v28Money(ct.target2,2)} (${ct.target_name})</div>
+       ${v28PlanHTML(p,`ENTRY PLAN · ${bear?"PUTS":"CALLS"}`,institutionalContextMap[x.ticker]?.vp_strat)}</div>`;
+     }
      return `<div class="v28CounterCard"><div class="topSetupHead"><div><div class="topSetupTicker">${x.ticker}</div><div class="topSetupStatus"><span class="v263Lane ${bear?"v28Bear":"v28Bull"}">${bear?"SUPPLY REJECTION":"DEMAND HOLD"}</span> · ${bear?"bearish fade":"bullish reversal"}${x._parentTicker?` · ${x._parentTicker}`:""}</div></div><div class="topSetupScore">R/R ${Number(ct.rr).toFixed(1)}</div></div>
      <div class="tiny">${ct.bar_date}: ${bear?"high":"low"} ${v28Money(bear?ct.bar_high:ct.bar_low,2)} tested the prior ${bear?"1-year high":"1-year low"} zone (${v28Money(ct.level,2)}) and closed in the ${bear?"bottom":"top"} ${bear?ct.close_position_pct:100-ct.close_position_pct}% of its range with a ${ct.wick_pct}% ${bear?"upper":"lower"} wick.${ct.extension_atr!=null?` Price is ${Math.abs(ct.extension_atr).toFixed(1)} ATR ${ct.extension_atr>0?"above":"below"} its 20-day average.`:""}</div>
      <div class="topSetupTrigger">TRIGGER · <b>break ${bear?"below":"above"} ${v28Money(ct.trigger,2)}</b> · stop ${v28Money(ct.stop,2)} · T1 ${v28Money(ct.target1,2)} · T2 ${v28Money(ct.target2,2)}</div>
@@ -10793,7 +10808,7 @@ function v29LogRows(){
        contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||z.long||{}).symbol||null}:null});
    };
    if(e.hardPass&&e.qualificationScore>=45&&e.entryMode)add(e.direction,e.entryMode,e.entryMode,e.score);
-   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)add(e.counter.direction,"rejection","rejection",null);
+   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR)add(e.counter.direction,e.counter.plan||"rejection",e.counter.lane||"rejection",null);
  });
  return rows;
 }

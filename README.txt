@@ -1,3 +1,6 @@
+v29.1 — VP + STRAT REVERSALS IN THE COUNTER-TREND LANE
+- The counter-trend lane also shows VP + STRAT reversals: price at a volume-profile level in the opposite direction with a 1D/1W STRAT signal (for example a Failed 2U) confirming it, and an opposite-direction VP plan clearing 1.5 R/R. They are logged in the track record as lane `vp_counter`, and the nightly job pre-computes their entry plans.
+
 v29.0 — NIGHTLY BOARD, TRACK RECORD, VOLUME PROFILE + STRAT ENTRIES, CREDIT IN THE TAPE
 - Nightly job (.github/workflows/nightly-scan.yml, weekdays 21:50 UTC). It POSTs /api/nightly/run, which replays the board's own requests in-process: market, an all-groups stock-RRG universe, early reversals, options liquidity, chart/VP, STRAT, institutional context, entry plans and premium support for up to 24 names. The run then updates setup outcomes. /api/nightly/status reports progress. Both endpoints are public but limited to one run per 6 hours.
 - Persistent L2 cache in Postgres (SQLite locally) behind cached_refresh_safe for the board's endpoints. Outside market hours, a payload saved after the latest close is served from L2, so an evening visit loads from the nightly results even after the free instance has slept. Nothing is read from L2 during market hours. An all-groups universe can answer any subset of groups.
