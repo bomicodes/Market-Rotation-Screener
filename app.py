@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "32.0"
+APP_VERSION = "32.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6986,7 +6986,8 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 .v32Dir.long{color:#3DD68C;background:#10261C}.v32Dir.short{color:#FF8A78;background:#2A1512}
 .v32Lane{font-size:13px;color:#B7C2CF;margin-top:4px}.v32Status{font-size:12px;font-weight:600;margin-top:4px}
 .v32Sum{font-size:14px;color:#D5DDE6}
-.v32Ladder{position:relative;height:36px;margin-top:10px}
+.v32Ladder{position:relative;height:56px;margin-top:10px}
+.v32Ladder .mk.below{top:18px}
 .v32Ladder .trk{position:absolute;left:0;right:0;top:16px;height:4px;border-radius:4px;background:#1A2330}
 .v32Ladder .rw,.v32Ladder .rk{position:absolute;top:16px;height:4px;border-radius:4px}
 .v32Ladder .mk{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px}
@@ -7001,7 +7002,8 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 .v32Go{border-color:#2A6B4D;background:#123224;color:#7FF0B6}.v32Btn.grow{flex:1}
 .v32More{grid-column:1/-1;border-top:1px solid #1A2330;padding-top:10px;font-size:13px;color:#B7C2CF}
 .v32More summary{cursor:pointer;color:#8B97A6}.v32More ul{margin:6px 0 0 18px;padding:0}.v32More li{margin:2px 0}
-.v32LogForm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}.v32LogForm input{width:72px;min-height:34px;padding:0 8px;background:#0B0F14;border:1px solid #263140;border-radius:8px;color:#E6EDF3}
+.v32LogForm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
+body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height:34px;padding:0 8px;background:#0B0F14;border:1px solid #263140;border-radius:8px;color:#E6EDF3}
 .v32Filtered{background:#0E131A;border:1px dashed #263140;border-radius:12px;padding:12px 16px;color:#8B97A6;font-size:13px}.v32Filtered summary{cursor:pointer}.v32Filtered p{margin:8px 0 0}
 .v32Empty{border:1px dashed #263140;border-radius:12px;padding:16px;color:#8B97A6;font-size:13px;text-align:center}
 .v32Table{width:100%;border-collapse:collapse;font-size:13px}.v32Table th{font-size:11px;color:#8B97A6;text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid #1D2630}
@@ -11951,10 +11953,17 @@ function v32Ladder(dir,stop,entry,target,now){
  const vals=[stop,entry,target].concat(now!=null?[now]:[]).map(Number).filter(Number.isFinite);if(vals.length<3)return "";
  const lo=Math.min(...vals),hi=Math.max(...vals),pad=(hi-lo)*.08||1,a=lo-pad,b=hi+pad,p=v=>Math.round((v-a)/(b-a)*1000)/10;
  const e=p(entry),t=p(target),s=p(stop),long=dir!=="bearish";
- const mk=(v,l,c)=>`<div class="mk" style="left:${p(v)}%"><span class="v32Num" style="color:${c}">${l} ${v32$(v)}</span><i style="background:${c}"></i></div>`;
+ // Labels go above the bar; a label that would collide with the previous
+ // one in that row (closer than ~22% of the track) drops below the bar.
+ const items=[{v:stop,l:"stop",c:"#FF8A78"},{v:entry,l:"entry",c:"#E6EDF3"},{v:target,l:"target",c:"#3DD68C"}].concat(now!=null?[{v:now,l:"now",c:"#F2B84B"}]:[])
+   .map(o=>({...o,pc:p(Number(o.v))})).sort((x,y)=>x.pc-y.pc);
+ const last={above:-99,below:-99};
+ items.forEach(o=>{if(o.pc-last.above>=22){o.row="above";last.above=o.pc}else{o.row="below";last.below=o.pc}});
+ const mk=o=>o.row==="below"?`<div class="mk below" style="left:${o.pc}%"><i style="background:${o.c}"></i><span class="v32Num" style="color:${o.c}">${o.l} ${v32$(o.v)}</span></div>`
+   :`<div class="mk" style="left:${o.pc}%"><span class="v32Num" style="color:${o.c}">${o.l} ${v32$(o.v)}</span><i style="background:${o.c}"></i></div>`;
  return `<div class="v32Ladder" role="img" aria-label="Stop ${v32$(stop)}, entry ${v32$(entry)}, target ${v32$(target)}${now!=null?`, now ${v32$(now)}`:""}"><div class="trk"></div>
   <div class="rw" style="left:${Math.min(e,t)}%;width:${Math.abs(t-e)}%;background:${long?"#1F6B47":"#7A3328"}"></div><div class="rk" style="left:${Math.min(e,s)}%;width:${Math.abs(e-s)}%;background:#5A3A3A"></div>
-  ${mk(stop,"stop","#FF8A78")}${mk(entry,"entry","#E6EDF3")}${mk(target,"target","#3DD68C")}${now!=null?mk(now,"now","#F2B84B"):""}</div>`;
+  ${items.map(mk).join("")}</div>`;
 }
 function v32LogPieces(p,lane){
  const z=p?.single;if(!p?.available||!z)return {id:null,form:"",rules:""};
@@ -12019,7 +12028,8 @@ function v32CollectIdeas(){
      summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)} · relative line ${v32Pct(m.rs_turn_5d,1)} last 5d.`,
      chips:[`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)});
  });
- return {ideas,filtered};
+ const shownT=new Set(ideas.map(c=>c.ticker));
+ return {ideas,filtered:filtered.filter(t=>!shownT.has(t))};
 }
 function v32RenderTonight(){
  try{v32RenderMeta();v32RenderTape();}catch(e){}

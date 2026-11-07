@@ -1,3 +1,8 @@
+v32.1 — REDESIGN POLISH
+- The Log trade / Close forms stay hidden until clicked (a display rule was overriding `hidden`).
+- Ladder labels use two rows, so close levels (entry vs now, stop vs entry) no longer overlap.
+- A name with an idea card (e.g. a counter-trend setup) is no longer also listed under "filtered out".
+
 v32.0 — REDESIGN
 - New shell and navigation: Tonight · Rotation · Positions · Earnings · Track record, plus a Tools menu that opens the classic panels (sector stocks & charts, options scanner, GEX, heat map, watchlist, news & signals). Header shows the data date, nightly-scan time, max-contract budget and refresh. On phones, navigation moves to a bottom bar.
 - Tonight: market tape tiles (tape state, SPY, VIX, credit), the groups money is rotating into, and one unified card per idea. Top Setups, counter-trend ideas and laggards all use the same card: lane and status, a stop → entry → now → target ladder, three evidence chips, reward/risk, the contract and cost, PREMIUM JUICED, Log trade and Chart, with plan details (exit rules, VP, STRAT) folded away. Long/Short/Laggard filter. Names filtered out for downtrends are listed in one line.
