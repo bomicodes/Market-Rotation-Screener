@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "32.1"
+APP_VERSION = "32.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4585,48 +4585,77 @@ def _leg_move_needed(row, spot, is_put, gain=1.5, days=3):
     return {"stock_price":round(S,2),"move_pct":round((S/spot-1)*100,1)}
 
 
+STRANGLE_TENORS=[("1 week",4,10,7,2),("2 week",11,18,14,3)]   # label, min DTE, max DTE, target DTE, days held for the +150% math
+
+
+def _strangle_timing(dte):
+    """Time stop and exit-by for a strangle, scaled to the contract's life.
+    1-week contracts: out after 2 sessions, by 1 day before expiry.
+    2-week: 3 sessions, 2 days before. Longer: the original 5 sessions / 7 days."""
+    dte=int(dte or 0)
+    if dte<=10: return 2,1
+    if dte<=18: return 3,2
+    return STRANGLE_RULES["time_stop_sessions"],STRANGLE_RULES["exit_days_before_expiry"]
+
+
+def _strangle_pair(rows, exp, budget):
+    calls=[r for r in rows if r["expiration"]==exp and str(r.get("type","")).lower().startswith("c") and .10<=abs(r["delta"])<=.45]
+    puts=[r for r in rows if r["expiration"]==exp and str(r.get("type","")).lower().startswith("p") and .10<=abs(r["delta"])<=.45]
+    pairs=[]
+    for c in calls:
+        for p_ in puts:
+            cost=(c["mid"]+p_["mid"])*100
+            dist=abs(abs(c["delta"])-.25)+abs(abs(p_["delta"])-.25)
+            pairs.append((cost<=budget,-dist if cost<=budget else -cost,c,p_,cost))
+    if not pairs: return None
+    pairs.sort(key=lambda z:(z[0],z[1]),reverse=True)
+    fits,_,c,p_,cost=pairs[0]
+    return {"fits":fits,"call":c,"put":p_,"cost":cost}
+
+
 def strangle_plan(ticker, budget=250.0, rows=None, spot=None):
+    """Post-earnings strangle on 1-week and 2-week contracts (the trader's style).
+    Returns both tenors under `choices`; the top-level fields are the preferred
+    one: the 1-week pair if it fits the budget, else the 2-week, else the 1-week."""
     ticker=ticker.upper().strip(); budget=max(25.0,float(budget or 250))
     if spot is None:
         _,spot=realized_vol_20d(ticker)
     if not spot: return {"ticker":ticker,"available":False,"reason":"Spot unavailable."}
+    lo_d,hi_d=min(t[1] for t in STRANGLE_TENORS),max(t[2] for t in STRANGLE_TENORS)
     if rows is None:
         today=pd.Timestamp.now().normalize()
-        start=(today+pd.Timedelta(days=7)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+        start=(today+pd.Timedelta(days=lo_d)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=hi_d)).strftime("%Y-%m-%d")
         contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
         snaps=alpaca_option_chain(ticker,start,end,spot); rows=[option_contract_row(sym,snap,meta[sym],spot) for sym,snap in snaps.items() if sym in meta]
-    rows=[r for r in rows if r.get("mid") and r["mid"]>0 and r.get("dte") is not None and 7<=r["dte"]<=45 and r.get("delta") is not None
+    rows=[r for r in rows if r.get("mid") and r["mid"]>0 and r.get("dte") is not None and lo_d<=r["dte"]<=hi_d and r.get("delta") is not None
           and r.get("spread_pct") is not None and r["spread_pct"]<=30]
-    if not rows: return {"ticker":ticker,"available":False,"reason":"No 7–45 DTE contracts with usable quotes."}
-    exps=sorted({(r["expiration"],r["dte"]) for r in rows},key=lambda e:abs(e[1]-21))
-    best=None
-    for exp,dte in exps[:3]:
-        calls=[r for r in rows if r["expiration"]==exp and str(r.get("type","")).lower().startswith("c") and .10<=abs(r["delta"])<=.45]
-        puts=[r for r in rows if r["expiration"]==exp and str(r.get("type","")).lower().startswith("p") and .10<=abs(r["delta"])<=.45]
-        pairs=[]
-        for c in calls:
-            for p_ in puts:
-                cost=(c["mid"]+p_["mid"])*100
-                dist=abs(abs(c["delta"])-.25)+abs(abs(p_["delta"])-.25)
-                pairs.append((cost<=budget,-dist if cost<=budget else -cost,c,p_,cost))
-        if not pairs: continue
-        pairs.sort(key=lambda z:(z[0],z[1]),reverse=True)
-        fits,_,c,p_,cost=pairs[0]
-        cand={"fits":fits,"call":c,"put":p_,"cost":cost,"dte":dte,"expiration":exp}
-        if best is None or (cand["fits"] and not best["fits"]): best=cand
-        if best["fits"]: break
-    if not best: return {"ticker":ticker,"available":False,"reason":"No call/put pair in the 0.10–0.45 delta band."}
-    c,p_=best["call"],best["put"]
-    out={"ticker":ticker,"available":True,"spot":round(spot,2),"budget":budget,"expiration":best["expiration"],"dte":best["dte"],
-         "call":_leg_summary(c),"put":_leg_summary(p_),"total_premium":round(c["mid"]+p_["mid"],2),"cost":round(best["cost"],0),"fits_budget":bool(best["fits"]),
-         "call_move_for_150":_leg_move_needed(c,spot,False),"put_move_for_150":_leg_move_needed(p_,spot,True),
-         "rules":[f"Sell the leg that's up {STRANGLE_RULES['leg_take_profit_low']}–{STRANGLE_RULES['leg_take_profit_high']}%. Close it by +{STRANGLE_RULES['leg_take_profit_high']}%.",
-                  "Once a leg is under $0.10, manage the other leg alone.",
-                  f"{STRANGLE_RULES['stop_pct']}% combined, or {STRANGLE_RULES['time_stop_sessions']} sessions with no leg at +{STRANGLE_RULES['leg_take_profit_low']}%: out.",
-                  f"Out {STRANGLE_RULES['exit_days_before_expiry']} days before expiry."],
-         "feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
-    if not best["fits"]: out["note"]=f"Cheapest pair near 0.25 delta costs ${best['cost']:.0f}, over the ${budget:.0f} budget."
-    return out
+    if not rows: return {"ticker":ticker,"available":False,"reason":"No 1–2 week contracts with usable quotes."}
+    R=STRANGLE_RULES; choices=[]
+    for label,mn,mx,target,days in STRANGLE_TENORS:
+        exps=sorted({(r["expiration"],r["dte"]) for r in rows if mn<=r["dte"]<=mx},key=lambda e:abs(e[1]-target))
+        for exp,dte in exps[:2]:
+            pr=_strangle_pair(rows,exp,budget)
+            if not pr: continue
+            c,p_=pr["call"],pr["put"]; ts,xd=_strangle_timing(dte)
+            exit_by=(pd.Timestamp(exp)-pd.Timedelta(days=xd)).strftime("%Y-%m-%d")
+            ch={"tenor":label,"expiration":exp,"dte":dte,"call":_leg_summary(c),"put":_leg_summary(p_),
+                "total_premium":round(c["mid"]+p_["mid"],2),"cost":round(pr["cost"],0),"fits_budget":bool(pr["fits"]),"hold_days_assumed":days,
+                "call_move_for_150":_leg_move_needed(c,spot,False,days=days),"put_move_for_150":_leg_move_needed(p_,spot,True,days=days),
+                "time_stop_sessions":ts,"exit_by":exit_by,
+                "rules":[f"Sell the leg that's up {R['leg_take_profit_low']}–{R['leg_take_profit_high']}%. Close it by +{R['leg_take_profit_high']}%.",
+                         "Once a leg is under $0.10, manage the other leg alone.",
+                         f"{R['stop_pct']}% combined, or {ts} sessions with no leg at +{R['leg_take_profit_low']}%: out.",
+                         f"Out by {pd.Timestamp(exit_by).strftime('%b %d')} ({xd} day{'s' if xd!=1 else ''} before expiry) — {label} contracts lose time value fast."]}
+            if not pr["fits"]: ch["note"]=f"Cheapest {label} pair near 0.25 delta costs ${pr['cost']:.0f}, over the ${budget:.0f} budget."
+            choices.append(ch)
+            if pr["fits"]: break
+        # keep one choice per tenor: the first that fits, else the first priced
+        mine=[x for x in choices if x["tenor"]==label]
+        if len(mine)>1:
+            keep=next((x for x in mine if x["fits_budget"]),mine[0]); choices=[x for x in choices if x["tenor"]!=label or x is keep]
+    if not choices: return {"ticker":ticker,"available":False,"reason":"No 1–2 week call/put pair in the 0.10–0.45 delta band."}
+    best=next((x for x in choices if x["fits_budget"]),choices[0])
+    return {"ticker":ticker,"available":True,"spot":round(spot,2),"budget":budget,**best,"choices":choices,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
 
 
 @app.get("/api/strangle-plan/<ticker>")
@@ -4634,7 +4663,7 @@ def api_strangle_plan(ticker):
     try:
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
-        payload,stale,err=cached_refresh_safe(f"strangle-v32:{ticker.upper()}:{int(budget)}",lambda:strangle_plan(ticker,budget),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"strangle-v33:{ticker.upper()}:{int(budget)}",lambda:strangle_plan(ticker,budget),ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -4966,12 +4995,13 @@ def _default_exit_plan(kind, legs, fill_total):
     exp=min(pd.Timestamp(str(l["expiration"])[:10]) for l in legs)
     if kind=="strangle":
         R=STRANGLE_RULES
-        return {"kind":"strangle","leg_take_profit_low":R["leg_take_profit_low"],"leg_take_profit_high":R["leg_take_profit_high"],"stop_pct":R["stop_pct"],"time_stop_sessions":R["time_stop_sessions"],
-                "exit_by":(exp-pd.Timedelta(days=R["exit_days_before_expiry"])).strftime("%Y-%m-%d"),
+        ts,xd=_strangle_timing((exp-pd.Timestamp.now().normalize()).days)
+        return {"kind":"strangle","leg_take_profit_low":R["leg_take_profit_low"],"leg_take_profit_high":R["leg_take_profit_high"],"stop_pct":R["stop_pct"],"time_stop_sessions":ts,
+                "exit_by":(exp-pd.Timedelta(days=xd)).strftime("%Y-%m-%d"),
                 "rules":[f"Take profit on whichever leg is up +{R['leg_take_profit_low']}–{R['leg_take_profit_high']}% (close it by +{R['leg_take_profit_high']}%).",f"Stop at {R['stop_pct']}% on the combined premium.",
-                         f"Time stop: out after {R['time_stop_sessions']} sessions if no leg has reached +{R['leg_take_profit_low']}% — post-earnings theta and IV crush work against you.",
+                         f"Time stop: out after {ts} sessions if no leg has reached +{R['leg_take_profit_low']}% — post-earnings theta and IV crush work against you.",
                          "If one leg is worth under $0.10, let it go and manage the other leg on its own.",
-                         f"Exit by {(exp-pd.Timedelta(days=R['exit_days_before_expiry'])).strftime('%b %d')} (7 days before expiry)."]}
+                         f"Exit by {(exp-pd.Timedelta(days=xd)).strftime('%b %d')} ({xd} day{'s' if xd!=1 else ''} before expiry)."]}
     p0=fill_total
     return {"kind":"single","tp1_premium":round(p0*1.5,2),"tp1_pct":50,"tp2_premium":round(p0*2.0,2),"premium_stop":round(p0*.5,2),"premium_stop_pct":-50,
             "time_stop_sessions":10,"time_stop_min_gain_pct":20,"exit_by":(exp-pd.Timedelta(days=14)).strftime("%Y-%m-%d"),
@@ -12149,15 +12179,22 @@ async function v32PlanStrangle(t){
  try{
    const j=await (await fetch(`/api/strangle-plan/${encodeURIComponent(t)}?budget=${encodeURIComponent(v26Budget())}`)).json();
    if(!j.ok||!j.available){out.innerHTML=`<span class="v32Muted">${v32E(j.reason||j.error||"Unavailable")}</span>`;return}
+   window.__v32StrangleAll=j;v32DrawStrangle(j,j.tenor);
+ }catch(e){out.innerHTML=`<span class="v32Muted">${v32E(e.message||e)}</span>`;}
+}
+function v32DrawStrangle(all,tenor){
+ const out=document.getElementById("v32StrangleOut");if(!out)return;
+ const ch=(all.choices||[]).find(x=>x.tenor===tenor)||all;const j={...all,...ch};
    window.__v32Strangle=j;
+   const tabs=(all.choices||[]).length>1?`<div class="v32Seg" role="tablist" style="margin-bottom:6px">${all.choices.map(x=>`<button type="button" role="tab" aria-selected="${x.tenor===j.tenor}" class="${x.tenor===j.tenor?"on":""}" data-v32-tenor="${v32E(x.tenor)}">${v32E(x.tenor)} · ${v32$(x.cost,0)}${x.fits_budget?"":" ⚠"}</button>`).join("")}</div>`:"";
    const leg=(L,lbl,c,mv)=>`<div class="v32Leg"><span style="font-size:11px;font-weight:700;color:${c}">${lbl}</span><b class="v32Num">${v32E(L.expiration)} $${Number(L.strike).toFixed(L.strike%1?1:0)}${L.type==="put"?"P":"C"}</b><span class="v32Num v32Muted">≈ ${v32$(L.mid)} · Δ ${Math.abs(Number(L.delta)).toFixed(2)}</span><span class="v32Num" style="color:${c}">+150% needs ${mv?`${v32$(mv.stock_price)} (${v32Pct(mv.move_pct,1)})`:"—"}</span></div>`;
-   out.innerHTML=`<div class="v32Muted v32Num">${v32E(j.ticker)} · spot ${v32$(j.spot)} · ${j.dte} DTE</div><div class="v32Legs">${leg(j.put,"PUT LEG","#FF8A78",j.put_move_for_150)}${leg(j.call,"CALL LEG","#3DD68C",j.call_move_for_150)}</div>
+   out.innerHTML=`${tabs}<div class="v32Muted v32Num">${v32E(j.ticker)} · spot ${v32$(j.spot)} · ${v32E(j.tenor||"")} · ${j.dte} DTE · move math assumes ${j.hold_days_assumed||3} days held</div><div class="v32Legs">${leg(j.put,"PUT LEG","#FF8A78",j.put_move_for_150)}${leg(j.call,"CALL LEG","#3DD68C",j.call_move_for_150)}</div>
     <div class="v32Contract" style="flex-direction:row;justify-content:space-between;align-items:baseline"><span class="v32Muted">Total cost</span><b class="v32Num" style="font-size:18px;color:${j.fits_budget?"#E6EDF3":"#FF8A78"}">${v32$(j.cost,0)} <span class="v32Muted" style="font-size:12px">of ${v32$(j.budget,0)}</span></b></div>
     ${j.note?`<div style="color:#FF8A78;font-size:12px">${v32E(j.note)}</div>`:""}<ul style="margin:0 0 0 16px;padding:0;font-size:13px">${(j.rules||[]).map(r=>`<li>${v32E(r)}</li>`).join("")}</ul>
     <div class="v32Btns"><button type="button" class="v32Btn v32Go grow" id="v32LogStrangle">Log strangle at these prices</button></div><span class="v32Muted" id="v32StrangleMsg"></span>
     <div class="v32Muted" style="font-size:11px">Indicative quotes on the free feed — confirm the live bid/ask in your broker.</div>`;
- }catch(e){out.innerHTML=`<span class="v32Muted">${v32E(e.message||e)}</span>`;}
 }
+document.addEventListener("click",ev=>{const b=ev.target?.closest?.("[data-v32-tenor]");if(!b||!window.__v32StrangleAll)return;ev.preventDefault();v32DrawStrangle(window.__v32StrangleAll,b.dataset.v32Tenor);});
 document.addEventListener("click",async ev=>{
  if(!ev.target?.closest?.("#v32LogStrangle"))return;const j=window.__v32Strangle,msg=document.getElementById("v32StrangleMsg");if(!j)return;
  try{await v30PostJSON("/api/positions",{ticker:j.ticker,kind:"strangle",legs:[{symbol:j.call.symbol,type:"call",strike:j.call.strike,expiration:j.call.expiration,fill:j.call.mid,qty:1},{symbol:j.put.symbol,type:"put",strike:j.put.strike,expiration:j.put.expiration,fill:j.put.mid,qty:1}],plan:{lane:"post-earnings strangle"}});

@@ -180,11 +180,26 @@ def test_strangle_plan_picks_budget_pair_and_moves():
     sys.path.insert(0, "tests")
     from test_v28_entry_quality import _row
     spot = 100.0
-    rows = [_row("call", k, 21, spot, iv=.6) for k in range(100, 131)] + [_row("put", k, 21, spot, iv=.6) for k in range(70, 101)]
-    for r in rows: r["expiration"] = "2026-12-01"
+    rows = []
+    for dte, exp in ((7, "2026-12-01"), (14, "2026-12-08"), (30, "2026-12-24")):
+        legs = [_row("call", k, dte, spot, iv=.6) for k in range(100, 131)] + [_row("put", k, dte, spot, iv=.6) for k in range(70, 101)]
+        for r in legs: r["expiration"] = exp
+        rows += legs
     out = appmod.strangle_plan("TEST", 400, rows, spot)
     assert out["available"] and out["fits_budget"] and out["cost"] <= 400
+    assert {c["tenor"] for c in out["choices"]} == {"1 week", "2 week"}
+    assert out["tenor"] == "1 week" and out["dte"] == 7          # 30 DTE never offered
     assert out["call"]["strike"] > spot > out["put"]["strike"]
     assert out["call_move_for_150"]["move_pct"] > 0 > out["put_move_for_150"]["move_pct"]
+    assert out["time_stop_sessions"] == 2 and out["exit_by"] == "2026-11-30"
+    two = next(c for c in out["choices"] if c["tenor"] == "2 week")
+    assert two["time_stop_sessions"] == 3 and two["exit_by"] == "2026-12-06"
     tight = appmod.strangle_plan("TEST", 50, rows, spot)
     assert tight["available"] and not tight["fits_budget"] and "over the" in tight["note"]
+
+
+def test_weekly_strangle_exit_plan_not_immediate():
+    exp = (pd.Timestamp.now().normalize() + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+    ep = appmod._default_exit_plan("strangle", [{"expiration": exp}], 3.0)
+    assert ep["time_stop_sessions"] == 2
+    assert ep["exit_by"] == (pd.Timestamp(exp) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
