@@ -1,3 +1,6 @@
+v30.6 — LAGGARD CACHE FIX
+- The nightly job pre-computes laggards for the same top-10 rotating-in groups the board requests (it used the full hint list, so the board's key was never refreshed). The cache key is bumped to drop a pre-v30.2 payload that still showed MRNA.
+
 v30.5 — NIGHTLY ALWAYS RECOMPUTES
 - The nightly job bypasses L2 reads and clears in-memory payloads for L2 keys before replaying requests. A rerun after the close previously re-served the payloads it was meant to replace.
 

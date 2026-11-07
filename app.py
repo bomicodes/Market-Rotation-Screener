@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.5"
+APP_VERSION = "30.6"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v30:","premium-support-v26-1:","earn-next-v30:","laggards-v30:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
+             "entry-plan-v30:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -4705,7 +4705,7 @@ def api_laggards():
         groups=[g.strip().upper() for g in (request.args.get("groups") or "").split(",") if g.strip()]
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
-        key=f"laggards-v30:{','.join(sorted(set(groups)))}:{budget}"
+        key=f"laggards-v31:{','.join(sorted(set(groups)))}:{budget}"
         payload,stale,err=cached_refresh_safe(key,lambda:laggards_payload(groups,budget),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
@@ -5060,7 +5060,7 @@ def nightly_run():
         if hints.get("groups"):
             st["stage"]="laggards"
             try:
-                lg=get(f"/api/laggards?groups={','.join(hints['groups'])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
+                lg=get(f"/api/laggards?groups={','.join(hints['groups'][:10])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
             except Exception as e: st["errors"].append(f"laggards: {e}")
         st["stage"]="outcomes"
         try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
