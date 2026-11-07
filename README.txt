@@ -1,3 +1,6 @@
+v30.5 — NIGHTLY ALWAYS RECOMPUTES
+- The nightly job bypasses L2 reads and clears in-memory payloads for L2 keys before replaying requests. A rerun after the close previously re-served the payloads it was meant to replace.
+
 v30.4 — FIX STALE LATEST CLOSES
 - Yahoo's bulk download sometimes returns the newest session for ^VIX but leaves SPY/HYG/LQD (and other ETFs/stocks) blank. The tape then repeated the prior day's −4.4% SPY move and credit readings. dl_prices now fills recent missing closes, and any newer session, from Alpaca daily bars for non-index symbols.
 

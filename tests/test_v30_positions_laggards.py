@@ -132,3 +132,15 @@ def test_fill_latest_closes_adds_newer_session():
     alp = pd.DataFrame({"SPY": [704.0, 699.0]}, index=[idx[-1], nxt])
     out = appmod.fill_latest_closes(close, ["SPY"], fetch=lambda syms: alp)
     assert out.index.max() == nxt and out["SPY"].iloc[-1] == 699.0
+
+
+def test_nightly_thread_never_reads_l2(monkeypatch):
+    import threading
+    monkeypatch.setattr(appmod, "L2_PREFIXES", ("market",))
+    monkeypatch.setattr(appmod, "market_open_now", lambda now=None: False)
+    monkeypatch.setattr(appmod, "_l2_preload", lambda: None)
+    appmod.L2_MEMORY["market"] = (9e12, {"x": 1})
+    seen = []
+    t = threading.Thread(target=lambda: seen.append(appmod.l2_get("market")), name="nightly")
+    t.start(); t.join()
+    assert seen == [None] and appmod.l2_get("market")[1] == {"x": 1}
