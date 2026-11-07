@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "33.2"
+APP_VERSION = "34.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5138,35 +5138,105 @@ def base_detect(df, min_len=15, max_len=60):
             "quality":round(min(100,q),0),"plan":plan,"avg_dollar_vol":round(float((c[-20:]*v[-20:]).mean()),0)}
 
 
+def _volume_flow_20(df):
+    """Up- vs down-day volume and volume-weighted close location, last 20 sessions."""
+    try:
+        d=df.dropna(subset=["High","Low","Close"]).iloc[-21:]
+        c=d["Close"].values; h=d["High"].values; l=d["Low"].values; v=d["Volume"].fillna(0).values
+        cc,pc,vv=c[1:],c[:-1],v[1:]
+        up=float(vv[cc>pc].sum()); dn=float(vv[cc<pc].sum())
+        udr=up/dn if dn>0 else (3.0 if up>0 else 1.0)
+        rng=np.maximum(h[1:]-l[1:],1e-9); clv=((cc-l[1:])-(h[1:]-cc))/rng
+        ad=float((clv*vv).sum()/vv.sum()) if vv.sum()>0 else 0.0
+        return udr,ad
+    except Exception:
+        return None
+
+
+def group_volume_rotation(data, memberships, rrg):
+    """Second layer: where is volume going inside each group, and does the RRG agree?
+    flow = % of members accumulating (20d up/down volume ≥ 1.2) minus % distributing (≤ 0.83)."""
+    by={}
+    for t,groups in memberships.items():
+        if t not in data: continue
+        f=_volume_flow_20(data[t])
+        if not f: continue
+        for g in groups: by.setdefault(g,[]).append(f)
+    out={}
+    for g,fl in by.items():
+        if len(fl)<5: continue
+        u=np.array([x[0] for x in fl]); ad=np.array([x[1] for x in fl])
+        acc=float((u>=1.2).mean()*100); dist=float((u<=1/1.2).mean()*100); flow=acc-dist
+        r=rrg.get(g) or {}; q=r.get("quadrant"); traj=r.get("tail_trajectory")
+        if q in ("Leading","Improving") and flow>=15: sig="Rotating in · volume confirms"
+        elif q in ("Lagging","Weakening") and flow>=15: sig="Quiet accumulation · volume ahead of price"
+        elif q in ("Leading","Improving") and flow<=-15: sig="Distribution under the surface"
+        elif q in ("Lagging","Weakening") and flow<=-15: sig="Rotating out · volume confirms"
+        else: sig="Mixed"
+        out[g]={"group":g,"name":RRG_UNIVERSE.get(g,g),"quadrant":q,"trajectory":traj,"members":len(fl),"accumulating_pct":round(acc),
+                "distributing_pct":round(dist),"flow":round(flow),"median_up_down":round(float(np.median(u)),2),"median_ad":round(float(np.median(ad)),2),"signal":sig}
+    return out
+
+
+def _rotation_alignment(direction, g):
+    """Score a base against its group: RRG quadrant + group volume flow."""
+    if not g or direction not in ("bullish","bearish"): return 0,"no group read"
+    bull=direction=="bullish"; q=g.get("quadrant"); flow=g.get("flow") or 0
+    q_ok=(q in ("Leading","Improving")) if bull else (q in ("Weakening","Lagging"))
+    f_ok=flow>=15 if bull else flow<=-15
+    f_bad=flow<=-15 if bull else flow>=15
+    if q_ok and f_ok: return 15,"aligned: rotation + group volume"
+    if f_ok: return 10,"aligned: group volume leads the rotation"
+    if q_ok and not f_bad: return 6,"aligned: rotation"
+    if f_bad or (not q_ok and flow*(1 if bull else -1)<=0): return -15,"against the group"
+    return 0,"neutral group"
+
+
 def accumulation_payload(budget=250, top=8):
-    members={}
+    memberships={}
     for etf in RRG_UNIVERSE:
         try:
             (holdings,_src),_,_=cached_refresh_safe(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
             for hd in apply_sector_supplements(etf,holdings)[:15]:
-                members.setdefault(hd["ticker"],etf)
+                if hd["ticker"] in RRG_UNIVERSE: continue
+                memberships.setdefault(hd["ticker"],[])
+                if etf not in memberships[hd["ticker"]]: memberships[hd["ticker"]].append(etf)
         except Exception: continue
-    data=dl_ohlcv_bulk(list(members),"9mo")
+    data=dl_ohlcv_bulk(list(memberships)+list(RRG_UNIVERSE)+["SPY"],"1y")
+    rrg={}
+    try:
+        closes=pd.DataFrame({t:data[t]["Close"] for t in ["SPY",*RRG_UNIVERSE] if t in data})
+        for r in rrg_rows(closes,"SPY",[g for g in RRG_UNIVERSE if g in closes.columns],10,5,8): rrg[r["ticker"]]=r
+    except Exception:
+        rrg={}
+    groups=group_volume_rotation(data,memberships,rrg)
     cands=[]
-    for t,df in data.items():
+    for t,gl in memberships.items():
+        df=data.get(t)
+        if df is None: continue
         try:
             b=base_detect(df)
         except Exception:
             b=None
         if not b or b["spot"]<10 or b["avg_dollar_vol"]<20e6: continue
-        b.update(ticker=t,parent=members.get(t))
+        # pick the group membership that fits the trade best
+        best=max(((g,)+_rotation_alignment(b.get("direction"),groups.get(g)) for g in gl),key=lambda z:z[1])
+        g,adj,why=best; gr=groups.get(g) or {}
+        b.update(ticker=t,parent=g,base_quality=b["quality"],quality=round(max(0,min(100,b["quality"]+adj))),
+                 rotation={"group":g,"quadrant":gr.get("quadrant"),"trajectory":gr.get("trajectory"),"flow":gr.get("flow"),
+                           "signal":gr.get("signal"),"alignment":why,"adj":adj})
         cands.append(b)
     cands.sort(key=lambda z:-z["quality"])
     rows=[]; watch=[]
     for b in cands:
         p=b.get("plan")
-        if len(rows)<top and p and p["rr"]>=1.5 and b["quality"]>=45:
+        if len(rows)<top and p and p["rr"]>=1.5 and b["quality"]>=50 and b["rotation"]["adj"]>-15:
             try:
                 liq=contract_liquidity_gate(b["ticker"],"0-30",allow_leaps=False)
                 if liq.get("liquidity") not in ("Liquid","Tradable"):
                     b["watch_reason"]=f"options {str(liq.get('liquidity') or 'unavailable').lower()}"; watch.append(b); continue
                 b["options_liquidity"]=liq.get("liquidity")
-            except Exception as e:
+            except Exception:
                 b["watch_reason"]="options check failed"; watch.append(b); continue
             try:
                 st=_context_structure(b["ticker"])
@@ -5176,10 +5246,15 @@ def accumulation_payload(budget=250, top=8):
                 b["entry_plan"]={"available":False,"reason":str(e)}
             rows.append(b)
         elif len(watch)<16:
-            b["watch_reason"]=("no clear lean" if not p else (f"reward/risk {p['rr']}" if p["rr"]<1.5 else ("quality under 45" if b["quality"]<45 else "plan slots full")))
+            b["watch_reason"]=("no clear lean" if not p else ("against the group" if b["rotation"]["adj"]<=-15 else
+                              (f"reward/risk {p['rr']}" if p["rr"]<1.5 else ("quality under 50" if b["quality"]<50 else "plan slots full"))))
             watch.append(b)
-    return {"available":True,"rows":rows,"watch":watch[:16],"screened":len(data),"bases":len(cands),"universe":len(members),
-            "as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None}
+    gl=sorted(groups.values(),key=lambda g:-abs(g["flow"]))
+    for g in gl:
+        g["acc_bases"]=sum(1 for b in cands if b["parent"]==g["group"] and b.get("direction")=="bullish")
+        g["dist_bases"]=sum(1 for b in cands if b["parent"]==g["group"] and b.get("direction")=="bearish")
+    return {"available":True,"rows":rows,"watch":watch[:16],"groups":gl,"screened":len([t for t in memberships if t in data]),"bases":len(cands),
+            "universe":len(memberships),"as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None}
 
 
 @app.get("/api/accumulation")
@@ -5188,7 +5263,7 @@ def api_accumulation():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"accum-v33-2:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"accum-v34:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7373,8 +7448,9 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
  <div class="v32Main"><div class="v32Title"><h1>Accumulation &amp; distribution</h1><span class="v32Muted" id="v33AccSub">Tight ranges with inside bars and building volume · the lean comes from where the volume goes</span>
    <div class="v32Seg" role="group" aria-label="Filter bases"><button type="button" data-v33-filter="all" class="on">All</button><button type="button" data-v33-filter="bullish">Accumulation</button><button type="button" data-v33-filter="bearish">Distribution</button></div>
    <button type="button" class="v32Ghost" id="v33AccRefresh" aria-label="Rescan bases">↻</button></div>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>Group rotation × volume</h2><span class="v32Muted">RRG position vs where volume is going inside each group (20d: % of members accumulating − % distributing)</span></div><div id="v34Groups" class="v32Muted">Loading…</div></section>
   <div id="v33AccCards" class="v32Cards"><div class="v32Empty">Loading…</div></div>
-  <section class="v32Panel"><div class="v32PanelHead"><h2>Still building</h2><span class="v32Muted">Bases without a tradeable plan yet: no clear lean, low quality, reward/risk under 1.5, or thin options</span></div><div id="v33AccWatch"></div></section>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>Still building</h2><span class="v32Muted">Bases without a tradeable plan yet: no clear lean, against the group, low quality, reward/risk under 1.5, or thin options</span></div><div id="v33AccWatch"></div></section>
   <section class="v32Panel"><div class="v32PanelHead"><h2>How to read it</h2></div><div class="v32Muted" style="font-size:13px;line-height:1.55">
    <b>Base</b>: price stuck in a range ≤ 5× its normal daily range while daily ranges shrink (compression) — the longer the base, the bigger the move it can fuel.
    <b>Accumulation</b>: more volume on up days, closes near the highs of the bars, higher lows, price working toward the top of the range, maybe a spring (a dip under the range low that closes back inside).
@@ -12470,7 +12546,7 @@ document.addEventListener("click",async ev=>{
 let v33AccFilter="all",v33AccLoading=false,v33AccLogSig="";
 function v33BaseSummary(b){
  const p=b.plan||{};
- return `${b.base_days}-day base ${v32$(b.base_low)}–${v32$(b.base_high)} (${b.height_pct}%, ${b.height_atr}× normal range). Trigger: ${p.trigger||"—"}.`;
+ return `${b.base_days}-day base ${v32$(b.base_low)}–${v32$(b.base_high)} (${b.height_pct}%, ${b.height_atr}× normal range). Trigger: ${p.trigger||"—"}.${b.rotation?.signal&&b.rotation.signal!=="Mixed"?` Group: ${b.rotation.signal.toLowerCase()}.`:""}`;
 }
 function v33BaseChips(b){
  const ch=[];
@@ -12479,6 +12555,7 @@ function v33BaseChips(b){
  if(b.volume_building)ch.push(`volume building${b.vol_build?` ${b.vol_build}×`:""}`);
  if(b.spring&&b.direction==="bullish")ch.push(`spring ${b.spring.date.slice(5)}`);
  if(b.upthrust&&b.direction==="bearish")ch.push(`upthrust ${b.upthrust.date.slice(5)}`);
+ const ro=b.rotation||{};if(ro.group)ch.unshift(`${ro.adj>0?"✓ ":ro.adj<0?"✗ ":""}${ro.group} ${ro.quadrant||""} · flow ${ro.flow>0?"+":""}${ro.flow??"—"}`);
  if(b.compression<.95)ch.push(`range squeeze ${Math.round((1-b.compression)*100)}%`);else if(b.bb_width_pct<=25)ch.push(`Bollinger squeeze (${b.bb_width_pct}th pct)`);
  return ch;
 }
@@ -12487,6 +12564,7 @@ function v33BaseExtra(b){
  return `<div><b>Why ${v32E(b.bias)}</b> ${v32E((b.why||[]).join(" · ")||"—")} · lean score ${b.bias_score>0?"+":""}${b.bias_score}</div>
   <div><b>Base</b> ${b.base_days} sessions · daily range now ${Math.round(b.compression*100)}% of normal · Bollinger width at the ${b.bb_width_pct}th pct of 6 months · before the base: ${v32Pct(b.prior_move_pct,1)} over 40 sessions</div>
   <div><b>Volume</b> last 10d ${b.vol_build?b.vol_build+"×":"—"} the first half of the base · up/down-day volume ${b.up_down_vol}× · A/D ${b.ad>0?"+":""}${b.ad}</div>
+  <div><b>Group</b> ${v32E(b.rotation?.group||"—")}: ${v32E(b.rotation?.quadrant||"—")}${b.rotation?.trajectory?` (${v32E(b.rotation.trajectory)})`:""} · ${v32E(b.rotation?.signal||"")} · ${v32E(b.rotation?.alignment||"")} (${(b.rotation?.adj||0)>0?"+":""}${b.rotation?.adj||0} quality; base alone ${b.base_quality})</div>
   <div><b>Confirm</b> ${v32E(p.confirm||"")}. If it breaks on light volume or closes back inside the range, it's a false break — out.</div>`;
 }
 function v33AccIdeas(){
@@ -12505,6 +12583,10 @@ async function v33LoadAccum(force=false){
 function v33RenderAccum(){
  const host=document.getElementById("v33AccCards"),wh=document.getElementById("v33AccWatch"),sub=document.getElementById("v33AccSub");if(!host)return;
  const j=window.__accum;
+ const gh=document.getElementById("v34Groups");
+ if(gh&&j){const G=(j.groups||[]).slice(0,14);const qc={Leading:"#3DD68C",Improving:"#5AB8F0",Weakening:"#F2B84B",Lagging:"#FF8A78"};
+   gh.innerHTML=G.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Group</th><th>RRG</th><th>Volume flow</th><th>Accum / dist members</th><th>Bases ↑ / ↓</th><th>Read</th></tr></thead><tbody>${G.map(g=>`<tr><td><b class="v32Num">${v32E(g.group)}</b> <span class="v32Muted">${v32E(g.name)}</span></td><td style="color:${qc[g.quadrant]||"#8B97A6"}">${v32E(g.quadrant||"—")}${g.trajectory&&g.trajectory!=="Neutral"?` <span class="v32Muted">${v32E(g.trajectory.toLowerCase())}</span>`:""}</td><td class="v32Num" style="color:${g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6"}">${g.flow>0?"+":""}${g.flow}</td><td class="v32Num">${g.accumulating_pct}% / ${g.distributing_pct}% <span class="v32Muted">of ${g.members}</span></td><td class="v32Num">${g.acc_bases} / ${g.dist_bases}</td><td>${g.signal==="Quiet accumulation · volume ahead of price"?`<b style="color:#3DD68C">${v32E(g.signal)}</b>`:g.signal==="Distribution under the surface"?`<b style="color:#FF8A78">${v32E(g.signal)}</b>`:v32E(g.signal)}</td></tr>`).join("")}</tbody></table></div>`:"No group read.";}
+ else if(gh)gh.textContent=v33AccLoading?"Scanning…":"—";
  if(!j){host.innerHTML=`<div class="v32Empty">${v33AccLoading?"Scanning sector holdings for bases… the first run takes about a minute.":window.__accumErr?`Scan failed: ${v32E(window.__accumErr)}`:"Loading…"}</div>`;if(wh)wh.innerHTML="";return}
  const ideas=v33AccIdeas().filter(c=>v33AccFilter==="all"||c.dir===v33AccFilter);
  if(sub)sub.textContent=`${j.screened} stocks screened · ${j.bases} in a base · ${(j.rows||[]).length} with a plan${j.as_of?` · data through ${j.as_of}`:""}${v33AccLoading?" · rescanning…":""}`;
