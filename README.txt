@@ -1,3 +1,8 @@
+v32.3 — EQUAL-PREMIUM STRANGLES
+- The planner picks the call/put pair with equal premium (each leg within ±10% of half), then deltas nearest 0.25, within budget.
+  So a winning leg alone breaks even at +100% and is in profit from there, even if the other leg goes to $0.
+- Each leg shows its share of the cost, its breakeven if it wins alone, and the $ P/L at +150%. A note flags an uneven pair when no balanced one fits.
+
 v32.2 — STRANGLES ON 1- AND 2-WEEK CONTRACTS
 - The strangle planner prices a 1-week and a 2-week pair (toggle between them); it picks the 1-week if it fits the budget.
 - The +150% move math assumes 2 days held for 1-week contracts and 3 for 2-week.

@@ -203,3 +203,18 @@ def test_weekly_strangle_exit_plan_not_immediate():
     ep = appmod._default_exit_plan("strangle", [{"expiration": exp}], 3.0)
     assert ep["time_stop_sessions"] == 2
     assert ep["exit_by"] == (pd.Timestamp(exp) - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def test_strangle_pair_balances_premium():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_v28_entry_quality import _row
+    spot = 100.0
+    # put skew: puts priced at higher IV, so equal-delta legs would be uneven
+    rows = [_row("call", k, 7, spot, iv=.5) for k in range(100, 121)] + [_row("put", k, 7, spot, iv=.8) for k in range(75, 101)]
+    for r in rows: r["expiration"] = "2026-12-01"
+    out = appmod.strangle_plan("TEST", 400, rows, spot)
+    b = out["balance"]
+    assert b["balanced"] and b["imbalance_pct"] <= 10
+    assert 90 <= b["call"]["breakeven_gain_pct"] <= 125 and 90 <= b["put"]["breakeven_gain_pct"] <= 125
+    assert b["call"]["pl_at_150"] > 0 and b["put"]["pl_at_150"] > 0
