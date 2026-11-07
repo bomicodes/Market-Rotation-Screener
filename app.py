@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.3"
+APP_VERSION = "30.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -623,7 +623,44 @@ def dl_prices(tickers, period="3y", repair_missing=True, attempts=2):
         raise RuntimeError("Price provider returned no usable data" + (f": {last_err}" if last_err else "."))
 
     _mark_source("yfinance", True)
-    return close.sort_index().dropna(how="all")
+    close = close.sort_index().dropna(how="all")
+    try:
+        close = fill_latest_closes(close, tickers)
+    except Exception:
+        pass
+    return close
+
+
+def fill_latest_closes(close, tickers, sessions=5, fetch=None):
+    """v30.4: Yahoo's bulk download sometimes returns the newest session for some
+    symbols (e.g. ^VIX) but leaves others (SPY, HYG, LQD) blank, so dropna()
+    silently falls back to the previous close and a 1-day change repeats. Fill
+    only the recent missing cells (and any newer sessions) from Alpaca daily
+    bars. Index symbols (^…) are left to Yahoo."""
+    if close is None or close.empty: return close
+    eq=[t for t in tickers if t and not str(t).startswith("^")]
+    latest=close.index.max()
+    recent=close.index[-sessions:]
+    gaps=[t for t in eq if t not in close.columns or close.loc[recent,t].isna().any() or close[t].last_valid_index() is None or close[t].last_valid_index()<latest]
+    fetch=fetch or (lambda syms:alpaca_multi_daily_closes(syms,"1mo"))
+    probe=gaps or eq[:1]
+    alp=fetch(probe)
+    if alp is None or alp.empty: return close
+    alp.index=pd.to_datetime(alp.index).tz_localize(None).normalize()
+    newer=[d for d in alp.index if d>latest]
+    if newer:
+        close=close.reindex(close.index.union(pd.DatetimeIndex(newer))).sort_index()
+        if not gaps:
+            # Yahoo is a full session behind for everything: fetch all equities.
+            alp=fetch(eq); alp.index=pd.to_datetime(alp.index).tz_localize(None).normalize(); gaps=eq
+    window=close.index[-(sessions+len(newer)):]
+    for t in gaps:
+        if t not in alp.columns: continue
+        if t not in close.columns: continue
+        for d in window:
+            if pd.isna(close.at[d,t]) and d in alp.index and pd.notna(alp.at[d,t]):
+                close.at[d,t]=float(alp.at[d,t])
+    return close
 
 def _yf_download_retry(ticker, period, interval="1d", timeout=12, attempts=2, prepost=False):
     """Coalesced Yahoo fetch with stale-on-error protection.
