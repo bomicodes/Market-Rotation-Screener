@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.1"
+APP_VERSION = "30.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4601,12 +4601,15 @@ def laggard_metrics(stock, etf):
     rs=np.log(s).diff().dropna().tail(60); re_=np.log(e).diff().dropna().tail(60)
     j=rs.index.intersection(re_.index); rs=rs.loc[j]; re_=re_.loc[j]
     if len(rs)<40 or float(re_.var())<=0: return None
-    corr=float(np.corrcoef(rs,re_)[0,1]); beta=float(np.cov(rs,re_)[0,1]/re_.var())
+    corr=float(np.corrcoef(rs,re_)[0,1]); raw_beta=float(np.cov(rs,re_)[0,1]/re_.var())
+    # Clamp beta: a news spike can produce betas of 5+ that make an outperformer
+    # look "behind" on a beta-adjusted basis.
+    beta=min(2.0,max(.5,raw_beta))
     r20s=float(s.iloc[-1]/s.iloc[-21]-1)*100; r20e=float(e.iloc[-1]/e.iloc[-21]-1)*100
     gap=r20s-beta*r20e
     ratio=s/e; turn5=float(ratio.iloc[-1]/ratio.iloc[-6]-1)*100; lag20=float(ratio.iloc[-1]/ratio.iloc[-21]-1)*100
     sma50=float(s.rolling(50).mean().iloc[-1]); spot=float(s.iloc[-1])
-    return {"corr":round(corr,2),"beta":round(beta,2),"ret20":round(r20s,2),"group_ret20":round(r20e,2),"catch_up_gap":round(gap,2),
+    return {"corr":round(corr,2),"beta":round(beta,2),"raw_beta":round(raw_beta,2),"ret20":round(r20s,2),"group_ret20":round(r20e,2),"catch_up_gap":round(gap,2),
             "rs_turn_5d":round(turn5,2),"rs_lag_20d":round(lag20,2),"above_sma50":spot>=sma50*.97,"spot":round(spot,2)}
 
 
@@ -4626,7 +4629,9 @@ def laggards_payload(groups, budget=250, top=6):
         if t not in prices or etf not in prices: continue
         m=laggard_metrics(prices[t],prices[etf])
         if not m: continue
-        if m["corr"]<.55 or m["catch_up_gap"]>-3 or not m["above_sma50"]: continue
+        # A laggard must actually have trailed its group over 20 sessions in raw
+        # terms (relative line down), not just on a beta-adjusted basis.
+        if m["corr"]<.55 or m["catch_up_gap"]>-3 or not m["above_sma50"] or m["ret20"]>=m["group_ret20"] or m["rs_lag_20d"]>=0: continue
         m.update(ticker=t,parent=etf,turning=m["rs_turn_5d"]>0)
         m["score"]=round(-m["catch_up_gap"]*m["corr"]+(3 if m["turning"] else 0)+min(3,max(0,m["rs_turn_5d"])),2)
         cands.append(m)
