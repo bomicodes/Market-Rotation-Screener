@@ -63,3 +63,20 @@ def test_base_plan_feeds_entry_levels():
     s = {"available": True, "spot": 100, "base_plans": {"bullish": {"entry": 101, "stop": 97, "target": 110, "rr": 2.25}}}
     lv = appmod._entry_levels_for(s, "bullish", "base")
     assert lv["plan"] == "base" and lv["entry"] == 101 and lv["target"] == 110
+
+
+def test_group_volume_rotation_and_alignment():
+    import sys
+    sys.path.insert(0, "tests")
+    acc = {f"A{i}": _base(True, seed=i) for i in range(6)}
+    dist = {f"D{i}": _base(False, seed=10 + i) for i in range(6)}
+    data = {**acc, **dist}
+    mem = {**{t: ["XLK"] for t in acc}, **{t: ["XLE"] for t in dist}}
+    rrg = {"XLK": {"quadrant": "Lagging"}, "XLE": {"quadrant": "Leading"}}
+    g = appmod.group_volume_rotation(data, mem, rrg)
+    assert g["XLK"]["flow"] >= 15 and g["XLK"]["signal"].startswith("Quiet accumulation")
+    assert g["XLE"]["flow"] <= -15 and g["XLE"]["signal"].startswith("Distribution under")
+    assert appmod._rotation_alignment("bullish", {"quadrant": "Improving", "flow": 30})[0] == 15
+    assert appmod._rotation_alignment("bullish", g["XLK"])[0] == 10
+    assert appmod._rotation_alignment("bullish", g["XLE"])[0] == -15
+    assert appmod._rotation_alignment("bearish", g["XLE"])[0] == 10
