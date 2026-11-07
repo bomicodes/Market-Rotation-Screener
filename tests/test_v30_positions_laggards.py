@@ -113,3 +113,22 @@ def test_outperformer_with_spiky_beta_is_not_a_laggard():
     # if it beat the group, it must not pass the laggard screen
     if m["ret20"] >= m["group_ret20"]:
         assert not (m["ret20"] < m["group_ret20"] and m["rs_lag_20d"] < 0)
+
+
+def test_fill_latest_closes_patches_missing_newest_session():
+    idx = pd.bdate_range("2026-10-26", periods=10)
+    close = pd.DataFrame({"SPY": list(range(700, 710)), "^VIX": list(range(20, 30)), "HYG": [80.0] * 10}, index=idx, dtype=float)
+    close.iloc[-1, 0] = np.nan  # SPY missing today
+    close.iloc[-1, 2] = np.nan  # HYG missing today
+    alp = pd.DataFrame({"SPY": [708.0, 731.5], "HYG": [80.0, 79.2]}, index=idx[-2:])
+    out = appmod.fill_latest_closes(close, ["SPY", "^VIX", "HYG"], fetch=lambda syms: alp[[s for s in syms if s in alp.columns]])
+    assert out["SPY"].iloc[-1] == 731.5 and out["HYG"].iloc[-1] == 79.2 and out["^VIX"].iloc[-1] == 29
+
+
+def test_fill_latest_closes_adds_newer_session():
+    idx = pd.bdate_range("2026-10-26", periods=5)
+    close = pd.DataFrame({"SPY": [700.0, 701, 702, 703, 704]}, index=idx)
+    nxt = idx[-1] + pd.offsets.BDay(1)
+    alp = pd.DataFrame({"SPY": [704.0, 699.0]}, index=[idx[-1], nxt])
+    out = appmod.fill_latest_closes(close, ["SPY"], fetch=lambda syms: alp)
+    assert out.index.max() == nxt and out["SPY"].iloc[-1] == 699.0

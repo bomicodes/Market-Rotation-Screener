@@ -1,3 +1,6 @@
+v30.4 — FIX STALE LATEST CLOSES
+- Yahoo's bulk download sometimes returns the newest session for ^VIX but leaves SPY/HYG/LQD (and other ETFs/stocks) blank. The tape then repeated the prior day's −4.4% SPY move and credit readings. dl_prices now fills recent missing closes, and any newer session, from Alpaca daily bars for non-index symbols.
+
 v30.3 — LOWER-DELTA CONTRACTS + STRANGLE LEG TARGETS
 - Directional plans accept contracts down to 0.15 delta at the entry price (was 0.30), so a budget-sized contract can still be found in high-IV tapes. The quality score still prefers ~0.50 delta when it is affordable.
 - Strangles: the take-profit is per leg, matching how the trader exits. The board alerts when either leg is up +150–200% (EXIT; close by +200%), warns from ~+100%, and drops the combined +40% target. The −35% combined stop and the 5-session time stop apply only while no leg has reached the zone.
