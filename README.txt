@@ -1,3 +1,12 @@
+v32.0 — REDESIGN
+- New shell and navigation: Tonight · Rotation · Positions · Earnings · Track record, plus a Tools menu that opens the classic panels (sector stocks & charts, options scanner, GEX, heat map, watchlist, news & signals). Header shows the data date, nightly-scan time, max-contract budget and refresh. On phones, navigation moves to a bottom bar.
+- Tonight: market tape tiles (tape state, SPY, VIX, credit), the groups money is rotating into, and one unified card per idea. Top Setups, counter-trend ideas and laggards all use the same card: lane and status, a stop → entry → now → target ladder, three evidence chips, reward/risk, the contract and cost, PREMIUM JUICED, Log trade and Chart, with plan details (exit rules, VP, STRAT) folded away. Long/Short/Laggard filter. Names filtered out for downtrends are listed in one line.
+- Rotation: the live RRG panel (same chart, tails, filters and History slider) is moved into the new page unchanged. A new sector table drives focus: click a row (or press Enter) to highlight that sector on the map and fade the others; click again to show all. "View holdings →" opens the classic drill-down. The laggard lane sits below.
+- Positions: status pill (EXIT / WATCH / HOLD) with the reason, P/L progress bar, fill/mark/P/L, Mark TP1 / Close, a summary row, and the add form (call / put / strangle).
+- Earnings: the existing scanner, moved and restyled. Each reporter row gets "Plan strangle". New /api/strangle-plan/<ticker>?budget=: call and put from the expiration nearest ~21 DTE, each near 0.25 delta within budget, the stock move each leg needs to reach +150%, the exit rules, and "Log strangle".
+- Track record: lane tiles (win rate, avg R, option avg, logged/filled), the recent-setups table with outcomes and option returns, and a MY TRADES summary.
+- Scoring, scanning, plans and the nightly job are unchanged.
+
 v31.0 — UPTREND-ONLY TOP SETUPS, WEEKLY CONTRACTS, JUICED-PREMIUM CHECK
 - Top Setups require the stock not to be in an absolute downtrend. Names that only looked "rotating in" because they fell less than their group (VST, TSM, RKLB, CEG on 2026-11-06) no longer produce put cards there. Bearish ideas live in the counter-trend lane.
 - Weekly contracts: entry plans search 7–75 DTE, keeping only expirations that outlast the entry wait plus the planned hold plus 3 days. Weeklies score slightly lower, so they win mainly when they fit the budget or model better. Weekly exits: out 2 days before expiry, with the time stop capped to the remaining life. Labelled "(weekly)".
