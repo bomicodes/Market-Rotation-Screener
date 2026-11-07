@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.0"
+APP_VERSION = "34.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -5000,10 +5000,20 @@ def api_laggards():
 # top of the range, else the range high. The target is a measured move.
 # ---------------------------------------------------------------------------
 def dl_ohlcv_bulk(tickers, period="9mo"):
-    """Daily OHLCV for many symbols in one Yahoo call (consolidated volume)."""
+    """Daily OHLCV for many symbols in one Yahoo call (consolidated volume).
+    Kept in memory for an hour so the group-flow and base scans share one download."""
     tickers=list(dict.fromkeys([t for t in tickers if t]))
+    if not tickers: return {}
+    key=f"ohlcv-bulk:{period}:{hash(tuple(sorted(tickers)))}"
+    hit=CACHE.get(key)
+    if hit and time.time()-hit[0]<3600: return hit[1]
+    out=_dl_ohlcv_bulk_raw(tickers,period)
+    if len(out)>=max(5,len(tickers)//3): CACHE[key]=(time.time(),out)
+    return out
+
+
+def _dl_ohlcv_bulk_raw(tickers, period):
     out={}
-    if not tickers: return out
     try:
         df=yf.download(tickers=tickers,period=period,interval="1d",auto_adjust=True,progress=False,group_by="ticker",threads=True,timeout=40)
     except Exception:
@@ -5192,7 +5202,8 @@ def _rotation_alignment(direction, g):
     return 0,"neutral group"
 
 
-def accumulation_payload(budget=250, top=8):
+def _group_universe():
+    """Top-15 holdings of every group -> {stock: [groups]}, plus their 1y OHLCV and the groups' RRG vs SPY."""
     memberships={}
     for etf in RRG_UNIVERSE:
         try:
@@ -5209,6 +5220,27 @@ def accumulation_payload(budget=250, top=8):
         for r in rrg_rows(closes,"SPY",[g for g in RRG_UNIVERSE if g in closes.columns],10,5,8): rrg[r["ticker"]]=r
     except Exception:
         rrg={}
+    return memberships,data,rrg
+
+
+def group_flow_payload():
+    memberships,data,rrg=_group_universe()
+    groups=group_volume_rotation(data,memberships,rrg)
+    return {"available":bool(groups),"groups":groups,"as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None,
+            "method":"20 sessions: % of a group's top-15 holdings with up/down-day volume ≥ 1.2 minus % ≤ 0.83, next to the group's RRG quadrant vs SPY."}
+
+
+@app.get("/api/group-flow")
+def api_group_flow():
+    try:
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe("group-flow-v34",group_flow_payload,force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+def accumulation_payload(budget=250, top=8):
+    memberships,data,rrg=_group_universe()
     groups=group_volume_rotation(data,memberships,rrg)
     cands=[]
     for t,gl in memberships.items():
@@ -5620,6 +5652,10 @@ def nightly_run():
             try:
                 lg=get(f"/api/laggards?groups={','.join(hints['groups'][:10])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
             except Exception as e: st["errors"].append(f"laggards: {e}")
+        st["stage"]="group flow"
+        try:
+            gf=get("/api/group-flow"); st["counts"]["group_flow"]=len(gf.get("groups") or {})
+        except Exception as e: st["errors"].append(f"group flow: {e}")
         st["stage"]="accumulation"
         try:
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
@@ -12487,9 +12523,10 @@ function v32RenderSectors(){
  const el=document.getElementById("v32SectorTable");if(!el)return;
  const st=rrgFocusState?.sectorChart,rows=st?.rows||[],sel=st?.selected||null;
  const q=x=>x?.quadrant||"—",col=v=>({Leading:"#22c55e",Improving:"#38bdf8",Weakening:"#f59e0b",Lagging:"#ef4444"}[v]||"#8B97A6");
- el.innerHTML=rows.length?`<table class="v32Table"><thead><tr><th>Sector</th><th>Early</th><th>Confirmed</th></tr></thead><tbody>${rows.map(r=>{const f=r.fast||r,t=r.trend||{};return `<tr class="v32SecRow ${sel===r.ticker?"sel":""} ${sel&&sel!==r.ticker?"dim":""}" data-v32-sector="${v32E(r.ticker)}" tabindex="0" aria-pressed="${sel===r.ticker}"><td><b class="v32Num">${v32E(r.ticker)}</b><div class="v32Muted" style="font-size:12px">${v32E(r.name||"")}</div></td><td class="v32Q" style="color:${col(q(f))}">${v32E(q(f))}</td><td class="v32Q" style="color:${col(q(t))}">${v32E(q(t))}</td></tr>`}).join("")}</tbody></table>`:`<div class="v32Muted">Loading rotation…</div>`;
+ const GF=v34Flow();
+ el.innerHTML=rows.length?`<table class="v32Table"><thead><tr><th>Sector</th><th>Early</th><th>Confirmed</th><th title="20d: % of holdings accumulating − % distributing">Volume</th></tr></thead><tbody>${rows.map(r=>{const f=r.fast||r,t=r.trend||{},g=GF[r.ticker];return `<tr class="v32SecRow ${sel===r.ticker?"sel":""} ${sel&&sel!==r.ticker?"dim":""}" data-v32-sector="${v32E(r.ticker)}" tabindex="0" aria-pressed="${sel===r.ticker}"><td><b class="v32Num">${v32E(r.ticker)}</b><div class="v32Muted" style="font-size:12px">${v32E(r.name||"")}</div></td><td class="v32Q" style="color:${col(q(f))}">${v32E(q(f))}</td><td class="v32Q" style="color:${col(q(t))}">${v32E(q(t))}</td><td>${v34FlowCell(g)}</td></tr>`}).join("")}</tbody></table>`:`<div class="v32Muted">Loading rotation…</div>`;
  const s=document.getElementById("v32SectorSelected");
- if(s)s.innerHTML=sel?`<div class="v32Row" style="justify-content:space-between;align-items:center"><span><b class="v32Num">${v32E(sel)}</b> <span class="v32Muted">focused · click it again to show all</span></span><button type="button" class="v32Btn" data-v32-holdings="${v32E(sel)}">View holdings →</button></div>`:"";
+ if(s)s.innerHTML=sel?`${GF[sel]?`<div style="font-size:13px;margin:8px 0">${v34FlowSentence(GF[sel])}</div>`:""}<div class="v32Row" style="justify-content:space-between;align-items:center"><span><b class="v32Num">${v32E(sel)}</b> <span class="v32Muted">focused · click it again to show all</span></span><button type="button" class="v32Btn" data-v32-holdings="${v32E(sel)}">View holdings →</button></div>`:"";
 }
 const _drawRRGV32=drawRRG;
 drawRRG=function(id,rows,focus,fixed){const o=_drawRRGV32(id,rows,focus,fixed);if(id==="sectorChart"){try{v32RenderSectors()}catch(e){}}return o};
@@ -12576,7 +12613,7 @@ async function v33LoadAccum(force=false){
  try{
    const j=await (await fetch(`/api/accumulation?budget=${encodeURIComponent(v26Budget())}${force?"&refresh=1":""}`)).json();
    if(!j.ok)throw new Error(j.error||"scan failed");
-   window.__accum=j;v33LogAccum();
+   window.__accum=j;v33LogAccum();if(!window.__groupFlow){try{v32RenderSectors()}catch(e){}}
  }catch(e){window.__accumErr=e.message||String(e);}
  finally{v33AccLoading=false;v33RenderAccum();try{v32RenderTonight()}catch(e){}}
 }
@@ -12611,6 +12648,45 @@ document.addEventListener("click",ev=>{
  if(ev.target?.closest?.("#v33AccRefresh")){ev.preventDefault();v33LoadAccum(true);}
 });
 setTimeout(()=>{try{v33LoadAccum()}catch(e){}},4000);
+
+
+// ---- v34.1 group volume flow everywhere ----------------------------------------------
+window.__groupFlow=null;
+function v34Flow(){return (window.__groupFlow&&window.__groupFlow.groups)||Object.fromEntries(((window.__accum||{}).groups||[]).map(g=>[g.group,g]))}
+const V34_SHORT={"Rotating in · volume confirms":"confirms in","Quiet accumulation · volume ahead of price":"quiet accumulation","Distribution under the surface":"distribution under surface","Rotating out · volume confirms":"confirms out","Mixed":"mixed"};
+function v34FlowCell(g){
+ if(!g)return `<span class="v32Muted">—</span>`;
+ const c=g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6";
+ return `<b class="v32Num" style="color:${c}">${g.flow>0?"+":""}${g.flow}</b><div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div>`;
+}
+function v34FlowSentence(g){
+ return `<b>Volume inside ${v32E(g.group)}:</b> ${g.accumulating_pct}% of its top ${g.members} holdings accumulating, ${g.distributing_pct}% distributing (flow ${g.flow>0?"+":""}${g.flow}) · <b>${v32E(g.signal)}</b>.`;
+}
+async function v34LoadGroupFlow(){
+ try{const j=await (await fetch("/api/group-flow")).json();if(j.ok&&j.groups){window.__groupFlow=j;try{v32RenderSectors()}catch(e){}try{if(typeof renderTopSetups==="function"&&(globalTopSetupData||[]).length)renderTopSetups()}catch(e){}try{v32RenderTonight()}catch(e){}}}catch(e){console.warn("group flow",e)}
+}
+// Top Setups: group volume flow as a scoring factor. Longs gain when the group's
+// holdings are accumulating and lose when they are distributing; a group with
+// heavy distribution (flow ≤ −40) fails the gate. Shorts are the mirror.
+const _topSetupEvaluationV34=topSetupEvaluation;
+topSetupEvaluation=function(x){
+ const e=_topSetupEvaluationV34(x);
+ try{
+   const g=v34Flow()[x._parentTicker];if(!g||!e||!e.direction)return e;
+   const bull=e.direction==="bullish",f=Number(g.flow)*(bull?1:-1);
+   let d=0;const reasons=(e.reasons||[]).slice(),gates=(e.gateFailures||[]).slice();let hard=e.hardPass;
+   const lbl=`${x._parentTicker} volume flow ${g.flow>0?"+":""}${g.flow} (${V34_SHORT[g.signal]||g.signal})`;
+   if(f>=40){d=8;reasons.push([lbl,"good"]);}
+   else if(f>=15){d=5;reasons.push([lbl,"good"]);}
+   else if(f<=-40){d=-12;reasons.unshift([lbl,"warn"]);gates.push(`${x._parentTicker} holdings are ${bull?"distributing":"accumulating"} (volume flow ${g.flow>0?"+":""}${g.flow}) — the money is going the other way`);hard=false;}
+   else if(f<=-15){d=-6;reasons.unshift([lbl,"warn"]);}
+   if(!d&&gates.length===(e.gateFailures||[]).length)return {...e,groupFlow:g};
+   const raw=Number(e.rawScore||0)+d;
+   return {...e,rawScore:raw,score:Math.max(0,Math.min(100,Math.round(raw*100/V28_RAW_MAX))),qualificationScore:Math.max(0,Math.min(100,Math.round(Number(e.qualificationScore||0)+d))),
+     reasons,gateFailures:gates,hardPass:hard,groupFlow:g};
+ }catch(err){return e}
+};
+setTimeout(()=>{try{v34LoadGroupFlow()}catch(e){}},2500);
 
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;
