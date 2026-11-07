@@ -1,3 +1,8 @@
+v31.0 — UPTREND-ONLY TOP SETUPS, WEEKLY CONTRACTS, JUICED-PREMIUM CHECK
+- Top Setups require the stock not to be in an absolute downtrend. Names that only looked "rotating in" because they fell less than their group (VST, TSM, RKLB, CEG on 2026-11-06) no longer produce put cards there. Bearish ideas live in the counter-trend lane.
+- Weekly contracts: entry plans search 7–75 DTE, keeping only expirations that outlast the entry wait plus the planned hold plus 3 days. Weeklies score slightly lower, so they win mainly when they fit the budget or model better. Weekly exits: out 2 days before expiry, with the time stop capped to the remaining life. Labelled "(weekly)".
+- Juiced-premium check. ATM IV (21–60 DTE, ±5% moneyness) is compared with 1-year realized vol, and once 20 sessions are stored (new iv_history table, recorded on every live entry plan) with the ticker's own IV rank and percentile. Juiced = IV rank ≥ 70, or IV ≥ 1.3× 1-year realized vol while the rank builds. Cards show PREMIUM JUICED, tradeability drops, and out-of-zone plans read WAIT · PREMIUM JUICED.
+
 v30.6 — LAGGARD CACHE FIX
 - The nightly job pre-computes laggards for the same top-10 rotating-in groups the board requests (it used the full hint list, so the board's key was never refreshed). The cache key is bumped to drop a pre-v30.2 payload that still showed MRNA.
 

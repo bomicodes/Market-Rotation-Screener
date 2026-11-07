@@ -144,3 +144,32 @@ def test_nightly_thread_never_reads_l2(monkeypatch):
     t = threading.Thread(target=lambda: seen.append(appmod.l2_get("market")), name="nightly")
     t.start(); t.join()
     assert seen == [None] and appmod.l2_get("market")[1] == {"x": 1}
+
+
+def test_iv_rank_and_juiced_logic():
+    assert appmod.iv_rank_from_history([30] * 10, 40) == (None, None)
+    hist = list(np.linspace(25, 45, 30))
+    rank, pct = appmod.iv_rank_from_history(hist, 43)
+    assert rank > 85 and pct > 85
+    rows = [{"iv": 60.0, "moneyness_pct": 1.0, "dte": 30}, {"iv": 62.0, "moneyness_pct": -2.0, "dte": 45}, {"iv": 200.0, "moneyness_pct": 30, "dte": 30}]
+    assert appmod.atm_iv_from_rows(rows, 100) == 61.0
+    ctx = appmod.iv_context("ZZZZ", rows, 100, record=False)
+    assert ctx["iv_vs_rv1y"] and ctx["juiced"] is True   # 61% vs stubbed 30% realized
+
+
+def test_weekly_contract_used_when_budget_tight_and_exit_rules_tighten():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_v28_entry_quality import _row, _structure
+    spot = 91.58
+    st = _structure(spot, 3.55, 82.08)
+    st["pullback"]["entry"] = spot; st["pullback"]["in_zone"] = True   # enter now, short hold
+    st["pullback"]["target"] = spot + 6
+    rows = [_row("call", k, d, spot) for k in range(86, 104) for d in (12, 42)]
+    out = appmod.option_entry_plan("LEN", "bullish", 110, None, st, rows, spot, 3.55, 0.30)
+    z = out["single"]
+    assert z and z["cost"] <= 110
+    if z["weekly"]:
+        assert "weekly" in out["exit_plan"]["rules"][-1] and out["exit_plan"]["time_stop_sessions"] <= z["leg"]["dte"]
+    # no expiration may end before the planned hold
+    assert z["leg"]["dte"] >= out["hold_days_assumed"] + 3

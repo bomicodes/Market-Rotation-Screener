@@ -16,3 +16,8 @@ def _isolate_l2_cache(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_network_earnings(monkeypatch):
     monkeypatch.setattr(appmod, "_context_earnings_catalyst", lambda t: {"next_earnings": None, "days_to_earnings": None, "risk": "Unknown"})
+
+
+@pytest.fixture(autouse=True)
+def _no_network_rv1y(monkeypatch):
+    monkeypatch.setattr(appmod, "realized_vol_1y", lambda t: 30.0)

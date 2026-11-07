@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.6"
+APP_VERSION = "31.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v30:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2910,18 +2910,24 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     hold_days=int(min(15,max(4,round(abs(target-entry_used)/max(atr*.6,.01)))))
     if rows is None:
         today=pd.Timestamp.now().normalize()
-        start=(today+pd.Timedelta(days=21)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=75)).strftime("%Y-%m-%d")
+        # v31: weeklies included (7+ DTE); the hold-length filter below keeps
+        # only expirations that outlast the planned trade.
+        start=(today+pd.Timedelta(days=7)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=75)).strftime("%Y-%m-%d")
         contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
         snaps=alpaca_option_chain(ticker,start,end,spot); rows=[]
         for sym,snap in snaps.items():
             if sym in meta: rows.append(option_contract_row(sym,snap,meta[sym],spot))
+        live_rows=True
+    else:
+        live_rows=False
     if rv20 is None:
         try: rv20,_=realized_vol_20d(ticker)
         except Exception: rv20=None
     want="p" if is_put else "c"
     chain=[r for r in rows if str(r.get("type") or "").lower().startswith(want) and r.get("strike") and r.get("mid") and r["mid"]>0
-           and r.get("dte") is not None and 21<=r["dte"]<=75 and r.get("spread_pct") is not None and r["spread_pct"]<=25]
-    if not chain: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No 21–75 DTE contracts with a usable quote."}
+           and r.get("dte") is not None and 7<=r["dte"]<=75 and r["dte"]>=days_to_entry+hold_days+3
+           and r.get("spread_pct") is not None and r["spread_pct"]<=25]
+    if not chain: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No 7–75 DTE contract outlasting the planned hold has a usable quote."}
     singles=[]
     for r in chain:
         m=_model_leg(r,spot,entry_used,stop,target,is_put,days_to_entry,hold_days)
@@ -2935,18 +2941,25 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
         theta=1-m["flat"]/m["entry"]
         orr=gain/loss if loss>0.01 else None
         cost=m["entry"]*100
-        dte=r["dte"]; dte_fit=1.0 if 30<=dte<=60 else .75
+        dte=r["dte"]; dte_fit=1.0 if 30<=dte<=60 else (.85 if 21<=dte<=75 else .7)
         delta_fit=max(.2,1-abs(m["delta_entry"]-.50)*2)
         quality=min(orr or 0,5.0)*delta_fit*dte_fit*(1.0 if (r.get("spread_pct") or 99)<=10 else .85)*(1.0 if (r.get("open_interest") or 0)>=100 else .8)
         singles.append({"structure":"single","leg":_leg_summary(r),"cost":round(cost,0),"entry_premium":round(m["entry"],2),"premium_at_target":round(m["target"],2),
                         "premium_at_stop":round(m["stop"],2),"gain_pct":round(gain*100),"loss_pct":round(loss*100),"theta_drag_pct":round(theta*100),
-                        "option_rr":round(orr,2) if orr is not None else None,"iv_used":round(m["iv"]*100,1),"delta_at_entry":round(m["delta_entry"],2),"_q":quality,"_row":r,"_m":m})
+                        "option_rr":round(orr,2) if orr is not None else None,"iv_used":round(m["iv"]*100,1),"delta_at_entry":round(m["delta_entry"],2),
+                        "weekly":bool(dte<21),"_q":quality,"_row":r,"_m":m})
     if not singles: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No contract with a 0.15–0.70 delta at the entry price."}
     singles.sort(key=lambda z:-z["_q"])
     affordable=[z for z in singles if z["cost"]<=budget]
     iv_med=float(np.median([z["_m"]["iv"] for z in singles]))
     iv_rv=round(iv_med/rv20,2) if rv20 else None
+    ivx=iv_context(ticker,rows,spot,record=live_rows)
     best_single=affordable[0] if affordable else None
+    # v31: weeklies are a budget tool. If a 21+ DTE contract fits and models at
+    # least 70% as well as the best weekly, take the longer-dated one.
+    if best_single and best_single.get("weekly"):
+        longer=[z for z in affordable if not z.get("weekly")]
+        if longer and longer[0]["_q"]>=.7*best_single["_q"]: best_single=longer[0]
     # v30: directional trades are single-leg only (the trader does not use spreads).
     try:
         cat=cached_refresh_safe(f"earn-next-v30:{ticker}",lambda:_context_earnings_catalyst(ticker),ttl=6*3600)[0]
@@ -2957,7 +2970,9 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
         exit_plan=option_exit_plan(best_single,entry_used,stop,target,is_put,hold_days,days_to_entry,cat.get("next_earnings"))
     notes=[]
     if not best_single: notes.append(f"No single {('put' if is_put else 'call')} fits the ${budget:.0f} budget (cheapest modeled entry ${min(z['cost'] for z in singles):.0f}).")
-    if iv_rv and iv_rv>=1.35: notes.append(f"IV is {iv_rv:.2f}× realized volatility — premium is rich: size down, or wait for IV to cool before entering.")
+    if ivx.get("juiced"): notes.append(f"Premium is juiced: ATM IV {ivx['atm_iv']:.0f}% vs {ivx['rv_1y']:.0f}% 1-year realized vol"+(f" (IV rank {ivx['iv_rank']:.0f})" if ivx.get('iv_rank') is not None else "")+" — size down, or wait for IV to cool.")
+    elif iv_rv and iv_rv>=1.35: notes.append(f"IV is {iv_rv:.2f}× 20-day realized volatility — premium is rich: size down, or wait for IV to cool before entering.")
+    if best_single and best_single.get("weekly"): notes.append("Weekly contract: cheaper, but time decay is fast — exits are tighter (out 2 days before expiry).")
     if days_to_entry: notes.append(f"Entry requires the stock to reach ${entry:.2f} first; premiums shown are modeled at that price.")
     if exit_plan and exit_plan.get("earnings_before_expiry"): notes.append(f"Earnings {exit_plan['earnings_date']} falls before expiry — plan exits the day before.")
     for z in singles:
@@ -2966,9 +2981,75 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
             "underlying":{"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":lv["underlying_rr"],"in_zone":days_to_entry==0},
             "vp_plan":(structure.get("vp_plans") or {}).get(direction) if lv["plan"]=="vp" else None,
             "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":None,"recommended":"single" if best_single else None,
-            "exit_plan":exit_plan,"next_earnings":cat.get("next_earnings"),
+            "exit_plan":exit_plan,"next_earnings":cat.get("next_earnings"),"iv":ivx,"juiced":bool(ivx.get("juiced")),
             "cheapest_single_cost":min(z["cost"] for z in singles),"notes":notes,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
             "method":"Black-Scholes repricing at entry/target/stop, calibrated to the live mid; hold-period theta included."}
+
+
+# ---------------------------------------------------------------------------
+# v31 IV CONTEXT: is the premium juiced?
+# 20-day realized vol balloons after a violent move, so IV/RV(20d) can call a
+# 98% IV "cheap". Compare ATM IV with 1-year realized vol now, and with the
+# ticker's own IV history (IV rank) once ~20 sessions of ATM IV are stored.
+# ---------------------------------------------------------------------------
+def _iv_table(con, backend):
+    if backend=="postgresql":
+        con.execute("CREATE TABLE IF NOT EXISTS iv_history(ticker TEXT NOT NULL, trade_date TEXT NOT NULL, atm_iv DOUBLE PRECISION NOT NULL, PRIMARY KEY(ticker,trade_date))")
+    else:
+        con.execute("CREATE TABLE IF NOT EXISTS iv_history(ticker TEXT NOT NULL, trade_date TEXT NOT NULL, atm_iv REAL NOT NULL, PRIMARY KEY(ticker,trade_date))")
+
+
+def atm_iv_from_rows(rows, spot):
+    vals=[]
+    for r in rows or []:
+        iv=_safe_float(r.get("iv")); m=_safe_float(r.get("moneyness_pct")); d=r.get("dte")
+        if iv and iv>0 and m is not None and abs(m)<=5 and d is not None and 21<=d<=60: vals.append(iv if iv>3 else iv*100)
+    return float(np.median(vals)) if vals else None
+
+
+def realized_vol_1y(ticker):
+    df=dl_ohlc(ticker,"1y"); c=df["Close"].dropna().astype(float)
+    if len(c)<120: return None
+    r=np.log(c/c.shift(1)).dropna()
+    return float(r.std(ddof=1)*np.sqrt(252)*100)
+
+
+def iv_rank_from_history(values, current):
+    v=[float(x) for x in values if x is not None]
+    if len(v)<20 or current is None: return None,None
+    lo,hi=min(v),max(v)
+    rank=(current-lo)/(hi-lo)*100 if hi>lo else 50.0
+    pct=100.0*sum(1 for x in v if x<=current)/len(v)
+    return round(rank,1),round(pct,1)
+
+
+def iv_context(ticker, rows, spot, record=False):
+    out={"atm_iv":None,"rv_1y":None,"iv_vs_rv1y":None,"iv_rank":None,"iv_percentile":None,"history_n":0,"juiced":False}
+    try:
+        atm=atm_iv_from_rows(rows,spot); out["atm_iv"]=round(atm,1) if atm else None
+        try: rv=cached_refresh_safe(f"rv1y-v31:{ticker}",lambda:{"rv":realized_vol_1y(ticker)},ttl=6*3600)[0].get("rv")
+        except Exception: rv=None
+        out["rv_1y"]=round(rv,1) if rv else None
+        if atm and rv: out["iv_vs_rv1y"]=round(atm/rv,2)
+        hist=[]
+        backend=_setup_storage_backend(); today=pd.Timestamp.now().strftime("%Y-%m-%d")
+        with _setup_db() as con:
+            _iv_table(con,backend)
+            if record and atm:
+                if backend=="postgresql":
+                    con.execute("INSERT INTO iv_history(ticker,trade_date,atm_iv) VALUES(%s,%s,%s) ON CONFLICT(ticker,trade_date) DO UPDATE SET atm_iv=EXCLUDED.atm_iv",(ticker,today,atm))
+                else:
+                    con.execute("INSERT OR REPLACE INTO iv_history(ticker,trade_date,atm_iv) VALUES(?,?,?)",(ticker,today,atm))
+            con.commit()
+            q="SELECT atm_iv FROM iv_history WHERE ticker=%s AND trade_date>=%s" if backend=="postgresql" else "SELECT atm_iv FROM iv_history WHERE ticker=? AND trade_date>=?"
+            cutoff=(pd.Timestamp.now()-pd.Timedelta(days=370)).strftime("%Y-%m-%d")
+            hist=[(_row_dict(r,("atm_iv",))["atm_iv"]) for r in con.execute(q,(ticker,cutoff)).fetchall()]
+        out["history_n"]=len(hist)
+        rank,pct=iv_rank_from_history(hist,atm); out["iv_rank"]=rank; out["iv_percentile"]=pct
+        out["juiced"]=bool((rank is not None and rank>=70) or (rank is None and out["iv_vs_rv1y"] is not None and out["iv_vs_rv1y"]>=1.3))
+    except Exception as e:
+        out["error"]=str(e)
+    return out
 
 
 def option_exit_plan(z, entry, stop, target, is_put, hold_days, days_to_entry, earnings_date=None):
@@ -2988,7 +3069,9 @@ def option_exit_plan(z, entry, stop, target, is_put, hold_days, days_to_entry, e
     tp1=min(p_half,p0*1.5)
     prem_stop=max(p0*.5,float(z["premium_at_stop"]))
     exp=pd.Timestamp(str(leg.get("expiration"))[:10]) if leg.get("expiration") else None
-    exit_by=(exp-pd.Timedelta(days=14)) if exp is not None else None
+    weekly=dte<21
+    exit_by=(exp-pd.Timedelta(days=2 if weekly else 14)) if exp is not None else None
+    hold_days=int(min(hold_days,max(2,dte-days_to_entry-3))) if weekly else hold_days
     earn_before=False
     if earnings_date and exp is not None:
         try:
@@ -3007,7 +3090,7 @@ def option_exit_plan(z, entry, stop, target, is_put, hold_days, days_to_entry, e
                      f"Sell the rest near ${float(z['premium_at_target']):.2f} (stock target ${target:.2f}).",
                      f"Exit if the stock closes {'above' if is_put else 'below'} ${stop:.2f} or the premium falls to ${prem_stop:.2f}.",
                      f"Time stop: out if not up 20% after {int(hold_days)} sessions.",
-                     f"Exit by {exit_by.strftime('%b %d') if exit_by is not None else '—'}{' (before earnings)' if earn_before else ' (14 days before expiry)'}."]}
+                     f"Exit by {exit_by.strftime('%b %d') if exit_by is not None else '—'}{' (before earnings)' if earn_before else (' (weekly: 2 days before expiry)' if weekly else ' (14 days before expiry)')}."]}
 
 
 STRANGLE_RULES={"leg_take_profit_low":150,"leg_take_profit_high":200,"stop_pct":-35,"time_stop_sessions":5,"exit_days_before_expiry":7}
@@ -4433,7 +4516,7 @@ def api_entry_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         budget=max(25.0,min(100000.0,budget))
-        key=f"entry-plan-v30:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
+        key=f"entry-plan-v31:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
         payload,stale,err=cached_refresh_safe(key,lambda:option_entry_plan(ticker,direction,budget,plan),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
@@ -10992,6 +11075,10 @@ topSetupEvaluation=function(x){
  let entryMode=null,bestRR=null,counter=null;
  if(s?.available){
    const ts=Number(s.trend_strength);
+   // v31: Top Setups are long rotation trades. A stock in an absolute downtrend
+   // that only looks "rotating in" because it is falling less than its group is
+   // not one; bearish ideas live in the counter-trend lane.
+   if(s.direction==="bearish"){gateFailures.push("Stock is in a downtrend (below falling 20/50-day) — bearish ideas live in the counter-trend lane");hardPass=false;}
    if(bull){
      if(ts>=3)raw+=3;
      else if(ts===2){raw-=5;warn.push(["Absolute trend mixed","warn"]);}
@@ -11092,6 +11179,7 @@ function v28Money(v,d=0){const n=Number(v);return Number.isFinite(n)?`$${n.toFix
 function v28Pick(p){if(!p||!p.available)return null;return p.recommended==="debit_spread"?(p.spread||p.single):(p.single||p.spread)}
 function v28ContractLabel(z){
  if(!z)return "—";
+ if(z.structure!=="debit_spread"&&z.weekly){const L=z.leg||{};return `${L.expiration} $${Number(L.strike).toFixed(0)}${String(L.type||"").toLowerCase().startsWith("p")?"P":"C"} (weekly)`;}
  if(z.structure==="debit_spread"){const L=z.long||{},S=z.short||{},k=String(L.type||"").toLowerCase().startsWith("p")?"P":"C";return `${L.expiration} $${Number(L.strike).toFixed(0)}/$${Number(S.strike).toFixed(0)}${k} spread`;}
  const L=z.leg||{};return `${L.expiration} $${Number(L.strike).toFixed(0)}${String(L.type||"").toLowerCase().startsWith("p")?"P":"C"}`;
 }
@@ -11121,7 +11209,8 @@ function v28PlanHTML(p,title,vs){
  }else{
    lines.push(`<div class="v28EntryRow instBad">Nothing fits the ${v28Money(p.budget)} budget · cheapest single ≈ ${v28Money(p.cheapest_single_cost)}</div>`);
  }
- if(p.iv_rv!=null)lines.push(`<div class="v28EntryRow tiny">IV / realized vol ${Number(p.iv_rv).toFixed(2)}×${(p.notes||[]).length?` · ${p.notes.join(" ")}`:""}</div>`);
+ {const iv=p.iv||{};const ivTxt=iv.atm_iv!=null?`ATM IV ${Number(iv.atm_iv).toFixed(0)}% vs 1-yr realized ${iv.rv_1y!=null?Number(iv.rv_1y).toFixed(0)+"%":"—"}${iv.iv_rank!=null?` · IV rank ${Number(iv.iv_rank).toFixed(0)}`:` · IV rank building (${iv.history_n||0}/20 days)`}`:(p.iv_rv!=null?`IV / 20-day realized ${Number(p.iv_rv).toFixed(2)}×`:"");
+  if(ivTxt||(p.notes||[]).length)lines.push(`<div class="v28EntryRow tiny">${p.juiced?'<span class="instBad"><b>PREMIUM JUICED</b></span> · ':""}${ivTxt}${(p.notes||[]).length?` · ${p.notes.join(" ")}`:""}</div>`);}
  if(vs)lines.push(v29VpStratHTML(vs));
  lines.push(`<div class="v28EntryRow tiny v28Muted">Modeled with Black-Scholes from ${p.feed||"Alpaca"} quotes · indicative quotes on the free feed — confirm the live bid/ask in your broker.</div>`);
  return `<div class="v28Entry"><div class="v28EntryHead">${title}</div>${lines.join("")}</div>`;
@@ -11133,11 +11222,12 @@ v26Decision=function(x){
    let trade=d.opt.liquidity==="Liquid"?30:d.opt.liquidity==="Tradable"?24:8;
    trade+=z?(Number(z.cost)<=d.budget?40:4):4;
    const orr=Number(z?.option_rr);trade+=orr>=3?20:orr>=2?15:orr>=1.5?10:4;
-   trade+=p.iv_rv!=null?(p.iv_rv<1.1?10:p.iv_rv<1.35?7:3):5;
+   trade+=p.juiced?1:(p.iv?.iv_rank!=null?(p.iv.iv_rank<30?10:p.iv.iv_rank<60?7:3):(p.iv?.iv_vs_rv1y!=null?(p.iv.iv_vs_rv1y<1.0?9:p.iv.iv_vs_rv1y<1.3?6:2):5));
    d.trade=Math.max(0,Math.min(100,Math.round(trade)));d.cost=z?Number(z.cost):null;
    d.combined=Math.round(.68*d.setup+.32*d.trade);
    const risk=d.label==="WAIT · EVENT RISK";
    if(!z){d.label="GOOD SETUP · NO CONTRACT FITS BUDGET";d.cls="v26Wait";}
+   else if(p.juiced&&!(p.underlying?.in_zone)){d.label="WAIT · PREMIUM JUICED";d.cls="v26Wait";}
    else if(risk){d.label="WAIT · EVENT RISK";d.cls="v26Wait";}
    else if(e.entryMode==="pullback"&&!p.underlying?.in_zone){d.label=`WAIT FOR PULLBACK · ${v28Money(p.underlying?.entry,2)}`;d.cls="v26Wait";}
    else if(e.entryMode==="vp"&&p.vp_plan&&!p.vp_plan.in_zone){d.label=`WAIT FOR ${String(p.vp_plan.level_name).toUpperCase()} · ${v28Money(p.vp_plan.level,2)}`;d.cls="v26Wait";}
