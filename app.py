@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.2"
+APP_VERSION = "30.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -2889,7 +2889,9 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
         if not m or m["entry"]<=0.05: continue
         # Delta is judged at the ENTRY price, not today's spot: a strike that is
         # 0.35 delta now can be a lottery ticket once the stock pulls back.
-        if not (.30<=m["delta_entry"]<=.70): continue
+        # v30.3: lower-delta contracts are acceptable to the trader (budget-driven);
+        # the quality score still prefers ~0.50 when it is affordable.
+        if not (.15<=m["delta_entry"]<=.70): continue
         gain=m["target"]/m["entry"]-1; loss=1-m["stop"]/m["entry"]
         theta=1-m["flat"]/m["entry"]
         orr=gain/loss if loss>0.01 else None
@@ -2900,7 +2902,7 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
         singles.append({"structure":"single","leg":_leg_summary(r),"cost":round(cost,0),"entry_premium":round(m["entry"],2),"premium_at_target":round(m["target"],2),
                         "premium_at_stop":round(m["stop"],2),"gain_pct":round(gain*100),"loss_pct":round(loss*100),"theta_drag_pct":round(theta*100),
                         "option_rr":round(orr,2) if orr is not None else None,"iv_used":round(m["iv"]*100,1),"delta_at_entry":round(m["delta_entry"],2),"_q":quality,"_row":r,"_m":m})
-    if not singles: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No contract with a 0.30–0.70 delta at the entry price."}
+    if not singles: return {"ticker":ticker,"direction":direction,"available":False,"reason":"No contract with a 0.15–0.70 delta at the entry price."}
     singles.sort(key=lambda z:-z["_q"])
     affordable=[z for z in singles if z["cost"]<=budget]
     iv_med=float(np.median([z["_m"]["iv"] for z in singles]))
@@ -2969,7 +2971,7 @@ def option_exit_plan(z, entry, stop, target, is_put, hold_days, days_to_entry, e
                      f"Exit by {exit_by.strftime('%b %d') if exit_by is not None else '—'}{' (before earnings)' if earn_before else ' (14 days before expiry)'}."]}
 
 
-STRANGLE_RULES={"take_profit_pct":40,"stop_pct":-35,"time_stop_sessions":5,"exit_days_before_expiry":7}
+STRANGLE_RULES={"leg_take_profit_low":150,"leg_take_profit_high":200,"stop_pct":-35,"time_stop_sessions":5,"exit_days_before_expiry":7}
 
 
 def modeled_dealer_positioning(rows, spot):
@@ -4709,10 +4711,10 @@ def _default_exit_plan(kind, legs, fill_total):
     exp=min(pd.Timestamp(str(l["expiration"])[:10]) for l in legs)
     if kind=="strangle":
         R=STRANGLE_RULES
-        return {"kind":"strangle","take_profit_pct":R["take_profit_pct"],"stop_pct":R["stop_pct"],"time_stop_sessions":R["time_stop_sessions"],
+        return {"kind":"strangle","leg_take_profit_low":R["leg_take_profit_low"],"leg_take_profit_high":R["leg_take_profit_high"],"stop_pct":R["stop_pct"],"time_stop_sessions":R["time_stop_sessions"],
                 "exit_by":(exp-pd.Timedelta(days=R["exit_days_before_expiry"])).strftime("%Y-%m-%d"),
-                "rules":[f"Take profit at +{R['take_profit_pct']}% on the combined premium.",f"Stop at {R['stop_pct']}% combined.",
-                         f"Time stop: out after {R['time_stop_sessions']} sessions if neither has hit — post-earnings theta and IV crush work against you.",
+                "rules":[f"Take profit on whichever leg is up +{R['leg_take_profit_low']}–{R['leg_take_profit_high']}% (close it by +{R['leg_take_profit_high']}%).",f"Stop at {R['stop_pct']}% on the combined premium.",
+                         f"Time stop: out after {R['time_stop_sessions']} sessions if no leg has reached +{R['leg_take_profit_low']}% — post-earnings theta and IV crush work against you.",
                          "If one leg is worth under $0.10, let it go and manage the other leg on its own.",
                          f"Exit by {(exp-pd.Timedelta(days=R['exit_days_before_expiry'])).strftime('%b %d')} (7 days before expiry)."]}
     p0=fill_total
@@ -4779,9 +4781,15 @@ def evaluate_position(pos, marks, spot):
         if today>=exit_by: alerts.append(("exit","Exit-by date reached"))
         elif (exit_by-today).days<=2: alerts.append(("warn",f"Exit-by date {exit_by.strftime('%b %d')} is close"))
     if pos["kind"]=="strangle":
-        if pnl is not None and pnl>=ep.get("take_profit_pct",40): alerts.append(("exit",f"Take profit: +{pnl:.0f}% ≥ +{ep.get('take_profit_pct',40)}%"))
-        if pnl is not None and pnl<=ep.get("stop_pct",-35): alerts.append(("exit",f"Stop: {pnl:.0f}% ≤ {ep.get('stop_pct',-35)}%"))
-        if sess>=ep.get("time_stop_sessions",5) and not any(a[0]=="exit" for a in alerts): alerts.append(("exit",f"Time stop: {sess} sessions"))
+        lo=float(ep.get("leg_take_profit_low",150)); hi=float(ep.get("leg_take_profit_high",200)); leg_hit=False
+        for l,m in zip(legs,leg_marks):
+            if m is None or not l.get("fill"): continue
+            g=(m/float(l["fill"])-1)*100; name=f"{l['type'].title()} leg"
+            if g>=hi: alerts.append(("exit",f"{name} +{g:.0f}% — at your +{hi:.0f}% top, close it")); leg_hit=True
+            elif g>=lo: alerts.append(("exit",f"{name} +{g:.0f}% — in your +{lo:.0f}–{hi:.0f}% take-profit zone")); leg_hit=True
+            elif g>=lo*.66: alerts.append(("warn",f"{name} +{g:.0f}% — approaching the +{lo:.0f}% zone"))
+        if pnl is not None and pnl<=ep.get("stop_pct",-35) and not leg_hit: alerts.append(("exit",f"Stop: {pnl:.0f}% ≤ {ep.get('stop_pct',-35)}% combined"))
+        if sess>=ep.get("time_stop_sessions",5) and not leg_hit and not any(a[0]=="exit" for a in alerts): alerts.append(("exit",f"Time stop: {sess} sessions without a leg at +{lo:.0f}%"))
         for l,m in zip(legs,leg_marks):
             if m is not None and m<.10: alerts.append(("info",f"{l['type'].title()} leg under $0.10 — manage the other leg alone"))
     else:
@@ -11339,7 +11347,7 @@ function v30RenderPositions(){
   <span class="v30Single"><input name="strike" type="number" step="0.5" placeholder="Strike" style="width:72px"> fill $<input name="fill" type="number" step="0.01" style="width:64px"></span>
   <span class="v30Strangle" hidden>put <input name="put_strike" type="number" step="0.5" placeholder="Strike" style="width:64px"> $<input name="put_fill" type="number" step="0.01" style="width:56px"> · call <input name="call_strike" type="number" step="0.5" placeholder="Strike" style="width:64px"> $<input name="call_fill" type="number" step="0.01" style="width:56px"></span>
   qty <input name="qty" type="number" min="1" value="1" style="width:48px"> <button type="button" class="v30Btn v30Go" id="v30AddSave">Add</button><span class="tiny v30AddMsg"></span>
-  <div class="tiny">Directional trades added here get default rules (half at +50%, rest at +100%, stop −50%, 10-session time stop, out 14 days before expiry). Strangles: +40% take profit, −35% stop, 5-session time stop, out 7 days before expiry.</div>
+  <div class="tiny">Directional trades added here get default rules (half at +50%, rest at +100%, stop −50%, 10-session time stop, out 14 days before expiry). Strangles: take profit on the leg that is up +150–200%, −35% combined stop, 5-session time stop, out 7 days before expiry.</div>
  </div></details>`;
 }
 

@@ -39,9 +39,14 @@ def test_strangle_rules():
            "legs": [{"symbol": "C", "type": "call", "strike": 100, "expiration": _iso(20), "qty": 1, "fill": 2.0},
                     {"symbol": "P", "type": "put", "strike": 90, "expiration": _iso(20), "qty": 1, "fill": 2.0}],
            "plan": {"exit_plan": appmod._default_exit_plan("strangle", [{"expiration": _iso(20)}], 4.0)}, "state": {}}
-    win = appmod.evaluate_position(pos, {"C": 5.6, "P": 0.08}, 104.0)
-    assert win["status"] == "EXIT" and any("Take profit" in a["text"] for a in win["alerts"])
+    win = appmod.evaluate_position(pos, {"C": 5.6, "P": 0.08}, 104.0)          # call +180%
+    assert win["status"] == "EXIT" and any("take-profit zone" in a["text"] for a in win["alerts"])
     assert any("under $0.10" in a["text"] for a in win["alerts"])
+    assert not any(a["text"].startswith("Stop") for a in win["alerts"])
+    top = appmod.evaluate_position(pos, {"C": 6.2, "P": 0.05}, 106.0)          # call +210%
+    assert any("close it" in a["text"] for a in top["alerts"])
+    near = appmod.evaluate_position(pos, {"C": 4.2, "P": 0.9}, 102.0)          # call +110%
+    assert near["status"] == "WATCH" and any("approaching" in a["text"] for a in near["alerts"])
     loss = appmod.evaluate_position(pos, {"C": 1.2, "P": 1.3}, 95.0)
     assert any(a["text"].startswith("Stop") for a in loss["alerts"])
 
