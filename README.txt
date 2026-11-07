@@ -1,3 +1,8 @@
+v32.2 — STRANGLES ON 1- AND 2-WEEK CONTRACTS
+- The strangle planner prices a 1-week and a 2-week pair (toggle between them); it picks the 1-week if it fits the budget.
+- The +150% move math assumes 2 days held for 1-week contracts and 3 for 2-week.
+- Strangle exit rules scale with the contract: 1-week = 2-session time stop, out 1 day before expiry; 2-week = 3 sessions, 2 days before. (Before, the 7-days-before-expiry rule would have said "exit now" on any weekly.)
+
 v32.1 — REDESIGN POLISH
 - The Log trade / Close forms stay hidden until clicked (a display rule was overriding `hidden`).
 - Ladder labels use two rows, so close levels (entry vs now, stop vs entry) no longer overlap.
