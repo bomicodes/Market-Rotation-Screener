@@ -177,3 +177,11 @@ def test_l2_only_serves_after_close(monkeypatch):
     monkeypatch.setattr(appmod, "market_open_now", lambda now=None: False)
     monkeypatch.setattr(appmod, "_l2_preload", lambda: None)
     assert appmod.l2_get("market")[1] == {"x": 1}
+
+
+def test_tight_budget_falls_back_to_lower_delta():
+    spot = 91.58
+    rows = [_row("call", k, d, spot) for k in range(80, 112) for d in (28, 42, 63)]
+    out = appmod.option_entry_plan("LEN", "bullish", 120, None, _structure(spot, 3.55, 82.08), rows, spot, 3.55, 0.30)
+    assert out["single"] and out["single"]["cost"] <= 120
+    assert .15 <= out["single"]["delta_at_entry"] < .30
