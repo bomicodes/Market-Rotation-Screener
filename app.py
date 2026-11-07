@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "33.0"
+APP_VERSION = "33.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -5040,10 +5040,10 @@ def base_detect(df, min_len=15, max_len=60):
     best=None
     for L in range(min_len,min(max_len,n-60)+1):
         hi=float(h[-L:].max()); lo=float(l[-L:].min()); height=hi-lo
-        if height<=3.5*natr and height/spot<=.20:
+        if height<=5.0*natr and height/spot<=.25:
             # a base, not a slow trend: net drift inside the window under ~half its height
             if abs(float(c[-1]-c[n-L]))<=.6*height: best=L
-        elif best is not None and height>4.5*natr: break
+        elif best is not None and height>6.5*natr: break
     if not best: return None
     L=best; s=n-L
     hi=float(h[s:].max()); lo=float(l[s:].min()); height=hi-lo
@@ -5163,10 +5163,10 @@ def accumulation_payload(budget=250, top=8):
             try:
                 liq=contract_liquidity_gate(b["ticker"],"0-30",allow_leaps=False)
                 if liq.get("liquidity") not in ("Liquid","Tradable"):
-                    watch.append(b); continue
+                    b["watch_reason"]=f"options {str(liq.get('liquidity') or 'unavailable').lower()}"; watch.append(b); continue
                 b["options_liquidity"]=liq.get("liquidity")
-            except Exception:
-                watch.append(b); continue
+            except Exception as e:
+                b["watch_reason"]="options check failed"; watch.append(b); continue
             try:
                 st=_context_structure(b["ticker"])
                 if st and st.get("available"): st["base_plans"]={p["direction"]:p}
@@ -5175,6 +5175,7 @@ def accumulation_payload(budget=250, top=8):
                 b["entry_plan"]={"available":False,"reason":str(e)}
             rows.append(b)
         elif len(watch)<16:
+            b["watch_reason"]=("no clear lean" if not p else (f"reward/risk {p['rr']}" if p["rr"]<1.5 else ("quality under 45" if b["quality"]<45 else "plan slots full")))
             watch.append(b)
     return {"available":True,"rows":rows,"watch":watch[:16],"screened":len(data),"bases":len(cands),"universe":len(members),
             "as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None}
@@ -5186,7 +5187,7 @@ def api_accumulation():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"accum-v33:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"accum-v33-1:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7371,7 +7372,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
   <div id="v33AccCards" class="v32Cards"><div class="v32Empty">Loading…</div></div>
   <section class="v32Panel"><div class="v32PanelHead"><h2>Still building</h2><span class="v32Muted">Bases without a tradeable plan yet: no clear lean, low quality, reward/risk under 1.5, or thin options</span></div><div id="v33AccWatch"></div></section>
   <section class="v32Panel"><div class="v32PanelHead"><h2>How to read it</h2></div><div class="v32Muted" style="font-size:13px;line-height:1.55">
-   <b>Base</b>: price stuck in a range ≤ 3.5× its normal daily range while daily ranges shrink (compression) — the longer the base, the bigger the move it can fuel.
+   <b>Base</b>: price stuck in a range ≤ 5× its normal daily range while daily ranges shrink (compression) — the longer the base, the bigger the move it can fuel.
    <b>Accumulation</b>: more volume on up days, closes near the highs of the bars, higher lows, price working toward the top of the range, maybe a spring (a dip under the range low that closes back inside).
    <b>Distribution</b>: the mirror, including an upthrust (a poke above the range high that closes back inside).
    <b>Trigger</b>: a 2U/2D out of today's 1 bar when price is already at the edge of the range, otherwise the range break itself. A real break comes on volume ≥ 1.5× the 50-day average — no volume, no trade.
@@ -12504,7 +12505,7 @@ function v33RenderAccum(){
  if(sub)sub.textContent=`${j.screened} stocks screened · ${j.bases} in a base · ${(j.rows||[]).length} with a plan${j.as_of?` · data through ${j.as_of}`:""}${v33AccLoading?" · rescanning…":""}`;
  host.innerHTML=ideas.length?ideas.map(v32CardHTML).join(""):`<div class="v32Empty">${(j.rows||[]).length?"Nothing in this filter.":"No base has a clean lean, a 1.5+ reward/risk and liquid options right now."}</div>`;
  const w=(j.watch||[]).filter(b=>v33AccFilter==="all"||b.direction===v33AccFilter||!b.direction);
- if(wh)wh.innerHTML=w.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Ticker</th><th>Group</th><th>Lean</th><th>Base</th><th>Range</th><th>1 bars</th><th>Volume</th><th>Quality</th><th>Why</th></tr></thead><tbody>${w.map(b=>`<tr><td><b class="v32Num">${v32E(b.ticker)}</b></td><td>${v32E(b.parent||"")}</td><td style="color:${b.direction==="bullish"?"#3DD68C":b.direction==="bearish"?"#FF8A78":"#8B97A6"}">${v32E(b.bias)}</td><td class="v32Num">${b.base_days}d</td><td class="v32Num">${v32$(b.base_low)}–${v32$(b.base_high)}</td><td class="v32Num">${b.inside_now?"today":""}${b.inside_10?` ${b.inside_10}/10`:""}</td><td class="v32Num">${b.vol_build?b.vol_build+"×":"—"}</td><td class="v32Num">${b.quality}</td><td class="v32Muted">${v32E((b.why||[]).slice(0,2).join(" · "))}${b.plan&&b.plan.rr<1.5?` · R/R ${b.plan.rr}`:""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="v32Muted">None.</div>`;
+ if(wh)wh.innerHTML=w.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Ticker</th><th>Group</th><th>Lean</th><th>Base</th><th>Range</th><th>1 bars</th><th>Volume</th><th>Quality</th><th>Why</th></tr></thead><tbody>${w.map(b=>`<tr><td><b class="v32Num">${v32E(b.ticker)}</b></td><td>${v32E(b.parent||"")}</td><td style="color:${b.direction==="bullish"?"#3DD68C":b.direction==="bearish"?"#FF8A78":"#8B97A6"}">${v32E(b.bias)}</td><td class="v32Num">${b.base_days}d</td><td class="v32Num">${v32$(b.base_low)}–${v32$(b.base_high)}</td><td class="v32Num">${b.inside_now?"today":""}${b.inside_10?` ${b.inside_10}/10`:""}</td><td class="v32Num">${b.vol_build?b.vol_build+"×":"—"}</td><td class="v32Num">${b.quality}</td><td class="v32Muted">${v32E((b.why||[]).slice(0,2).join(" · "))}${b.watch_reason?` · <b>${v32E(b.watch_reason)}</b>`:""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="v32Muted">None.</div>`;
 }
 async function v33LogAccum(){
  try{

@@ -37,7 +37,7 @@ def test_accumulation_base_detected_with_plan():
     b = appmod.base_detect(_base(True))
     assert b and b["available"]
     assert b["bias"] == "accumulation" and b["direction"] == "bullish"
-    assert 15 <= b["base_days"] <= 60 and b["height_atr"] <= 3.5
+    assert 15 <= b["base_days"] <= 60 and b["height_atr"] <= 5.0
     assert b["up_down_vol"] > 1 and b["ad"] > 0
     p = b["plan"]
     assert p and p["stop"] < p["entry"] < p["target"]
