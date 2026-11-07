@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "33.1"
+APP_VERSION = "33.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5109,7 +5109,8 @@ def base_detect(df, min_len=15, max_len=60):
     if direction:
         bull=direction=="bullish"
         ib_hi,ib_lo=float(h[-1]),float(l[-1])
-        early=inside_now and ((bull and pos>=.6 and ib_hi<hi) or ((not bull) and pos<=.4 and ib_lo>lo))
+        # the 1 bar must sit at the edge of the range the volume favours
+        early=inside_now and ((bull and pos>=.75 and ib_hi<hi) or ((not bull) and pos<=.25 and ib_lo>lo))
         if bull:
             entry=(ib_hi+.01) if early else hi+.01
             stop=max(ib_lo-.01,lo) if early else max(lo,hi-.5*height)
@@ -5187,7 +5188,7 @@ def api_accumulation():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"accum-v33-1:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"accum-v33-2:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7257,7 +7258,10 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 .v32Lane{font-size:13px;color:#B7C2CF;margin-top:4px}.v32Status{font-size:12px;font-weight:600;margin-top:4px}
 .v32Sum{font-size:14px;color:#D5DDE6}
 .v32Ladder{position:relative;height:56px;margin-top:10px}
+.v32Ladder.r3{height:72px}
 .v32Ladder .mk.below{top:18px}
+.v32Ladder .mk.below2{top:34px}
+.v32Ladder .mk.below2 i{height:8px}
 .v32Ladder .trk{position:absolute;left:0;right:0;top:16px;height:4px;border-radius:4px;background:#1A2330}
 .v32Ladder .rw,.v32Ladder .rk{position:absolute;top:16px;height:4px;border-radius:4px}
 .v32Ladder .mk{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px}
@@ -12244,11 +12248,12 @@ function v32Ladder(dir,stop,entry,target,now){
  // one in that row (closer than ~22% of the track) drops below the bar.
  const items=[{v:stop,l:"stop",c:"#FF8A78"},{v:entry,l:"entry",c:"#E6EDF3"},{v:target,l:"target",c:"#3DD68C"}].concat(now!=null?[{v:now,l:"now",c:"#F2B84B"}]:[])
    .map(o=>({...o,pc:p(Number(o.v))})).sort((x,y)=>x.pc-y.pc);
- const last={above:-99,below:-99};
- items.forEach(o=>{if(o.pc-last.above>=22){o.row="above";last.above=o.pc}else{o.row="below";last.below=o.pc}});
- const mk=o=>o.row==="below"?`<div class="mk below" style="left:${o.pc}%"><i style="background:${o.c}"></i><span class="v32Num" style="color:${o.c}">${o.l} ${v32$(o.v)}</span></div>`
+ const last={above:-99,below:-99,below2:-99};
+ items.forEach(o=>{o.row=["above","below","below2"].find(r=>o.pc-last[r]>=22)||["above","below","below2"].sort((a,b)=>last[a]-last[b])[0];last[o.row]=o.pc});
+ const r3=items.some(o=>o.row==="below2");
+ const mk=o=>o.row!=="above"?`<div class="mk ${o.row}" style="left:${o.pc}%"><i style="background:${o.c}"></i><span class="v32Num" style="color:${o.c}">${o.l} ${v32$(o.v)}</span></div>`
    :`<div class="mk" style="left:${o.pc}%"><span class="v32Num" style="color:${o.c}">${o.l} ${v32$(o.v)}</span><i style="background:${o.c}"></i></div>`;
- return `<div class="v32Ladder" role="img" aria-label="Stop ${v32$(stop)}, entry ${v32$(entry)}, target ${v32$(target)}${now!=null?`, now ${v32$(now)}`:""}"><div class="trk"></div>
+ return `<div class="v32Ladder${r3?" r3":""}" role="img" aria-label="Stop ${v32$(stop)}, entry ${v32$(entry)}, target ${v32$(target)}${now!=null?`, now ${v32$(now)}`:""}"><div class="trk"></div>
   <div class="rw" style="left:${Math.min(e,t)}%;width:${Math.abs(t-e)}%;background:${long?"#1F6B47":"#7A3328"}"></div><div class="rk" style="left:${Math.min(e,s)}%;width:${Math.abs(e-s)}%;background:#5A3A3A"></div>
   ${items.map(mk).join("")}</div>`;
 }
@@ -12474,7 +12479,7 @@ function v33BaseChips(b){
  if(b.volume_building)ch.push(`volume building${b.vol_build?` ${b.vol_build}×`:""}`);
  if(b.spring&&b.direction==="bullish")ch.push(`spring ${b.spring.date.slice(5)}`);
  if(b.upthrust&&b.direction==="bearish")ch.push(`upthrust ${b.upthrust.date.slice(5)}`);
- ch.push(`range squeeze ${Math.round((1-b.compression)*100)}%`);
+ if(b.compression<.95)ch.push(`range squeeze ${Math.round((1-b.compression)*100)}%`);else if(b.bb_width_pct<=25)ch.push(`Bollinger squeeze (${b.bb_width_pct}th pct)`);
  return ch;
 }
 function v33BaseExtra(b){
