@@ -53,7 +53,8 @@ def test_options_hydration_does_not_recompute_history():
 
 
 def test_recent_calendar_merges_public_results_even_when_finnhub_is_partial(monkeypatch):
-    today = appmod.pd.Timestamp.now().normalize()
+    # Latest trading day: on weekends "today" is not a session the scan checks.
+    today = appmod.pd.bdate_range(end=appmod.pd.Timestamp.now().normalize(), periods=1)[0]
     monkeypatch.setattr(appmod, "FINNHUB_API_KEY", "key")
     monkeypatch.setattr(appmod, "UW_API_TOKEN", "")
     monkeypatch.setattr(appmod, "cached", lambda key, fn, ttl=0: fn())
@@ -72,7 +73,8 @@ def test_recent_calendar_merges_public_results_even_when_finnhub_is_partial(monk
 
 
 def test_calendar_first_discovery_does_not_require_etf_membership(monkeypatch):
-    today = appmod.pd.Timestamp.now().normalize()
+    # Latest trading day: on weekends "today" is not a session the scan checks.
+    today = appmod.pd.bdate_range(end=appmod.pd.Timestamp.now().normalize(), periods=1)[0]
     monkeypatch.setattr(appmod, "FINNHUB_API_KEY", "key")
     monkeypatch.setattr(appmod, "UW_API_TOKEN", "")
     monkeypatch.setattr(appmod, "cached", lambda key, fn, ttl=0: fn())

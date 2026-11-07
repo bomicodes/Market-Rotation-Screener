@@ -1246,6 +1246,56 @@ def quadrant(x,y):
     if x < 100 and y < 100: return "Lagging"
     return "Weakening"
 
+def compute_rrg_smoothed(bench, asset, n1=10, n2=5, std_window=None, timeframe="1d", rs_span=5, out_span=3):
+    """v31.1 candidate: same JdK-style z-score construction as compute_rrg, but
+    RS is EMA-smoothed before the ratio, the ratio's rate of change is
+    EMA-smoothed before momentum, and both outputs get a short EMA. This mirrors
+    how published RRG replications smooth daily noise."""
+    b = np.asarray(bench, dtype=float); a = np.asarray(asset, dtype=float)
+    calibrated_std, calibrated_despike = rrg_calibration(timeframe)
+    std_window = max(2, int(std_window or calibrated_std))
+    rs = despike_rs(pd.Series((a / b) * 100.0, dtype=float), threshold_pct=calibrated_despike)
+    rs = rs.ewm(span=rs_span, adjust=False).mean() if rs_span and rs_span > 1 else rs
+    ratio = 100.0 + (rs - rs.rolling(n1).mean()) / rs.rolling(std_window).std(ddof=1).replace(0, np.nan)
+    roc = ratio.pct_change() * 100.0
+    roc = roc.ewm(span=3, adjust=False).mean()
+    momentum = 100.0 + (roc - roc.rolling(n2).mean()) / roc.rolling(std_window).std(ddof=1).replace(0, np.nan)
+    if out_span and out_span > 1:
+        ratio = ratio.ewm(span=out_span, adjust=False).mean(); momentum = momentum.ewm(span=out_span, adjust=False).mean()
+    return ratio.to_numpy(), momentum.to_numpy()
+
+
+def rrg_tail_variants(tickers=None, tail=8):
+    tickers = tickers or list(SECTORS)
+    prices = dl_prices(["SPY", *tickers], "3y")
+    out = {"daily": {}, "weekly": {}}
+    for tf in ("1d", "1w"):
+        px = rrg_resample_prices(prices, tf)
+        for t in tickers:
+            if t not in px.columns: continue
+            pair = px[["SPY", t]].dropna()
+            if len(pair) < 150 and tf == "1d": continue
+            res = {}
+            for name, fn in (("raw", lambda: compute_rrg(pair["SPY"].values, pair[t].values, 10, 5, timeframe=tf)),
+                             ("smoothed", lambda: compute_rrg_smoothed(pair["SPY"].values, pair[t].values, 10, 5, timeframe=tf)),
+                             ("smoothed_light", lambda: compute_rrg_smoothed(pair["SPY"].values, pair[t].values, 10, 5, timeframe=tf, rs_span=3, out_span=2))):
+                r, m = fn()
+                idx = [i for i in range(len(r)) if np.isfinite(r[i]) and np.isfinite(m[i])][-tail:]
+                res[name] = [[round(float(r[i]), 2), round(float(m[i]), 2)] for i in idx]
+            out["daily" if tf == "1d" else "weekly"][t] = res
+    out["asof"] = str(prices.index.max())[:10]
+    return out
+
+
+@app.get("/api/rrg-variants")
+def api_rrg_variants():
+    try:
+        payload, stale, err = cached_refresh_safe("rrg-variants-v1", lambda: rrg_tail_variants(), ttl=1800)
+        return jsonify({"ok": True, **payload})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def rrg_rows(prices, bench_ticker, members, n1=10, n2=5, tail=8, history_len=None, timeframe="1d"):
     out = []
     std_window, _ = rrg_calibration(timeframe)
