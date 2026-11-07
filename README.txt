@@ -1,9 +1,5 @@
-v34.0 — BASES × GROUP ROTATION
-- Second layer on the base scan. Each sector/theme gets a 20-day volume-flow read from its holdings
-  (% of members with up/down-day volume ≥ 1.2 minus % ≤ 0.83) next to its RRG quadrant vs SPY:
-  "rotating in · volume confirms", "quiet accumulation · volume ahead of price" (lagging/weakening group, members accumulating — early rotation),
-  "distribution under the surface", "rotating out · volume confirms".
-- A base is scored against its best-fitting group: RRG + flow agree +15, flow agrees +10, RRG agrees +6, against −15.
-  Against-the-group bases go to the watch list. Plans need quality ≥ 50 (was 45).
-- New "Group rotation × volume" table on the tab; each card shows its group, quadrant and flow.
+v34.1 — GROUP VOLUME FLOW ON ROTATION + TOP SETUPS
+- /api/group-flow: each group's 20-day volume flow (from its top-15 holdings) and RRG quadrant; shares one cached bulk download with the base scan; nightly job runs it.
+- Rotation page: sector table gets a Volume column (flow + read); focusing a sector shows the full sentence.
+- Top Setups: flow ≥ +40 → +8, ≥ +15 → +5, ≤ −15 → −6, ≤ −40 → −12 and the setup fails the gate (its group's money is leaving). Mirrored for shorts.
 
