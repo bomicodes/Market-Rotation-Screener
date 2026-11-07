@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "30.4"
+APP_VERSION = "30.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -455,6 +455,8 @@ def _l2_preload():
 
 
 def l2_get(key):
+    # The nightly job's own requests always recompute (it is what refreshes L2).
+    if threading.current_thread().name=="nightly": return None
     if not _l2_enabled(key) or market_open_now(): return None
     _l2_preload()
     hit=L2_MEMORY.get(key)
@@ -4989,6 +4991,9 @@ def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     client=app.test_client()
     with client.session_transaction() as sess: sess["authenticated"]=True
+    # Drop in-memory payloads so every request below recomputes from fresh data.
+    for k in list(CACHE.keys()):
+        if _l2_enabled(k): CACHE.pop(k,None)
     def get(url):
         r=client.get(url); return r.get_json(silent=True) or {}
     def post(url,body):
