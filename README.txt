@@ -1,3 +1,14 @@
+v33.0 — ACCUMULATION / DISTRIBUTION BASES
+- New "Accum / Dist" tab. Screens the top 15 holdings of every sector and industry group (daily OHLCV, consolidated volume) for bases:
+  a sideways range ≤ 3.5× normal daily range, 15–60 sessions, with daily ranges contracting.
+- The lean comes from the volume inside the range: up- vs down-day volume, the volume-weighted close location (A/D),
+  higher lows / lower highs, where price sits in the range, springs and upthrusts. Accumulation → long, distribution → short.
+- Quality score: compression, Bollinger squeeze, base length, inside (1) bars (daily and weekly), volume building, strength of the lean.
+- Plan: 2U/2D out of today's 1 bar when price is at the edge of the range, else the range break; stop inside the range;
+  measured-move target (range height). Confirm on breakout volume ≥ 1.5× the 50-day average.
+- Contracts priced with the existing single-leg planner (plan "base"); top bases also show on Tonight (filter "Bases").
+- Logged to the track record as lane "base"; refreshed by the nightly job.
+
 v32.3 — EQUAL-PREMIUM STRANGLES
 - The planner picks the call/put pair with equal premium (each leg within ±10% of half), then deltas nearest 0.25, within budget.
   So a winning leg alone breaks even at +100% and is in profit from there, even if the other leg goes to $0.

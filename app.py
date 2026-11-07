@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "32.3"
+APP_VERSION = "33.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2903,6 +2903,9 @@ def _entry_levels_for(structure, direction, plan=None):
     ct=s.get("counter")
     if ct and ct.get("direction")==direction:
         options.append(("rejection",ct["trigger"],ct["stop"],ct["target2"],ct.get("rr"),False))
+    bp=(s.get("base_plans") or {}).get(direction)
+    if bp:
+        options.append(("base",bp["entry"],bp["stop"],bp["target"],bp.get("rr"),False))
     vpp=(s.get("vp_plans") or {}).get(direction)
     if vpp:
         options.append(("vp",vpp["entry"],vpp["stop"],vpp["target"],vpp.get("rr"),bool(vpp.get("in_zone")) and abs(vpp["entry"]-float(s.get("spot") or vpp["entry"]))<1e-9))
@@ -4984,6 +4987,211 @@ def api_laggards():
 
 
 # ---------------------------------------------------------------------------
+# v33 ACCUMULATION / DISTRIBUTION BASES
+# Stocks moving sideways in a tight range while volatility contracts, inside
+# (STRAT 1) bars stack up and volume starts to build: the "cause" before the
+# "effect" (Wyckoff, as used in Coulling's volume price analysis). Where the
+# volume is going inside the range decides the lean:
+#   accumulation = more volume on up days, closes high in the bars (A/D line
+#   rising), higher lows, price in the upper part of the range, a spring
+#   (a dip under the range low that closes back inside);
+#   distribution = the mirror, including an upthrust.
+# The plan buys the break: a 2U out of the 1 bar when price is already near the
+# top of the range, else the range high. The target is a measured move.
+# ---------------------------------------------------------------------------
+def dl_ohlcv_bulk(tickers, period="9mo"):
+    """Daily OHLCV for many symbols in one Yahoo call (consolidated volume)."""
+    tickers=list(dict.fromkeys([t for t in tickers if t]))
+    out={}
+    if not tickers: return out
+    try:
+        df=yf.download(tickers=tickers,period=period,interval="1d",auto_adjust=True,progress=False,group_by="ticker",threads=True,timeout=40)
+    except Exception:
+        df=None
+    if df is not None and len(df):
+        for t in tickers:
+            try:
+                sub=df[t] if isinstance(df.columns,pd.MultiIndex) else df
+                sub=sub[["Open","High","Low","Close","Volume"]].dropna(subset=["Open","High","Low","Close"])
+                if len(sub)>=80: out[t]=sub
+            except Exception: continue
+    return out
+
+
+def _inside(h, l, i):
+    return bool(h[i]<=h[i-1] and l[i]>=l[i-1])
+
+
+def base_detect(df, min_len=15, max_len=60):
+    """Pure: find a sideways base ending today and read where its volume went."""
+    try:
+        d=df.dropna(subset=["Open","High","Low","Close"])
+    except Exception:
+        return None
+    if d is None or len(d)<120: return None
+    h=d["High"].astype(float).values; l=d["Low"].astype(float).values; c=d["Close"].astype(float).values
+    v=d["Volume"].astype(float).fillna(0).values if "Volume" in d else np.zeros(len(d))
+    n=len(d); spot=float(c[-1])
+    prev=np.r_[c[0],c[:-1]]
+    tr=np.maximum(h-l,np.maximum(abs(h-prev),abs(l-prev)))
+    atr14=pd.Series(tr).rolling(14).mean().values
+    natr=float(np.nanmedian(atr14[-120:]))            # "normal" daily range
+    if not natr or natr<=0 or spot<=0: return None
+    best=None
+    for L in range(min_len,min(max_len,n-60)+1):
+        hi=float(h[-L:].max()); lo=float(l[-L:].min()); height=hi-lo
+        if height<=3.5*natr and height/spot<=.20:
+            # a base, not a slow trend: net drift inside the window under ~half its height
+            if abs(float(c[-1]-c[n-L]))<=.6*height: best=L
+        elif best is not None and height>4.5*natr: break
+    if not best: return None
+    L=best; s=n-L
+    hi=float(h[s:].max()); lo=float(l[s:].min()); height=hi-lo
+    if height<=0: return None
+    atr10=float(pd.Series(tr).rolling(10).mean().values[-1])
+    compression=atr10/natr
+    ma=pd.Series(c).rolling(20).mean(); sd=pd.Series(c).rolling(20).std()
+    bw=(4*sd/ma).values; bw_pct=float((bw[-120:]<bw[-1]).mean()*100) if np.isfinite(bw[-1]) else 50.0
+    if compression>.95 and bw_pct>40: return None
+    pre=c[max(0,s-40)]; prior=float((c[s]/pre-1)*100) if pre else 0.0
+    ins=[_inside(h,l,i) for i in range(n-10,n)]
+    inside_now=ins[-1]; inside_2=ins[-1] and ins[-2]; inside_10=int(sum(ins))
+    wk=d.resample("W-FRI").agg({"High":"max","Low":"min","Close":"last"}).dropna()
+    weekly_inside=bool(len(wk)>=3 and wk["High"].iloc[-1]<=wk["High"].iloc[-2] and wk["Low"].iloc[-1]>=wk["Low"].iloc[-2])
+    vb=v[s:]; has_vol=float(vb.sum())>0
+    half=max(5,L//2)
+    vol_first=float(vb[:half].mean()) if has_vol else 0.0; vol_last10=float(v[-10:].mean()); vol50=float(v[-50:].mean())
+    vol_build=(vol_last10/vol_first) if vol_first>0 else None
+    x=np.arange(len(vb)); lv=np.log(np.maximum(vb,1))
+    vol_slope=float(np.polyfit(x,lv,1)[0]*len(vb)*100) if has_vol and len(vb)>5 else None   # % change over the base
+    cb=c[s:]; pb=np.r_[c[s-1],c[s:-1]]
+    up=float(vb[cb>pb].sum()); dn=float(vb[cb<pb].sum())
+    udr=(up/dn) if dn>0 else (3.0 if up>0 else 1.0)
+    rng=np.maximum(h[s:]-l[s:],1e-9); clv=((c[s:]-l[s:])-(h[s:]-c[s:]))/rng
+    ad=float((clv*vb).sum()/vb.sum()) if has_vol else 0.0          # -1..1
+    pos=(spot-lo)/height
+    third=max(3,L//3)
+    hl=float(l[s:s+third].min()); hl2=float(l[-third:].min()); hh=float(h[s:s+third].max()); hh2=float(h[-third:].max())
+    higher_lows=hl2>hl+.15*height; lower_highs=hh2<hh-.15*height
+    spring=upthrust=None
+    for i in range(max(s+5,n-15),n):
+        plo=float(l[s:i].min()); phi=float(h[s:i].max())
+        if l[i]<plo and c[i]>plo and spring is None:
+            spring={"date":str(d.index[i].date()),"low":round(float(l[i]),2),"volume_x":round(float(v[i]/vol50),2) if vol50>0 else None}
+        if h[i]>phi and c[i]<phi and upthrust is None:
+            upthrust={"date":str(d.index[i].date()),"high":round(float(h[i]),2),"volume_x":round(float(v[i]/vol50),2) if vol50>0 else None}
+    score=0.0; why=[]
+    s1=float(np.clip((udr-1)*4,-2,2)); score+=s1
+    if abs(s1)>=1: why.append(f"up-day volume {udr:.2f}× down-day" if s1>0 else f"down-day volume {1/max(udr,1e-9):.2f}× up-day")
+    s2=float(np.clip(ad*10,-2,2)); score+=s2
+    if abs(s2)>=1: why.append(f"closes {'near highs' if s2>0 else 'near lows'} on volume (A/D {ad:+.2f})")
+    s3=float(np.clip((pos-.5)*4,-2,2)); score+=s3
+    if higher_lows and not lower_highs: score+=1; why.append("higher lows")
+    if lower_highs and not higher_lows: score-=1; why.append("lower highs")
+    if spring: score+=2; why.append(f"spring {spring['date']}")
+    if upthrust: score-=2; why.append(f"upthrust {upthrust['date']}")
+    bias="accumulation" if score>=2 else ("distribution" if score<=-2 else "undecided")
+    direction={"accumulation":"bullish","distribution":"bearish"}.get(bias)
+    phase=None
+    if bias=="accumulation": phase="re-accumulation (continuation)" if prior>=8 else ("accumulation after a decline" if prior<=-8 else "accumulation")
+    elif bias=="distribution": phase="distribution after an advance" if prior>=8 else ("re-distribution (continuation)" if prior<=-8 else "distribution")
+    building=bool((vol_build or 0)>=1.15 or (vol_slope or 0)>=15)
+    q=0.0
+    q+=min(25,max(0,(1-compression)*60))                   # quieter = more stored energy
+    q+=min(15,max(0,(40-bw_pct)/40*15))
+    q+=min(15,(L-min_len)/(max_len-min_len)*15+5)          # longer cause, bigger effect
+    q+=min(15,inside_10*4+(4 if inside_now else 0)+(3 if weekly_inside else 0))
+    q+=10 if building else (4 if (vol_build or 0)>=1.0 else 0)
+    q+=min(20,abs(score)*4)
+    edge=pos if direction=="bullish" else (1-pos if direction=="bearish" else max(pos,1-pos))
+    q*=(.8+.4*edge)
+    plan=None
+    if direction:
+        bull=direction=="bullish"
+        ib_hi,ib_lo=float(h[-1]),float(l[-1])
+        early=inside_now and ((bull and pos>=.6 and ib_hi<hi) or ((not bull) and pos<=.4 and ib_lo>lo))
+        if bull:
+            entry=(ib_hi+.01) if early else hi+.01
+            stop=max(ib_lo-.01,lo) if early else max(lo,hi-.5*height)
+            if entry-stop<.4*natr: stop=entry-.4*natr
+            target=hi+max(height,2*natr)
+            trig=(f"2U out of today's 1 bar: above {ib_hi+.01:.2f}" if early else f"break of the range high {hi:.2f}")
+        else:
+            entry=(ib_lo-.01) if early else lo-.01
+            stop=min(ib_hi+.01,hi) if early else min(hi,lo+.5*height)
+            if stop-entry<.4*natr: stop=entry+.4*natr
+            target=lo-max(height,2*natr)
+            trig=(f"2D out of today's 1 bar: below {ib_lo-.01:.2f}" if early else f"break of the range low {lo:.2f}")
+        risk=abs(entry-stop); reward=abs(target-entry)
+        if risk>0:
+            plan={"direction":direction,"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":round(reward/risk,2),
+                  "early":bool(early),"trigger":trig,"in_zone":False,
+                  "confirm":f"Breakout day volume ≥ 1.5× the 50-day average ({vol50*1.5:,.0f}+ shares)" if vol50>0 else "Breakout on rising volume"}
+    def r2(x): return round(float(x),2)
+    return {"available":True,"spot":r2(spot),"base_days":L,"base_high":r2(hi),"base_low":r2(lo),"height_pct":round(height/spot*100,1),
+            "height_atr":round(height/natr,1),"natr":r2(natr),"compression":round(compression,2),"bb_width_pct":round(bw_pct,0),
+            "prior_move_pct":round(prior,1),"inside_now":bool(inside_now),"inside_2":bool(inside_2),"inside_10":inside_10,"weekly_inside":weekly_inside,
+            "vol_build":round(vol_build,2) if vol_build else None,"vol_slope_pct":round(vol_slope,0) if vol_slope is not None else None,"volume_building":building,
+            "up_down_vol":round(udr,2),"ad":round(ad,2),"range_pos":round(pos,2),"higher_lows":higher_lows,"lower_highs":lower_highs,
+            "spring":spring,"upthrust":upthrust,"bias_score":round(score,1),"bias":bias,"direction":direction,"phase":phase,"why":why,
+            "quality":round(min(100,q),0),"plan":plan,"avg_dollar_vol":round(float((c[-20:]*v[-20:]).mean()),0)}
+
+
+def accumulation_payload(budget=250, top=8):
+    members={}
+    for etf in RRG_UNIVERSE:
+        try:
+            (holdings,_src),_,_=cached_refresh_safe(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+            for hd in apply_sector_supplements(etf,holdings)[:15]:
+                members.setdefault(hd["ticker"],etf)
+        except Exception: continue
+    data=dl_ohlcv_bulk(list(members),"9mo")
+    cands=[]
+    for t,df in data.items():
+        try:
+            b=base_detect(df)
+        except Exception:
+            b=None
+        if not b or b["spot"]<10 or b["avg_dollar_vol"]<20e6: continue
+        b.update(ticker=t,parent=members.get(t))
+        cands.append(b)
+    cands.sort(key=lambda z:-z["quality"])
+    rows=[]; watch=[]
+    for b in cands:
+        p=b.get("plan")
+        if len(rows)<top and p and p["rr"]>=1.5 and b["quality"]>=45:
+            try:
+                liq=contract_liquidity_gate(b["ticker"],"0-30",allow_leaps=False)
+                if liq.get("liquidity") not in ("Liquid","Tradable"):
+                    watch.append(b); continue
+                b["options_liquidity"]=liq.get("liquidity")
+            except Exception:
+                watch.append(b); continue
+            try:
+                st=_context_structure(b["ticker"])
+                if st and st.get("available"): st["base_plans"]={p["direction"]:p}
+                b["entry_plan"]=option_entry_plan(b["ticker"],p["direction"],budget,"base",structure=st)
+            except Exception as e:
+                b["entry_plan"]={"available":False,"reason":str(e)}
+            rows.append(b)
+        elif len(watch)<16:
+            watch.append(b)
+    return {"available":True,"rows":rows,"watch":watch[:16],"screened":len(data),"bases":len(cands),"universe":len(members),
+            "as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None}
+
+
+@app.get("/api/accumulation")
+def api_accumulation():
+    try:
+        try: budget=int(float(request.args.get("budget") or 250))
+        except Exception: budget=250
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"accum-v33:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
 # v30 POSITION TRACKER
 # Trades the trader actually takes: single-leg directional calls/puts (logged
 # from a plan card, carrying its exit rules) and post-earnings strangles.
@@ -5335,6 +5543,10 @@ def nightly_run():
             try:
                 lg=get(f"/api/laggards?groups={','.join(hints['groups'][:10])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
             except Exception as e: st["errors"].append(f"laggards: {e}")
+        st["stage"]="accumulation"
+        try:
+            ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
+        except Exception as e: st["errors"].append(f"accumulation: {e}")
         st["stage"]="outcomes"
         try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
         except Exception as e: st["errors"].append(f"outcomes: {e}")
@@ -7063,7 +7275,7 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height:34px;padding:0 8px;background:#0B0F14;border:1px solid #263140;border-radius:8px;color:#E6EDF3}
 .v32Filtered{background:#0E131A;border:1px dashed #263140;border-radius:12px;padding:12px 16px;color:#8B97A6;font-size:13px}.v32Filtered summary{cursor:pointer}.v32Filtered p{margin:8px 0 0}
 .v32Empty{border:1px dashed #263140;border-radius:12px;padding:16px;color:#8B97A6;font-size:13px;text-align:center}
-.v32Table{width:100%;border-collapse:collapse;font-size:13px}.v32Table th{font-size:11px;color:#8B97A6;text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid #1D2630}
+.v32TableWrap{overflow-x:auto}.v32Table{width:100%;border-collapse:collapse;font-size:13px}.v32Table th{font-size:11px;color:#8B97A6;text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid #1D2630}
 .v32Table td{padding:8px;border-bottom:1px solid #151D27}
 .v32SecRow{cursor:pointer}.v32SecRow:hover td{background:#131B24}.v32SecRow.sel td{background:#17222E}.v32SecRow.dim{opacity:.45}
 .v32SecRow:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
@@ -7095,6 +7307,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
   <nav class="v32Nav" aria-label="Main">
    <button type="button" data-v32-nav="tonight">Tonight</button>
    <button type="button" data-v32-nav="rotation">Rotation</button>
+   <button type="button" data-v32-nav="bases">Accum / Dist</button>
    <button type="button" data-v32-nav="positions">Positions</button>
    <button type="button" data-v32-nav="earnings">Earnings</button>
    <button type="button" data-v32-nav="record">Track record</button>
@@ -7123,7 +7336,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
    <section class="v32Plan">
     <div class="v32Title"><h1>Tonight's plan</h1><span id="v32PlanSub" class="v32Muted"></span>
      <div class="v32Seg" role="group" aria-label="Filter ideas">
-      <button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button>
+      <button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button><button type="button" data-v32-filter="base">Bases</button>
      </div>
     </div>
     <div id="v32Cards" class="v32Cards"></div>
@@ -7151,6 +7364,21 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
  </div>
 </section>
 
+<section class="v32View" data-v32="bases" hidden>
+ <div class="v32Main"><div class="v32Title"><h1>Accumulation &amp; distribution</h1><span class="v32Muted" id="v33AccSub">Tight ranges with inside bars and building volume · the lean comes from where the volume goes</span>
+   <div class="v32Seg" role="group" aria-label="Filter bases"><button type="button" data-v33-filter="all" class="on">All</button><button type="button" data-v33-filter="bullish">Accumulation</button><button type="button" data-v33-filter="bearish">Distribution</button></div>
+   <button type="button" class="v32Ghost" id="v33AccRefresh" aria-label="Rescan bases">↻</button></div>
+  <div id="v33AccCards" class="v32Cards"><div class="v32Empty">Loading…</div></div>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>Still building</h2><span class="v32Muted">Bases without a tradeable plan yet: no clear lean, low quality, reward/risk under 1.5, or thin options</span></div><div id="v33AccWatch"></div></section>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>How to read it</h2></div><div class="v32Muted" style="font-size:13px;line-height:1.55">
+   <b>Base</b>: price stuck in a range ≤ 3.5× its normal daily range while daily ranges shrink (compression) — the longer the base, the bigger the move it can fuel.
+   <b>Accumulation</b>: more volume on up days, closes near the highs of the bars, higher lows, price working toward the top of the range, maybe a spring (a dip under the range low that closes back inside).
+   <b>Distribution</b>: the mirror, including an upthrust (a poke above the range high that closes back inside).
+   <b>Trigger</b>: a 2U/2D out of today's 1 bar when price is already at the edge of the range, otherwise the range break itself. A real break comes on volume ≥ 1.5× the 50-day average — no volume, no trade.
+   <b>Target</b>: a measured move — the range height projected from the break.</div></section>
+ </div>
+</section>
+
 <section class="v32View" data-v32="positions" hidden>
  <div class="v32Main"><div class="v32Title"><h1>My positions</h1><span class="v32Muted" id="v32PosSub"></span><button type="button" class="v32Ghost" onclick="v30LoadPositions()">↻ Refresh marks</button></div>
   <div id="v32PosSummary" class="v32Tape"></div><div id="v32PosList" class="v32Cards"></div><div id="v32PosAdd"></div></div>
@@ -7171,7 +7399,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
 </section>
 
 <nav class="v32Bottom" aria-label="Main">
- <button type="button" data-v32-nav="tonight">Tonight</button><button type="button" data-v32-nav="rotation">Rotation</button><button type="button" data-v32-nav="positions">Positions</button><button type="button" data-v32-nav="earnings">Earnings</button><button type="button" data-v32-nav="record">Record</button>
+ <button type="button" data-v32-nav="tonight">Tonight</button><button type="button" data-v32-nav="rotation">Rotation</button><button type="button" data-v32-nav="bases">Bases</button><button type="button" data-v32-nav="positions">Positions</button><button type="button" data-v32-nav="earnings">Earnings</button><button type="button" data-v32-nav="record">Record</button>
 </nav>
 </div>
 
@@ -11951,6 +12179,7 @@ function v32Show(name,tool){
  if(!classic)try{localStorage.setItem("v32View",name)}catch(e){}
  if(name==="rotation"){v32MountRotation();setTimeout(()=>{window.dispatchEvent(new Event("resize"));v32RenderSectors()},60);try{v32RenderLaggardsInto("v32Laggards")}catch(e){}}
  if(name==="earnings")v32MountEarnings();
+ if(name==="bases"){try{v33RenderAccum();if(!window.__accum)v33LoadAccum()}catch(e){}}
  if(name==="record"){try{v29LoadTrackRecord()}catch(e){}}
  if(name==="positions"){try{v30LoadPositions()}catch(e){}}
  if(name==="tonight")v32RenderTonight();
@@ -12047,6 +12276,7 @@ function v32CardHTML(c){
    :(p?.available?`<b>No contract under ${v32$(p.budget,0)}</b><span class="v32Num" style="color:#FF8A78">Cheapest ≈ ${v32$(p.cheapest_single_cost,0)}</span>`:`<b>Contract</b><span class="v32Muted">${p&&p._loading?"loading…":"unavailable"}</span>`);
  const vs=c.vs,v=vs?.vp,ft=vs?.strat?.ftfc;
  const more=[];
+ if(c.extra)more.push(c.extra);
  if(lp.rules)more.push(`<b>Exit plan</b><ul>${lp.rules}</ul>`);
  if(v?.available)more.push(`<div><b>VP</b> 20-session POC ${v32$(v.poc)} · VA ${v32$(v.val)}–${v32$(v.vah)}${v.prior_week?` · prior-week VA ${v32$(v.prior_week.val)}–${v32$(v.prior_week.vah)}`:""}</div>`);
  if(ft?.frames)more.push(`<div><b>STRAT</b> ${(vs.strat.frames||[]).map(f=>`${f.timeframe} ${f.scenario}`).join(" · ")} · FTFC ${ft.state}</div>`);
@@ -12085,6 +12315,7 @@ function v32CollectIdeas(){
      summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)} · relative line ${v32Pct(m.rs_turn_5d,1)} last 5d.`,
      chips:[`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)});
  });
+ try{v33AccIdeas().slice(0,3).forEach(c=>{if(!ideas.some(x=>x.ticker===c.ticker&&x.dir===c.dir))ideas.push(c)})}catch(e){}
  const shownT=new Set(ideas.map(c=>c.ticker));
  return {ideas,filtered:filtered.filter(t=>!shownT.has(t))};
 }
@@ -12092,7 +12323,7 @@ function v32RenderTonight(){
  try{v32RenderMeta();v32RenderTape();}catch(e){}
  const host=document.getElementById("v32Cards");if(!host)return;
  const {ideas,filtered}=v32CollectIdeas();
- const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard"));
+ const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard")||(v32Filter==="base"&&c.kind==="base"));
  const st=document.getElementById("topSetupsStatus")?.textContent||"";
  const sub=document.getElementById("v32PlanSub");
  if(sub)sub.textContent=automaticTopSetupsRunning?st:`${ideas.length} idea${ideas.length===1?"":"s"}${ideas.length&&!ideas.some(c=>c.kind==="setup")?" · no clean rotation long in this tape":""}`;
@@ -12228,12 +12459,77 @@ document.addEventListener("click",async ev=>{
    if(msg)msg.textContent="Logged ✓ — edit fills in Positions if yours differ.";v30LoadPositions();}catch(e){if(msg)msg.textContent=e.message;}
 });
 
+
+// ---- v33 accumulation / distribution -------------------------------------------------
+let v33AccFilter="all",v33AccLoading=false,v33AccLogSig="";
+function v33BaseSummary(b){
+ const p=b.plan||{};
+ return `${b.base_days}-day base ${v32$(b.base_low)}–${v32$(b.base_high)} (${b.height_pct}%, ${b.height_atr}× normal range). Trigger: ${p.trigger||"—"}.`;
+}
+function v33BaseChips(b){
+ const ch=[];
+ if(b.inside_now)ch.push(b.inside_2?"1-1 today":"1 bar today");else if(b.inside_10)ch.push(`${b.inside_10} inside bars / 10d`);
+ if(b.weekly_inside)ch.push("weekly 1");
+ if(b.volume_building)ch.push(`volume building${b.vol_build?` ${b.vol_build}×`:""}`);
+ if(b.spring&&b.direction==="bullish")ch.push(`spring ${b.spring.date.slice(5)}`);
+ if(b.upthrust&&b.direction==="bearish")ch.push(`upthrust ${b.upthrust.date.slice(5)}`);
+ ch.push(`range squeeze ${Math.round((1-b.compression)*100)}%`);
+ return ch;
+}
+function v33BaseExtra(b){
+ const p=b.plan||{};
+ return `<div><b>Why ${v32E(b.bias)}</b> ${v32E((b.why||[]).join(" · ")||"—")} · lean score ${b.bias_score>0?"+":""}${b.bias_score}</div>
+  <div><b>Base</b> ${b.base_days} sessions · daily range now ${Math.round(b.compression*100)}% of normal · Bollinger width at the ${b.bb_width_pct}th pct of 6 months · before the base: ${v32Pct(b.prior_move_pct,1)} over 40 sessions</div>
+  <div><b>Volume</b> last 10d ${b.vol_build?b.vol_build+"×":"—"} the first half of the base · up/down-day volume ${b.up_down_vol}× · A/D ${b.ad>0?"+":""}${b.ad}</div>
+  <div><b>Confirm</b> ${v32E(p.confirm||"")}. If it breaks on light volume or closes back inside the range, it's a false break — out.</div>`;
+}
+function v33AccIdeas(){
+ return ((window.__accum||{}).rows||[]).filter(b=>b.entry_plan&&b.plan).map(b=>({ticker:b.ticker,parent:b.parent,dir:b.direction,kind:"base",lane:"base",
+   laneLabel:(b.phase||b.bias).replace(/^./,m=>m.toUpperCase()),plan:b.entry_plan,score:b.quality,summary:v33BaseSummary(b),chips:v33BaseChips(b),extra:v33BaseExtra(b)}));
+}
+async function v33LoadAccum(force=false){
+ if(v33AccLoading)return;v33AccLoading=true;v33RenderAccum();
+ try{
+   const j=await (await fetch(`/api/accumulation?budget=${encodeURIComponent(v26Budget())}${force?"&refresh=1":""}`)).json();
+   if(!j.ok)throw new Error(j.error||"scan failed");
+   window.__accum=j;v33LogAccum();
+ }catch(e){window.__accumErr=e.message||String(e);}
+ finally{v33AccLoading=false;v33RenderAccum();try{v32RenderTonight()}catch(e){}}
+}
+function v33RenderAccum(){
+ const host=document.getElementById("v33AccCards"),wh=document.getElementById("v33AccWatch"),sub=document.getElementById("v33AccSub");if(!host)return;
+ const j=window.__accum;
+ if(!j){host.innerHTML=`<div class="v32Empty">${v33AccLoading?"Scanning sector holdings for bases… the first run takes about a minute.":window.__accumErr?`Scan failed: ${v32E(window.__accumErr)}`:"Loading…"}</div>`;if(wh)wh.innerHTML="";return}
+ const ideas=v33AccIdeas().filter(c=>v33AccFilter==="all"||c.dir===v33AccFilter);
+ if(sub)sub.textContent=`${j.screened} stocks screened · ${j.bases} in a base · ${(j.rows||[]).length} with a plan${j.as_of?` · data through ${j.as_of}`:""}${v33AccLoading?" · rescanning…":""}`;
+ host.innerHTML=ideas.length?ideas.map(v32CardHTML).join(""):`<div class="v32Empty">${(j.rows||[]).length?"Nothing in this filter.":"No base has a clean lean, a 1.5+ reward/risk and liquid options right now."}</div>`;
+ const w=(j.watch||[]).filter(b=>v33AccFilter==="all"||b.direction===v33AccFilter||!b.direction);
+ if(wh)wh.innerHTML=w.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Ticker</th><th>Group</th><th>Lean</th><th>Base</th><th>Range</th><th>1 bars</th><th>Volume</th><th>Quality</th><th>Why</th></tr></thead><tbody>${w.map(b=>`<tr><td><b class="v32Num">${v32E(b.ticker)}</b></td><td>${v32E(b.parent||"")}</td><td style="color:${b.direction==="bullish"?"#3DD68C":b.direction==="bearish"?"#FF8A78":"#8B97A6"}">${v32E(b.bias)}</td><td class="v32Num">${b.base_days}d</td><td class="v32Num">${v32$(b.base_low)}–${v32$(b.base_high)}</td><td class="v32Num">${b.inside_now?"today":""}${b.inside_10?` ${b.inside_10}/10`:""}</td><td class="v32Num">${b.vol_build?b.vol_build+"×":"—"}</td><td class="v32Num">${b.quality}</td><td class="v32Muted">${v32E((b.why||[]).slice(0,2).join(" · "))}${b.plan&&b.plan.rr<1.5?` · R/R ${b.plan.rr}`:""}</td></tr>`).join("")}</tbody></table></div>`:`<div class="v32Muted">None.</div>`;
+}
+async function v33LogAccum(){
+ try{
+   const date=v29TradeDate(),rows=[];
+   ((window.__accum||{}).rows||[]).forEach(b=>{const p=b.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;
+     rows.push({ticker:b.ticker,trade_date:date,lane:"base",direction:b.direction,fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:b.quality,
+       regime:v28Regime().state,parent:b.parent,bias:b.bias,base_days:b.base_days,
+       contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
+   const sig=JSON.stringify(rows.map(r=>[r.ticker,r.trade_date]));
+   if(rows.length&&sig!==v33AccLogSig){v33AccLogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
+ }catch(e){console.warn("base log",e)}
+}
+document.addEventListener("click",ev=>{
+ const f=ev.target?.closest?.("[data-v33-filter]");
+ if(f){ev.preventDefault();v33AccFilter=f.dataset.v33Filter;document.querySelectorAll("[data-v33-filter]").forEach(b=>b.classList.toggle("on",b===f));v33RenderAccum();return;}
+ if(ev.target?.closest?.("#v33AccRefresh")){ev.preventDefault();v33LoadAccum(true);}
+});
+setTimeout(()=>{try{v33LoadAccum()}catch(e){}},4000);
+
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;
 renderTopSetups=function(){const o=_renderTopSetupsV32();try{v32RenderTonight()}catch(e){console.warn("v32 tonight",e)}return o};
 const _v29LoadNightlyStatusV32=v29LoadNightlyStatus;
 v29LoadNightlyStatus=async function(){const o=await _v29LoadNightlyStatusV32();try{v32RenderMeta()}catch(e){}return o};
-(function(){let start="tonight";try{start=localStorage.getItem("v32View")||"tonight"}catch(e){}if(!["tonight","rotation","positions","earnings","record"].includes(start))start="tonight";v32Show(start);})();
+(function(){let start="tonight";try{start=localStorage.getItem("v32View")||"tonight"}catch(e){}if(!["tonight","rotation","bases","positions","earnings","record"].includes(start))start="tonight";v32Show(start);})();
 
 </script>
 """
