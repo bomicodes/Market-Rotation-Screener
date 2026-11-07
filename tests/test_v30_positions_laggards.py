@@ -173,3 +173,18 @@ def test_weekly_contract_used_when_budget_tight_and_exit_rules_tighten():
         assert "weekly" in out["exit_plan"]["rules"][-1] and out["exit_plan"]["time_stop_sessions"] <= z["leg"]["dte"]
     # no expiration may end before the planned hold
     assert z["leg"]["dte"] >= out["hold_days_assumed"] + 3
+
+
+def test_strangle_plan_picks_budget_pair_and_moves():
+    import sys
+    sys.path.insert(0, "tests")
+    from test_v28_entry_quality import _row
+    spot = 100.0
+    rows = [_row("call", k, 21, spot, iv=.6) for k in range(100, 131)] + [_row("put", k, 21, spot, iv=.6) for k in range(70, 101)]
+    for r in rows: r["expiration"] = "2026-12-01"
+    out = appmod.strangle_plan("TEST", 400, rows, spot)
+    assert out["available"] and out["fits_budget"] and out["cost"] <= 400
+    assert out["call"]["strike"] > spot > out["put"]["strike"]
+    assert out["call_move_for_150"]["move_pct"] > 0 > out["put_move_for_150"]["move_pct"]
+    tight = appmod.strangle_plan("TEST", 50, rows, spot)
+    assert tight["available"] and not tight["fits_budget"] and "over the" in tight["note"]

@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "31.0"
+APP_VERSION = "32.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4556,6 +4556,89 @@ def api_premium_support(ticker):
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
+# ---------------------------------------------------------------------------
+# v32 STRANGLE PLANNER (post-earnings)
+# Picks a call and a put from the expiration nearest ~21 DTE (at least 7), each
+# as close to 0.25 delta as the budget allows, and shows how far the stock must
+# move for each leg to reach +150% (the trader's take-profit zone) after ~3
+# sessions of time decay.
+# ---------------------------------------------------------------------------
+def _leg_move_needed(row, spot, is_put, gain=1.5, days=3):
+    strike=float(row["strike"]); dte=int(row.get("dte") or 0); mid=float(row["mid"]); t=dte/365.0
+    iv=_safe_float(row.get("iv")); iv=(iv/100.0) if iv and iv>3 else iv
+    if not iv or iv<=0: iv=bs_implied_vol(mid,spot,strike,t,is_put)
+    if not iv: return None
+    model=bs_price(spot,strike,t,iv,is_put); sc=min(1.6,max(.6,mid/model)) if model>.01 else 1.0
+    goal=mid*(1+gain); tt=max(1/365,t-days/365.0)
+    lo,hi=(spot*.3,spot) if is_put else (spot,spot*3)
+    f=lambda S:bs_price(S,strike,tt,iv,is_put)*sc-goal
+    if (f(lo) if is_put else f(hi))<0: return None
+    for _ in range(60):
+        m=(lo+hi)/2
+        if is_put:
+            if f(m)>0: lo=m
+            else: hi=m
+        else:
+            if f(m)>0: hi=m
+            else: lo=m
+    S=(lo+hi)/2
+    return {"stock_price":round(S,2),"move_pct":round((S/spot-1)*100,1)}
+
+
+def strangle_plan(ticker, budget=250.0, rows=None, spot=None):
+    ticker=ticker.upper().strip(); budget=max(25.0,float(budget or 250))
+    if spot is None:
+        _,spot=realized_vol_20d(ticker)
+    if not spot: return {"ticker":ticker,"available":False,"reason":"Spot unavailable."}
+    if rows is None:
+        today=pd.Timestamp.now().normalize()
+        start=(today+pd.Timedelta(days=7)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=45)).strftime("%Y-%m-%d")
+        contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
+        snaps=alpaca_option_chain(ticker,start,end,spot); rows=[option_contract_row(sym,snap,meta[sym],spot) for sym,snap in snaps.items() if sym in meta]
+    rows=[r for r in rows if r.get("mid") and r["mid"]>0 and r.get("dte") is not None and 7<=r["dte"]<=45 and r.get("delta") is not None
+          and r.get("spread_pct") is not None and r["spread_pct"]<=30]
+    if not rows: return {"ticker":ticker,"available":False,"reason":"No 7–45 DTE contracts with usable quotes."}
+    exps=sorted({(r["expiration"],r["dte"]) for r in rows},key=lambda e:abs(e[1]-21))
+    best=None
+    for exp,dte in exps[:3]:
+        calls=[r for r in rows if r["expiration"]==exp and str(r.get("type","")).lower().startswith("c") and .10<=abs(r["delta"])<=.45]
+        puts=[r for r in rows if r["expiration"]==exp and str(r.get("type","")).lower().startswith("p") and .10<=abs(r["delta"])<=.45]
+        pairs=[]
+        for c in calls:
+            for p_ in puts:
+                cost=(c["mid"]+p_["mid"])*100
+                dist=abs(abs(c["delta"])-.25)+abs(abs(p_["delta"])-.25)
+                pairs.append((cost<=budget,-dist if cost<=budget else -cost,c,p_,cost))
+        if not pairs: continue
+        pairs.sort(key=lambda z:(z[0],z[1]),reverse=True)
+        fits,_,c,p_,cost=pairs[0]
+        cand={"fits":fits,"call":c,"put":p_,"cost":cost,"dte":dte,"expiration":exp}
+        if best is None or (cand["fits"] and not best["fits"]): best=cand
+        if best["fits"]: break
+    if not best: return {"ticker":ticker,"available":False,"reason":"No call/put pair in the 0.10–0.45 delta band."}
+    c,p_=best["call"],best["put"]
+    out={"ticker":ticker,"available":True,"spot":round(spot,2),"budget":budget,"expiration":best["expiration"],"dte":best["dte"],
+         "call":_leg_summary(c),"put":_leg_summary(p_),"total_premium":round(c["mid"]+p_["mid"],2),"cost":round(best["cost"],0),"fits_budget":bool(best["fits"]),
+         "call_move_for_150":_leg_move_needed(c,spot,False),"put_move_for_150":_leg_move_needed(p_,spot,True),
+         "rules":[f"Sell the leg that's up {STRANGLE_RULES['leg_take_profit_low']}–{STRANGLE_RULES['leg_take_profit_high']}%. Close it by +{STRANGLE_RULES['leg_take_profit_high']}%.",
+                  "Once a leg is under $0.10, manage the other leg alone.",
+                  f"{STRANGLE_RULES['stop_pct']}% combined, or {STRANGLE_RULES['time_stop_sessions']} sessions with no leg at +{STRANGLE_RULES['leg_take_profit_low']}%: out.",
+                  f"Out {STRANGLE_RULES['exit_days_before_expiry']} days before expiry."],
+         "feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
+    if not best["fits"]: out["note"]=f"Cheapest pair near 0.25 delta costs ${best['cost']:.0f}, over the ${budget:.0f} budget."
+    return out
+
+
+@app.get("/api/strangle-plan/<ticker>")
+def api_strangle_plan(ticker):
+    try:
+        try: budget=float(request.args.get("budget") or 250)
+        except Exception: budget=250.0
+        payload,stale,err=cached_refresh_safe(f"strangle-v32:{ticker.upper()}:{int(budget)}",lambda:strangle_plan(ticker,budget),ttl=600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
 @app.get("/api/entry-plan/<ticker>")
 def api_entry_plan(ticker):
     try:
@@ -6858,7 +6941,181 @@ a.newsHeadline:hover{color:#7fd8ff;border-bottom-color:#7fd8ff}
 .newsCat{font-size:9px;color:#c4b5fd;text-transform:uppercase;letter-spacing:.4px}
 @media(max-width:800px){.newsContextGrid{grid-template-columns:1fr}}
 </style>
+<style>
+/* ===== v32 redesign ===== */
+body.v32{background:#0B0F14;color:#E6EDF3;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+body.v32 .appHeader,body.v32 .pageIntro,body.v32 #sourceHealthStrip{display:none!important}
+body.v32:not(.v32-classic) .wrap>.view{display:none!important}
+body.v32 .wrap{max-width:none;padding:0}
+body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px;margin:0 auto;padding:16px 24px}
+.v32Num{font-family:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+.v32Muted{color:#8B97A6;font-size:13px}
+.v32Header{border-bottom:1px solid #1D2630;background:#0D1218;position:sticky;top:0;z-index:50}
+.v32HeaderIn{max-width:1280px;margin:0 auto;padding:12px 28px;display:flex;flex-wrap:wrap;align-items:center;gap:18px}
+.v32Brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.01em}
+.v32Nav{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
+.v32Nav>button,.v32Tools>summary{padding:8px 12px;border-radius:8px;border:0;background:transparent;color:#8B97A6;font:inherit;font-size:14px;cursor:pointer;list-style:none}
+.v32Nav>button.on{background:#17202A;color:#E6EDF3;font-weight:600}
+.v32Nav>button:hover,.v32Tools>summary:hover{color:#E6EDF3}
+.v32Tools{position:relative}.v32Tools>summary::-webkit-details-marker{display:none}.v32Tools>summary::after{content:" ▾"}
+.v32ToolsMenu{position:absolute;top:40px;left:0;min-width:210px;background:#10161D;border:1px solid #263140;border-radius:12px;padding:6px;display:flex;flex-direction:column;z-index:60;box-shadow:0 14px 40px rgba(0,0,0,.45)}
+.v32ToolsMenu button{text-align:left;padding:10px 12px;border:0;border-radius:8px;background:transparent;color:#D5DDE6;font:inherit;cursor:pointer}.v32ToolsMenu button:hover{background:#17202A}
+.v32Meta{margin-left:auto;display:flex;align-items:center;gap:12px}
+.v32Budget{display:flex;align-items:center;gap:6px;color:#8B97A6;font-size:13px}
+.v32Budget input,.v32Label input,.v32Field input,.v32Field select{width:80px;min-height:36px;padding:0 9px;background:#0B0F14;border:1px solid #263140;border-radius:8px;color:#E6EDF3;font:inherit}
+.v32Ghost{min-height:36px;padding:0 12px;border-radius:8px;border:1px solid #263140;background:transparent;color:#B7C2CF;font:inherit;cursor:pointer}
+.v32Main{max-width:1280px;margin:0 auto;padding:24px 28px 90px;display:flex;flex-direction:column;gap:20px}
+.v32Title{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px}.v32Title h1{margin:0;font-size:24px;font-weight:700;letter-spacing:-.02em}
+.v32Seg{margin-left:auto;display:flex;gap:4px;background:#10161D;border:1px solid #1D2630;border-radius:10px;padding:3px}
+.v32Seg button{min-height:34px;padding:0 13px;border:0;border-radius:8px;background:transparent;color:#8B97A6;font:inherit;cursor:pointer}.v32Seg button.on{background:#1C2633;color:#E6EDF3;font-weight:600}
+.v32Tape{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.v32Tile{background:#10161D;border:1px solid #1D2630;border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:5px}
+.v32Tile .k{font-size:12px;color:#8B97A6}.v32Tile .v{font-size:21px;font-weight:600}.v32Tile .s{font-size:12px;color:#8B97A6}
+.v32Groups{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.v32Chip{padding:4px 10px;border-radius:999px;border:1px solid #263140;background:#10161D;font-size:12px;font-weight:600}
+.v32Split{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-start}
+.v32Plan,.v32RrgPanel,.v32EarnHost{flex:999 1 560px;min-width:0;display:flex;flex-direction:column;gap:12px}
+.v32Side{flex:1 1 320px;min-width:0;display:flex;flex-direction:column;gap:14px}
+.v32Panel{background:#10161D;border:1px solid #1D2630;border-radius:16px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.v32PanelHead{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.v32PanelHead h2{margin:0;font-size:15px;font-weight:700}
+.v32Link{border:0;background:none;color:#9CC3FF;font:inherit;font-size:13px;cursor:pointer}
+.v32Cards{display:flex;flex-direction:column;gap:12px}
+.v32Card{background:#10161D;border:1px solid #1D2630;border-radius:16px;padding:16px 18px 16px 20px;display:grid;grid-template-columns:minmax(140px,185px) minmax(0,1fr) minmax(180px,220px);gap:20px;align-items:start;position:relative;overflow:hidden}
+.v32Card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--edge,#3DD68C)}
+.v32Tick{font-size:21px;font-weight:600}.v32Dir{font-size:11px;font-weight:700;padding:3px 7px;border-radius:6px;margin-left:8px}
+.v32Dir.long{color:#3DD68C;background:#10261C}.v32Dir.short{color:#FF8A78;background:#2A1512}
+.v32Lane{font-size:13px;color:#B7C2CF;margin-top:4px}.v32Status{font-size:12px;font-weight:600;margin-top:4px}
+.v32Sum{font-size:14px;color:#D5DDE6}
+.v32Ladder{position:relative;height:36px;margin-top:10px}
+.v32Ladder .trk{position:absolute;left:0;right:0;top:16px;height:4px;border-radius:4px;background:#1A2330}
+.v32Ladder .rw,.v32Ladder .rk{position:absolute;top:16px;height:4px;border-radius:4px}
+.v32Ladder .mk{position:absolute;top:0;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px}
+.v32Ladder .mk span{font-size:10.5px;white-space:nowrap}.v32Ladder .mk i{width:2px;height:14px;border-radius:2px;margin-top:1px}
+.v32Chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}.v32Chips span{font-size:12px;padding:3px 8px;border-radius:6px;background:#151D27;color:#B7C2CF}
+.v32Right{display:flex;flex-direction:column;gap:8px}
+.v32RR{display:flex;justify-content:space-between;align-items:baseline}.v32RR b{font-size:18px}
+.v32Contract{background:#0B0F14;border:1px solid #1D2630;border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:3px;font-size:12px}
+.v32Contract b{font-size:13px}.v32Juiced{font-size:11px;font-weight:700;color:#F2B84B}
+.v32Btns{display:flex;gap:6px}
+.v32Btn{min-height:40px;padding:0 12px;border-radius:9px;border:1px solid #263140;background:#151D27;color:#E6EDF3;font:inherit;font-weight:600;cursor:pointer}
+.v32Go{border-color:#2A6B4D;background:#123224;color:#7FF0B6}.v32Btn.grow{flex:1}
+.v32More{grid-column:1/-1;border-top:1px solid #1A2330;padding-top:10px;font-size:13px;color:#B7C2CF}
+.v32More summary{cursor:pointer;color:#8B97A6}.v32More ul{margin:6px 0 0 18px;padding:0}.v32More li{margin:2px 0}
+.v32LogForm{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}.v32LogForm input{width:72px;min-height:34px;padding:0 8px;background:#0B0F14;border:1px solid #263140;border-radius:8px;color:#E6EDF3}
+.v32Filtered{background:#0E131A;border:1px dashed #263140;border-radius:12px;padding:12px 16px;color:#8B97A6;font-size:13px}.v32Filtered summary{cursor:pointer}.v32Filtered p{margin:8px 0 0}
+.v32Empty{border:1px dashed #263140;border-radius:12px;padding:16px;color:#8B97A6;font-size:13px;text-align:center}
+.v32Table{width:100%;border-collapse:collapse;font-size:13px}.v32Table th{font-size:11px;color:#8B97A6;text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid #1D2630}
+.v32Table td{padding:8px;border-bottom:1px solid #151D27}
+.v32SecRow{cursor:pointer}.v32SecRow:hover td{background:#131B24}.v32SecRow.sel td{background:#17222E}.v32SecRow.dim{opacity:.45}
+.v32SecRow:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
+.v32Q{font-size:12px;font-weight:600}
+.v32Pill{display:inline-block;font-size:11px;font-weight:800;letter-spacing:.04em;padding:4px 9px;border-radius:999px;border:1px solid currentColor}
+.v32Prog{height:6px;border-radius:6px;background:#1A2330;position:relative;margin:8px 0}.v32Prog i{position:absolute;left:0;top:0;bottom:0;border-radius:6px}
+.v32Row{display:flex;flex-wrap:wrap;align-items:end;gap:10px}
+.v32Label,.v32Field{display:flex;flex-direction:column;gap:5px;font-size:12px;color:#8B97A6}
+.v32Field input{width:auto;min-width:90px}
+.v32Legs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.v32Leg{background:#0B0F14;border:1px solid #1D2630;border-radius:12px;padding:11px;display:flex;flex-direction:column;gap:3px;font-size:12px}
+/* moved legacy panels restyled */
+#v32RrgHost .panel{background:transparent;border:0;box-shadow:none;padding:0;margin:0}
+#v32RrgHost canvas{width:100%!important}
+#v32EarnHost .panel{background:#10161D;border:1px solid #1D2630;border-radius:16px;box-shadow:none}
+.v32Bottom{display:none}
+@media (max-width:860px){
+ .v32Card{grid-template-columns:1fr;gap:12px}.v32Tape{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .v32Nav,.v32Budget,#v32DataDate{display:none}.v32HeaderIn{padding:10px 16px}.v32Main{padding:16px 14px 90px}
+ .v32Seg{margin-left:0;width:100%}.v32Seg button{flex:1;min-height:44px}
+ .v32Bottom{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));position:fixed;left:0;right:0;bottom:0;z-index:60;background:#0D1218;border-top:1px solid #1D2630}
+ .v32Bottom button{min-height:58px;border:0;background:transparent;color:#8B97A6;font:inherit;font-size:12px}.v32Bottom button.on{color:#E6EDF3;font-weight:700}
+}
+</style>
 <div class="wrap">
+<div id="v32App">
+<header class="v32Header">
+ <div class="v32HeaderIn">
+  <div class="v32Brand"><svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><rect x="1" y="1" width="24" height="24" rx="7" fill="none" stroke="#3DD68C" stroke-width="1.6"></rect><path d="M7 17l4-4 3 3 5-6" fill="none" stroke="#3DD68C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg><span>Rotation Screener</span></div>
+  <nav class="v32Nav" aria-label="Main">
+   <button type="button" data-v32-nav="tonight">Tonight</button>
+   <button type="button" data-v32-nav="rotation">Rotation</button>
+   <button type="button" data-v32-nav="positions">Positions</button>
+   <button type="button" data-v32-nav="earnings">Earnings</button>
+   <button type="button" data-v32-nav="record">Track record</button>
+   <details class="v32Tools"><summary>Tools</summary><div class="v32ToolsMenu">
+    <button type="button" data-v32-tool="rotation">Sector stocks &amp; charts</button>
+    <button type="button" data-v32-tool="options">Options scanner</button>
+    <button type="button" data-v32-tool="gexpage">GEX landscape</button>
+    <button type="button" data-v32-tool="heatmap">Heat map</button>
+    <button type="button" data-v32-tool="watch">Watchlist</button>
+    <button type="button" data-v32-tool="news">News &amp; signals</button>
+   </div></details>
+  </nav>
+  <div class="v32Meta">
+   <span id="v32DataDate" class="v32Muted">Loading market…</span>
+   <label class="v32Budget">Max / contract <input id="v32Budget" class="v32Num" type="number" min="25" step="25" inputmode="numeric"></label>
+   <button type="button" class="v32Ghost" id="v32Refresh" aria-label="Refresh market data">↻</button>
+  </div>
+ </div>
+</header>
+
+<section class="v32View" data-v32="tonight" hidden>
+ <div class="v32Main">
+  <div class="v32Tape" id="v32Tape"></div>
+  <div class="v32Groups" id="v32Groups"></div>
+  <div class="v32Split">
+   <section class="v32Plan">
+    <div class="v32Title"><h1>Tonight's plan</h1><span id="v32PlanSub" class="v32Muted"></span>
+     <div class="v32Seg" role="group" aria-label="Filter ideas">
+      <button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button>
+     </div>
+    </div>
+    <div id="v32Cards" class="v32Cards"></div>
+    <details id="v32Filtered" class="v32Filtered" hidden><summary></summary><p></p></details>
+   </section>
+   <aside class="v32Side">
+    <section class="v32Panel"><div class="v32PanelHead"><h2>My positions</h2><button type="button" class="v32Link" data-v32-nav="positions">Open</button></div><div id="v32PosMini"></div></section>
+    <section class="v32Panel"><div class="v32PanelHead"><h2>Track record</h2><button type="button" class="v32Link" data-v32-nav="record">Open</button></div><div id="v32RecMini" class="v32Muted">Loading…</div></section>
+    <section class="v32Panel"><div class="v32PanelHead"><h2>Post-earnings strangles</h2><button type="button" class="v32Link" data-v32-nav="earnings">Open</button></div><div class="v32Muted">Exit the leg that's up 150–200%.</div></section>
+   </aside>
+  </div>
+ </div>
+</section>
+
+<section class="v32View" data-v32="rotation" hidden>
+ <div class="v32Main">
+  <div class="v32Title"><h1>Where money is rotating</h1><span class="v32Muted">Click a sector in the table or on the map to focus it · click again to show all</span></div>
+  <div class="v32Split">
+   <section class="v32Panel v32RrgPanel"><div id="v32RrgHost"></div></section>
+   <aside class="v32Side">
+    <section class="v32Panel"><div class="v32PanelHead"><h2>Sectors</h2><span class="v32Muted">Early · Confirmed</span></div><div id="v32SectorTable"></div><div id="v32SectorSelected"></div></section>
+   </aside>
+  </div>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>Laggard catch-up</h2><span class="v32Muted">Move with a rotating-in group but haven't caught up yet</span></div><div id="v32Laggards" class="v32Cards"></div></section>
+ </div>
+</section>
+
+<section class="v32View" data-v32="positions" hidden>
+ <div class="v32Main"><div class="v32Title"><h1>My positions</h1><span class="v32Muted" id="v32PosSub"></span><button type="button" class="v32Ghost" onclick="v30LoadPositions()">↻ Refresh marks</button></div>
+  <div id="v32PosSummary" class="v32Tape"></div><div id="v32PosList" class="v32Cards"></div><div id="v32PosAdd"></div></div>
+</section>
+
+<section class="v32View" data-v32="earnings" hidden>
+ <div class="v32Main"><div class="v32Title"><h1>Post-earnings movers</h1><span class="v32Muted">Scan reporters, then plan a strangle</span></div>
+  <div class="v32Split"><section class="v32EarnHost" id="v32EarnHost"></section>
+   <aside class="v32Side"><section class="v32Panel v32Strangle"><div class="v32PanelHead"><h2>Strangle planner</h2></div>
+    <form id="v32StrangleForm" class="v32Row"><label class="v32Label">Ticker <input id="v32StrangleTicker" class="v32Num" placeholder="NVDA" autocomplete="off"></label><button type="submit" class="v32Btn v32Go">Plan</button></form>
+    <div id="v32StrangleOut" class="v32Muted">Pick a reporter's “Plan strangle”, or type a ticker.</div></section></aside></div></div>
+</section>
+
+<section class="v32View" data-v32="record" hidden>
+ <div class="v32Main"><div class="v32Title"><h1>Does the screener work?</h1><span class="v32Muted">Every setup the board shows is logged once a day and graded against its own plan</span></div>
+  <div id="v32RecLanes" class="v32Tape"></div><section class="v32Panel"><div class="v32PanelHead"><h2>Recent setups</h2><span class="v32Muted">Filled → stop or target first · ties count as the stop</span></div><div id="v32RecRows"></div></section>
+  <section class="v32Panel" id="v32RecMine"></section></div>
+</section>
+
+<nav class="v32Bottom" aria-label="Main">
+ <button type="button" data-v32-nav="tonight">Tonight</button><button type="button" data-v32-nav="rotation">Rotation</button><button type="button" data-v32-nav="positions">Positions</button><button type="button" data-v32-nav="earnings">Earnings</button><button type="button" data-v32-nav="record">Record</button>
+</nav>
+</div>
+
 <header class="appHeader">
   <div class="brand"><div class="brandMark">↗</div><div class="brandText"><b>MARKET ROTATION SCREENER</b><span>ROTATION · POSITIONING · OPTIONS</span></div></div>
   <nav class="tabs appNav">
@@ -8280,7 +8537,7 @@ function applyMarketPayload(j,fromCache=false){
  installRRGTimelineHandlers();
  const st=document.getElementById("mstatus");
  if(st) st.textContent=fromCache?`Cached · through ${j.asof||"—"}`:(j.stale?`Refresh source unavailable — showing last good data through ${j.asof}`:`Through ${j.asof}`);
- const i=j.internals||{};window.__marketPayload=j;
+ const i=j.internals||{};window.__marketPayload=j;setTimeout(()=>{try{v32RenderTonight()}catch(e){}},0);
 
  const arrow=v=>v==null?"→":v>0?"↑":v<0?"↓":"→";
  const tone=v=>v==null?"":v>0?"up":v<0?"down":"";
@@ -11610,6 +11867,299 @@ const v30Style=document.createElement("style");v30Style.textContent=`
 .v30LagCard{border-color:#1d3b2f;background:#07100c}`;document.head.appendChild(v30Style);
 setTimeout(()=>{v30LoadPositions();},1200);
 setInterval(()=>{if(document.visibilityState==="visible")v30LoadPositions();},5*60*1000);
+
+// ===========================================================================
+// v32 REDESIGN SHELL
+// A new header/navigation and five views (Tonight, Rotation, Positions,
+// Earnings, Track record) rendered from the existing engine's state. All
+// scanning, scoring and plan logic underneath is unchanged; the live RRG panel
+// and the earnings scanner are moved into the new views as-is. Tools opens the
+// classic panels (sector drill-down, options, GEX, heat map, watchlist, news).
+// ===========================================================================
+document.body.classList.add("v32");
+let v32Filter="all";
+function v32E(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
+function v32$(v,d=2){const n=Number(v);if(!Number.isFinite(n))return "—";return "$"+(Math.abs(n)>=1000?n.toLocaleString("en-US",{minimumFractionDigits:d,maximumFractionDigits:d}):n.toFixed(d))}
+function v32Pct(v,d=2){const n=Number(v);return Number.isFinite(n)?`${n>0?"+":""}${n.toFixed(d)}%`:"—"}
+const V32_TONE={long:"#3DD68C",short:"#FF8A78",wait:"#F2B84B",lag:"#7AA7FF",muted:"#8B97A6"};
+
+function v32Show(name,tool){
+ const classic=name==="tools";
+ document.body.classList.toggle("v32-classic",classic);
+ document.querySelectorAll(".v32View").forEach(v=>v.hidden=classic||v.dataset.v32!==name);
+ document.querySelectorAll("[data-v32-nav]").forEach(b=>b.classList.toggle("on",!classic&&b.dataset.v32Nav===name));
+ document.querySelectorAll(".v32Tools").forEach(d=>d.open=false);
+ if(!classic)try{localStorage.setItem("v32View",name)}catch(e){}
+ if(name==="rotation"){v32MountRotation();setTimeout(()=>{window.dispatchEvent(new Event("resize"));v32RenderSectors()},60);try{v32RenderLaggardsInto("v32Laggards")}catch(e){}}
+ if(name==="earnings")v32MountEarnings();
+ if(name==="record"){try{v29LoadTrackRecord()}catch(e){}}
+ if(name==="positions"){try{v30LoadPositions()}catch(e){}}
+ if(name==="tonight")v32RenderTonight();
+ window.scrollTo(0,0);
+}
+function v32OpenTool(tool){
+ const map={rotation:"rotation",options:"rotation",watch:"rotation",news:"rotation",gexpage:"gexpage",heatmap:"heatmap"};
+ v32Show("tools");activateViewById(map[tool]||"rotation");
+ const target={options:"optionsPanel",watch:"watchlistPanel",news:"newsContextPanel"}[tool];
+ if(target)setTimeout(()=>document.getElementById(target)?.scrollIntoView(true),80);
+}
+document.addEventListener("click",ev=>{
+ const t=ev.target;if(!t||!t.closest)return;
+ const nav=t.closest("[data-v32-nav]");if(nav){ev.preventDefault();v32Show(nav.dataset.v32Nav);return;}
+ const tool=t.closest("[data-v32-tool]");if(tool){ev.preventDefault();v32OpenTool(tool.dataset.v32Tool);return;}
+ const f=t.closest("[data-v32-filter]");if(f){v32Filter=f.dataset.v32Filter;document.querySelectorAll("[data-v32-filter]").forEach(b=>b.classList.toggle("on",b===f));v32RenderTonight();return;}
+ const chart=t.closest("[data-v32-chart]");if(chart){ev.preventDefault();v32Show("tools");activateViewById("rotation");try{openTopSetupDeepDive(chart.dataset.v32Chart,chart.dataset.parent||null,"chart")}catch(e){}return;}
+ const lg=t.closest("[data-v32-logtoggle]");if(lg){ev.preventDefault();const fm=document.querySelector(`[data-v30-form="${CSS.escape(lg.dataset.v32Logtoggle)}"]`);if(fm)fm.hidden=!fm.hidden;return;}
+ const sp=t.closest("[data-v32-strangle]");if(sp){ev.preventDefault();ev.stopPropagation();v32Show("earnings");v32PlanStrangle(sp.dataset.v32Strangle);return;}
+ const row=t.closest("[data-v32-sector]");if(row){ev.preventDefault();v32ToggleSector(row.dataset.v32Sector);return;}
+ const hold=t.closest("[data-v32-holdings]");if(hold){ev.preventDefault();const s=hold.dataset.v32Holdings;v32Show("tools");activateViewById("rotation");try{selectSector(s,{source:"rrg"})}catch(e){}return;}
+},true);
+document.addEventListener("keydown",ev=>{const row=ev.target?.closest?.("[data-v32-sector]");if(row&&(ev.key==="Enter"||ev.key===" ")){ev.preventDefault();v32ToggleSector(row.dataset.v32Sector);}});
+
+// ---- header: budget, refresh, data date ---------------------------------------
+(function(){
+ const b=document.getElementById("v32Budget");
+ if(b){b.value=v26Budget();b.addEventListener("change",()=>{const n=Math.max(25,Number(b.value)||250);b.value=n;try{localStorage.setItem(V26_BUDGET_KEY,String(n))}catch(e){}
+   const old=document.getElementById("v26BudgetInput");if(old){old.value=n;old.dispatchEvent(new Event("change",{bubbles:true}));}else{renderTopSetups();setTimeout(()=>{v28HydrateEntryPlans();v30LoadLaggards();},50);}
+   v32RenderTonight();});}
+ document.getElementById("v32Refresh")?.addEventListener("click",()=>document.getElementById("dashRefreshMarket")?.click());
+})();
+function v32RenderMeta(){
+ const el=document.getElementById("v32DataDate");if(!el)return;
+ const m=window.__marketPayload,n=window.__nightly;
+ const d=m?.asof?new Date(m.asof+"T12:00:00").toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"}):"—";
+ const nt=n?.finished?` · nightly scan ${String(n.finished).slice(11,16)} ET`:"";
+ el.textContent=`Data through ${d}${nt}`;
+}
+
+// ---- Tonight -------------------------------------------------------------------
+function v32RenderTape(){
+ const el=document.getElementById("v32Tape");if(!el)return;
+ const m=window.__marketPayload||{},i=m.internals||{},r=v28Regime();
+ const col=r.state==="Risk-Off"?"#FF8A78":r.state==="Caution"?"#F2B84B":r.state==="Supportive"?"#3DD68C":"#8B97A6";
+ const spy=i.SPY||{},vix=i.VIX||{},cr=i.CREDIT||{};
+ const tile=(k,v,s)=>`<div class="v32Tile"><span class="k">${k}</span><span class="v">${v}</span><span class="s">${s}</span></div>`;
+ el.innerHTML=tile("Tape",`<span style="color:${col}">${v32E(r.state)}</span>`,r.state==="Risk-Off"?"Calls lose points · size down":r.state==="Caution"?"Be selective":"Supportive for longs")
+  +tile("SPY",`<span class="v32Num">${spy.value!=null?Number(spy.value).toFixed(2):"—"}</span> <span class="v32Num" style="font-size:14px;color:${Number(spy.d1)>=0?"#3DD68C":"#FF8A78"}">${v32Pct(spy.d1)}</span>`,`<span class="v32Num">${v32Pct(spy.d5)} 5d · ${v32Pct(spy.d20)} 20d</span>`)
+  +tile("VIX",`<span class="v32Num">${vix.value!=null?Number(vix.value).toFixed(2):"—"}</span> <span class="v32Num" style="font-size:14px;color:${Number(vix.d5)>0?"#FF8A78":"#3DD68C"}">${v32Pct(vix.d5,0)} 5d</span>`,Number(vix.value)>=25?"Premiums elevated":"Premiums normal")
+  +tile("Credit · HYG/LQD",`<span class="v32Num">${v32Pct(cr.d5)}</span> <span style="font-size:14px;color:#8B97A6">5d</span>`,`<span class="v32Num">${v32Pct(cr.d20)} 20d</span> · ${Number(cr.d5)<0?"spreads widening":"spreads stable"}`);
+ const g=document.getElementById("v32Groups");
+ if(g){let groups=[];try{groups=v30SupportiveGroups()}catch(e){}
+   g.innerHTML=groups.length?`<span class="v32Muted">Money rotating into</span>`+groups.slice(0,12).map(t=>`<span class="v32Chip v32Num">${v32E(t)}</span>`).join(""):"";}
+}
+function v32Ladder(dir,stop,entry,target,now){
+ const vals=[stop,entry,target].concat(now!=null?[now]:[]).map(Number).filter(Number.isFinite);if(vals.length<3)return "";
+ const lo=Math.min(...vals),hi=Math.max(...vals),pad=(hi-lo)*.08||1,a=lo-pad,b=hi+pad,p=v=>Math.round((v-a)/(b-a)*1000)/10;
+ const e=p(entry),t=p(target),s=p(stop),long=dir!=="bearish";
+ const mk=(v,l,c)=>`<div class="mk" style="left:${p(v)}%"><span class="v32Num" style="color:${c}">${l} ${v32$(v)}</span><i style="background:${c}"></i></div>`;
+ return `<div class="v32Ladder" role="img" aria-label="Stop ${v32$(stop)}, entry ${v32$(entry)}, target ${v32$(target)}${now!=null?`, now ${v32$(now)}`:""}"><div class="trk"></div>
+  <div class="rw" style="left:${Math.min(e,t)}%;width:${Math.abs(t-e)}%;background:${long?"#1F6B47":"#7A3328"}"></div><div class="rk" style="left:${Math.min(e,s)}%;width:${Math.abs(e-s)}%;background:#5A3A3A"></div>
+  ${mk(stop,"stop","#FF8A78")}${mk(entry,"entry","#E6EDF3")}${mk(target,"target","#3DD68C")}${now!=null?mk(now,"now","#F2B84B"):""}</div>`;
+}
+function v32LogPieces(p,lane){
+ const z=p?.single;if(!p?.available||!z)return {id:null,form:"",rules:""};
+ const id=`${p.ticker}|${p.direction}|${p.plan}|${Math.random().toString(36).slice(2,8)}`;
+ window.v30PlanRegistry[id]={p,lane};
+ const rules=(p.exit_plan?.rules||[]).map(r=>`<li>${v32E(r)}</li>`).join("");
+ const form=`<span class="v32LogForm" data-v30-form="${v32E(id)}" hidden>fill $<input type="number" step="0.01" min="0.01" value="${Number(z.entry_premium).toFixed(2)}" data-v30-fill aria-label="Fill price"> qty <input type="number" step="1" min="1" value="1" data-v30-qty aria-label="Quantity"> <button type="button" class="v32Btn v32Go" data-v30-save="${v32E(id)}">Save</button> <span class="v32Muted" data-v30-msg="${v32E(id)}"></span></span>`;
+ return {id,form,rules};
+}
+function v32Status(p,mode){
+ if(!p||p._loading)return {t:"Modeling contracts…",c:V32_TONE.muted,edge:V32_TONE.muted};
+ if(!p.available)return {t:p.reason||"No plan",c:V32_TONE.muted,edge:V32_TONE.muted};
+ const u=p.underlying||{},z=v28Pick(p),bear=p.direction==="bearish";
+ if(!z)return {t:`Over budget · cheapest ${v32$(p.cheapest_single_cost,0)}`,c:V32_TONE.short,edge:V32_TONE.wait};
+ if(p.juiced&&!u.in_zone)return {t:"Wait · premium juiced",c:V32_TONE.wait,edge:V32_TONE.wait};
+ const limit=p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone);
+ if(limit&&!u.in_zone)return {t:`Wait for ${v32$(u.entry)}`,c:V32_TONE.wait,edge:V32_TONE.wait};
+ if(limit&&u.in_zone)return {t:"In the entry zone now",c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
+ return {t:`Trigger set · ${bear?"2D below":"2U above"} ${v32$(u.entry)}`,c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
+}
+function v32CardHTML(c){
+ const p=c.plan,u=p?.underlying||{},z=v28Pick(p),st=v32Status(p,c.mode),bear=c.dir==="bearish",lp=v32LogPieces(p,c.lane);
+ const contract=z?`<b class="v32Num">${v32E(v28ContractLabel(z))}</b><span class="v32Num" style="color:${Number(z.cost)<=Number(p.budget)?"#8B97A6":"#FF8A78"}">≈ ${v32$(z.entry_premium)} (${v32$(z.cost,0)}) · ${v32$(z.premium_at_target)} at target</span>`
+   :(p?.available?`<b>No contract under ${v32$(p.budget,0)}</b><span class="v32Num" style="color:#FF8A78">Cheapest ≈ ${v32$(p.cheapest_single_cost,0)}</span>`:`<b>Contract</b><span class="v32Muted">${p&&p._loading?"loading…":"unavailable"}</span>`);
+ const vs=c.vs,v=vs?.vp,ft=vs?.strat?.ftfc;
+ const more=[];
+ if(lp.rules)more.push(`<b>Exit plan</b><ul>${lp.rules}</ul>`);
+ if(v?.available)more.push(`<div><b>VP</b> 20-session POC ${v32$(v.poc)} · VA ${v32$(v.val)}–${v32$(v.vah)}${v.prior_week?` · prior-week VA ${v32$(v.prior_week.val)}–${v32$(v.prior_week.vah)}`:""}</div>`);
+ if(ft?.frames)more.push(`<div><b>STRAT</b> ${(vs.strat.frames||[]).map(f=>`${f.timeframe} ${f.scenario}`).join(" · ")} · FTFC ${ft.state}</div>`);
+ if(p?.notes?.length)more.push(`<div>${p.notes.map(v32E).join(" ")}</div>`);
+ return `<article class="v32Card" style="--edge:${st.edge}" data-dir="${bear?"short":"long"}" data-lane="${v32E(c.kind)}">
+  <div><div><span class="v32Tick v32Num">${v32E(c.ticker)}</span><span class="v32Dir ${bear?"short":"long"}">${bear?"SHORT":"LONG"}</span></div>
+   <div class="v32Lane">${v32E(c.laneLabel)}${c.parent?` · ${v32E(c.parent)}`:""}</div><div class="v32Status" style="color:${st.c}">${v32E(st.t)}</div></div>
+  <div style="min-width:0"><div class="v32Sum">${v32E(c.summary)}</div>${u.entry!=null?v32Ladder(c.dir,u.stop,u.entry,u.target,p?.spot):""}
+   <div class="v32Chips">${(c.chips||[]).slice(0,3).map(x=>`<span>${v32E(x)}</span>`).join("")}</div></div>
+  <div class="v32Right"><div class="v32RR"><span class="v32Muted">Reward / risk</span><b class="v32Num">${u.rr!=null?Number(u.rr).toFixed(1):"—"}</b></div>
+   <div class="v32Contract">${contract}${p?.juiced?`<span class="v32Juiced">PREMIUM JUICED${p.iv?.atm_iv!=null?` · IV ≈ ${Number(p.iv.atm_iv).toFixed(0)}%`:""}</span>`:""}</div>
+   <div class="v32Btns">${lp.id?`<button type="button" class="v32Btn v32Go grow" data-v32-logtoggle="${v32E(lp.id)}">Log trade</button>`:`<button type="button" class="v32Btn grow" disabled>Log trade</button>`}<button type="button" class="v32Btn" data-v32-chart="${v32E(c.ticker)}" data-parent="${v32E(c.parent||"")}">Chart</button></div>${lp.form}</div>
+  ${more.length?`<details class="v32More"><summary>Plan details</summary>${more.join("")}</details>`:""}
+ </article>`;
+}
+function v32CollectIdeas(){
+ const ideas=[],filtered=[];
+ (globalTopSetupData||[]).slice(0,10).forEach(x=>{
+   const e=topSetupEvaluation(x),vs=institutionalContextMap[x.ticker]?.vp_strat;
+   if(e.hardPass&&e.qualificationScore>=45&&e.entryMode){
+     const p=v28PlanFor(x.ticker,e.direction,e.entryMode);
+     const lane={vp:"Volume profile + STRAT",pullback:"Pullback",breakout:"Breakout"}[e.entryMode]||"Setup";
+     ideas.push({ticker:x.ticker,parent:x._parentTicker,dir:e.direction,kind:"setup",lane:e.entryMode,laneLabel:lane,plan:p,vs,score:e.score,
+       summary:p?.vp_plan?.trigger?p.vp_plan.trigger.charAt(0).toUpperCase()+p.vp_plan.trigger.slice(1)+".":(e.entryMode==="pullback"?"Rotating in, but let it come back to the 20-day.":"Rotating in with a valid breakout plan."),
+       chips:(e.reasons||[]).map(r=>r[0])});
+   }else if((e.gateFailures||[]).some(g=>/downtrend/i.test(g)))filtered.push(x.ticker);
+   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR){
+     const ct=e.counter,p=v28PlanFor(x.ticker,ct.direction,ct.plan||"rejection");
+     ideas.push({ticker:x.ticker,parent:x._parentTicker,dir:ct.direction,kind:"counter",lane:ct.lane||"rejection",laneLabel:ct.type==="vp_strat_reversal"?"VP + STRAT reversal":(ct.type==="supply_rejection"?"Supply rejection":"Demand hold"),plan:p,vs,score:(e.score||0)-5,
+       summary:ct.type==="vp_strat_reversal"?`${ct.signal?.detail||ct.signal?.type} · ${ct.direction==="bearish"?"capped by":"holding"} the ${ct.level_name} at ${v32$(ct.level)}.`:`${ct.bar_date}: tested the prior 1-year ${ct.type==="supply_rejection"?"high":"low"} zone (${v32$(ct.level)}) and closed in the ${ct.type==="supply_rejection"?"bottom":"top"} of its range.`,
+       chips:[ct.signal?`${ct.signal.timeframe} ${ct.signal.type}`:null,ct.level_name?`${ct.level_name} ${v32$(ct.level)}`:null,"Against the rotation"].filter(Boolean)});
+   }
+ });
+ (window.__laggards?.rows||[]).forEach(m=>{
+   ideas.push({ticker:m.ticker,parent:m.parent,dir:"bullish",kind:"laggard",lane:"laggard",laneLabel:"Laggard catch-up",plan:m.entry_plan,vs:m.vp_strat,score:m.score,
+     summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)} · relative line ${v32Pct(m.rs_turn_5d,1)} last 5d.`,
+     chips:[`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)});
+ });
+ return {ideas,filtered};
+}
+function v32RenderTonight(){
+ try{v32RenderMeta();v32RenderTape();}catch(e){}
+ const host=document.getElementById("v32Cards");if(!host)return;
+ const {ideas,filtered}=v32CollectIdeas();
+ const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard"));
+ const st=document.getElementById("topSetupsStatus")?.textContent||"";
+ const sub=document.getElementById("v32PlanSub");
+ if(sub)sub.textContent=automaticTopSetupsRunning?st:`${ideas.length} idea${ideas.length===1?"":"s"}${ideas.length&&!ideas.some(c=>c.kind==="setup")?" · no clean rotation long in this tape":""}`;
+ const scanned=!!automaticTopSetupsLastRun||(globalTopSetupData||[]).length>0;
+ host.innerHTML=shown.length?shown.map(v32CardHTML).join(""):`<div class="v32Empty">${automaticTopSetupsRunning?v32E(st||"Scanning…"):ideas.length?"Nothing in this filter.":!scanned?(automaticTopSetupsError?`Scan didn't finish: ${v32E(automaticTopSetupsError.message)} · it retries on refresh.`:"Waiting for market data and the first scan…"):"No setups right now. The scan ran — nothing passed the trend, reward/risk and budget checks."}</div>`;
+ const fd=document.getElementById("v32Filtered");
+ if(fd){fd.hidden=!filtered.length;if(filtered.length){fd.querySelector("summary").textContent=`${filtered.length} name${filtered.length===1?"":"s"} filtered out · ${filtered.join(", ")}`;fd.querySelector("p").textContent="In absolute downtrends. They only looked like they were rotating in because they fell less than their group.";}}
+ v32RenderPosMini();v32RenderRecMini();
+}
+new MutationObserver(()=>{if(automaticTopSetupsRunning){const s=document.getElementById("v32PlanSub");if(s)s.textContent=document.getElementById("topSetupsStatus")?.textContent||""}}).observe(document.getElementById("topSetupsStatus")||document.body,{childList:true,characterData:true,subtree:true});
+
+// ---- Positions (replaces the v30 panel) ------------------------------------------
+v30RenderPositions=function(){
+ const j=window.__positions||{},open=j.open||[];
+ const toneOf=s=>s==="EXIT"?"#FF8A78":s==="WATCH"?"#F2B84B":"#3DD68C";
+ const label=p=>p.kind==="strangle"?(()=>{const c=p.legs.find(l=>l.type==="call"),q=p.legs.find(l=>l.type==="put");return `${c?.expiration||""} $${q?.strike}P / $${c?.strike}C`})():`${p.legs[0]?.expiration} $${p.legs[0]?.strike}${p.legs[0]?.type==="put"?"P":"C"} ×${p.legs[0]?.qty}`;
+ const list=document.getElementById("v32PosList");
+ if(list)list.innerHTML=open.length?open.map(p=>{const L=p.live||{},col=toneOf(L.status),top=(L.alerts||[])[0]?.text||"On plan.";
+   const prog=Math.max(4,Math.min(100,Number(L.pnl_pct)>0?Number(L.pnl_pct)/(p.kind==="strangle"?2:1):6));
+   return `<article class="v32Card" style="--edge:${col}"><div><div><span class="v32Tick v32Num">${v32E(p.ticker)}</span><span class="v32Dir ${p.kind==="strangle"?"long":p.direction==="bearish"?"short":"long"}" style="${p.kind==="strangle"?"color:#7AA7FF;background:#121C2B":""}">${p.kind==="strangle"?"STRANGLE":p.direction==="bearish"?"PUT":"CALL"}</span></div>
+    <div class="v32Lane v32Num">${v32E(label(p))}</div><div class="v32Muted">Day ${L.sessions??0}</div></div>
+    <div><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span class="v32Pill" style="color:${col}">${v32E(L.status||"—")}</span><span class="v32Sum">${v32E(top)}</span></div>
+     <div class="v32Prog" role="img" aria-label="P/L progress"><i style="width:${prog}%;background:${col}"></i></div>
+     <div class="v32Muted">${(L.alerts||[]).slice(1).map(a=>v32E(a.text)).join(" · ")||v32E(((p.plan||{}).exit_plan?.rules||[]).slice(0,2).join(" · "))}</div></div>
+    <div class="v32Right"><div style="display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px">
+      <div><div class="v32Muted" style="font-size:11px">Fill</div><b class="v32Num">${v32$(L.fill)}</b></div><div><div class="v32Muted" style="font-size:11px">Mark</div><b class="v32Num">${L.mark==null?"—":v32$(L.mark)}</b></div>
+      <div><div class="v32Muted" style="font-size:11px">P/L</div><b class="v32Num" style="color:${Number(L.pnl_pct)>=0?"#3DD68C":"#FF8A78"}">${L.pnl_pct==null?"—":v32Pct(L.pnl_pct,1)}</b></div></div>
+     <div class="v32Btns">${p.kind==="single"?`<button type="button" class="v32Btn grow" data-v30-tp1="${p.id}" data-on="${p.state?.tp1_done?1:0}">${p.state?.tp1_done?"TP1 done ✓":"Mark TP1 done"}</button>`:""}<button type="button" class="v32Btn ${p.kind==="single"?"":"grow"}" data-v30-close="${p.id}">Close</button></div>
+     <span class="v32LogForm" data-v30-closeform="${p.id}" hidden>exit $<input type="number" step="0.01" min="0" value="${L.mark??""}" aria-label="Exit price"> <button type="button" class="v32Btn v32Go" data-v30-closesave="${p.id}">Save</button><span class="tiny"></span></span></div></article>`}).join(""):`<div class="v32Empty">No open positions. Use “Log trade” on a plan, or add one below — strangles included.</div>`;
+ const sm=j.summary||{},sum=document.getElementById("v32PosSummary"),needs=open.filter(p=>p.live?.status==="EXIT").length;
+ const openPL=open.reduce((a,p)=>a+(Number(p.live?.pnl_dollars)||0),0);
+ if(sum)sum.innerHTML=[["Open",open.length],["Needs action",`<span style="color:${needs?"#FF8A78":"inherit"}">${needs}</span>`],["Open P/L",`<span style="color:${openPL>=0?"#3DD68C":"#FF8A78"}">${openPL>=0?"+":"−"}$${Math.abs(openPL).toFixed(0)}</span>`],["Closed · win rate",sm.closed?`${sm.closed} · ${sm.win_rate}%`:"—"]].map(([k,v])=>`<div class="v32Tile"><span class="k">${k}</span><span class="v v32Num">${v}</span></div>`).join("");
+ const ps=document.getElementById("v32PosSub");if(ps)ps.textContent=`Marks from ${j.feed||"Alpaca"} (indicative) · refresh every 5 min${j.mark_error?` · marks unavailable: ${j.mark_error}`:""}`;
+ const add=document.getElementById("v32PosAdd");
+ if(add&&!document.getElementById("v30AddForm"))add.innerHTML=`<section class="v32Panel"><div class="v32PanelHead"><h2>Add a position</h2></div><div id="v30AddForm" class="v32Row">
+  <label class="v32Field">Type<select name="kind"><option value="call">Call</option><option value="put">Put</option><option value="strangle">Strangle</option></select></label>
+  <label class="v32Field">Ticker<input name="ticker" placeholder="NVDA" autocomplete="off"></label><label class="v32Field">Expiration<input name="expiration" type="date"></label>
+  <span class="v30Single v32Row"><label class="v32Field">Strike<input name="strike" type="number" step="0.5"></label><label class="v32Field">Fill $<input name="fill" type="number" step="0.01"></label></span>
+  <span class="v30Strangle v32Row" hidden><label class="v32Field">Put strike<input name="put_strike" type="number" step="0.5"></label><label class="v32Field">Put fill $<input name="put_fill" type="number" step="0.01"></label><label class="v32Field">Call strike<input name="call_strike" type="number" step="0.5"></label><label class="v32Field">Call fill $<input name="call_fill" type="number" step="0.01"></label></span>
+  <label class="v32Field">Qty<input name="qty" type="number" min="1" value="1"></label><button type="button" class="v32Btn v32Go" id="v30AddSave">Add</button><span class="v32Muted v30AddMsg"></span></div>
+  <div class="v32Muted">Directional: half at +50%, rest at +100%, stop −50%, 10-session time stop, out 14 days before expiry. Strangles: exit the leg that's up 150–200%, −35% combined stop, 5-session time stop, out 7 days before expiry.</div></section>`;
+ v32RenderPosMini();
+};
+function v32RenderPosMini(){
+ const el=document.getElementById("v32PosMini");if(!el)return;const open=window.__positions?.open||[];
+ el.innerHTML=open.length?open.slice(0,4).map(p=>{const L=p.live||{},col=L.status==="EXIT"?"#FF8A78":L.status==="WATCH"?"#F2B84B":"#3DD68C";return `<div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><span><b class="v32Num">${v32E(p.ticker)}</b> <span class="v32Muted">${p.kind}</span></span><span class="v32Pill" style="color:${col}">${v32E(L.status||"—")}</span></div>`}).join(""):`<div class="v32Empty">No open trades. Log one from a plan, or add a strangle by hand.</div>`;
+}
+
+// ---- Track record ----------------------------------------------------------------
+function v32RenderRecMini(){
+ const el=document.getElementById("v32RecMini");if(!el)return;const tr=window.__trackRecord;
+ if(!tr){el.textContent="Loading…";return}
+ el.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).slice(0,5).map(l=>`<div style="display:grid;grid-template-columns:minmax(0,1fr) 58px 58px;gap:8px;font-size:13px;color:#E6EDF3"><span>${v32E(l.lane)}</span><span class="v32Num" style="text-align:right">${l.win_rate==null?"—":l.win_rate+"%"}</span><span class="v32Num" style="text-align:right">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r+"R"}</span></div>`).join("")+`<div class="v32Muted" style="margin-top:6px">${tr.total} logged since ${tr.since}</div>`:"Results fill in as setups play out.";
+}
+function v32RenderRecord(){
+ const tr=window.__trackRecord;if(!tr)return;
+ const colors={pullback:"#F2B84B",vp:"#7AA7FF",vp_counter:"#7AA7FF",rejection:"#FF8A78",laggard:"#3DD68C",breakout:"#3DD68C"};
+ const lanes=document.getElementById("v32RecLanes");
+ if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
+  <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div></div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+ const rows=document.getElementById("v32RecRows");
+ if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
+ const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};
+ if(mine)mine.innerHTML=`<div class="v32PanelHead"><h2>My trades</h2></div><div class="v32Tape" style="grid-template-columns:repeat(3,minmax(0,1fr))">${[["Closed",mt.closed||0],["Directional · win / avg",mt.single?`${mt.single.win_rate}% · ${v32Pct(mt.single.avg_pnl_pct,1)}`:"—"],["Strangles · win / avg",mt.strangle?`${mt.strangle.win_rate}% · ${v32Pct(mt.strangle.avg_pnl_pct,1)}`:"—"]].map(([k,v])=>`<div class="v32Tile"><span class="k">${k}</span><span class="v v32Num">${v}</span></div>`).join("")}</div>`;
+ v32RenderRecMini();
+}
+const _v29RenderTrackRecordV32=v29RenderTrackRecord;
+v29RenderTrackRecord=function(){const o=_v29RenderTrackRecordV32();try{v32RenderRecord();v32RenderMeta()}catch(e){}return o};
+
+// ---- Rotation ----------------------------------------------------------------------
+let v32RrgMounted=false;
+function v32MountRotation(){
+ if(v32RrgMounted)return;const host=document.getElementById("v32RrgHost"),shell=document.querySelector(".rrgShell");
+ if(host&&shell){host.appendChild(shell);v32RrgMounted=true;}
+}
+function v32ToggleSector(t){try{toggleRRGFocus("sectorChart",t)}catch(e){}v32RenderSectors();}
+function v32RenderSectors(){
+ const el=document.getElementById("v32SectorTable");if(!el)return;
+ const st=rrgFocusState?.sectorChart,rows=st?.rows||[],sel=st?.selected||null;
+ const q=x=>x?.quadrant||"—",col=v=>({Leading:"#22c55e",Improving:"#38bdf8",Weakening:"#f59e0b",Lagging:"#ef4444"}[v]||"#8B97A6");
+ el.innerHTML=rows.length?`<table class="v32Table"><thead><tr><th>Sector</th><th>Early</th><th>Confirmed</th></tr></thead><tbody>${rows.map(r=>{const f=r.fast||r,t=r.trend||{};return `<tr class="v32SecRow ${sel===r.ticker?"sel":""} ${sel&&sel!==r.ticker?"dim":""}" data-v32-sector="${v32E(r.ticker)}" tabindex="0" aria-pressed="${sel===r.ticker}"><td><b class="v32Num">${v32E(r.ticker)}</b><div class="v32Muted" style="font-size:12px">${v32E(r.name||"")}</div></td><td class="v32Q" style="color:${col(q(f))}">${v32E(q(f))}</td><td class="v32Q" style="color:${col(q(t))}">${v32E(q(t))}</td></tr>`}).join("")}</tbody></table>`:`<div class="v32Muted">Loading rotation…</div>`;
+ const s=document.getElementById("v32SectorSelected");
+ if(s)s.innerHTML=sel?`<div class="v32Row" style="justify-content:space-between;align-items:center"><span><b class="v32Num">${v32E(sel)}</b> <span class="v32Muted">focused · click it again to show all</span></span><button type="button" class="v32Btn" data-v32-holdings="${v32E(sel)}">View holdings →</button></div>`:"";
+}
+const _drawRRGV32=drawRRG;
+drawRRG=function(id,rows,focus,fixed){const o=_drawRRGV32(id,rows,focus,fixed);if(id==="sectorChart"){try{v32RenderSectors()}catch(e){}}return o};
+function v32RenderLaggardsInto(id){
+ const el=document.getElementById(id);if(!el)return;const j=window.__laggards||{};
+ if(j.loading){el.innerHTML=`<div class="v32Empty">Screening rotating-in groups…</div>`;return}
+ const rows=j.rows||[];
+ el.innerHTML=rows.length?rows.map(m=>v32CardHTML({ticker:m.ticker,parent:m.parent,dir:"bullish",kind:"laggard",lane:"laggard",laneLabel:"Laggard catch-up",plan:m.entry_plan,vs:m.vp_strat,
+   summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)}.`,chips:[`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)})).join("")
+   :`<div class="v32Empty">${j.screened?`${j.screened} holdings screened · ${j.candidates} lagging · none with liquid options.`:"Runs after the board scan."}</div>`;
+}
+const _v30RenderLaggardsV32=v30RenderLaggards;
+v30RenderLaggards=function(){const o=_v30RenderLaggardsV32();try{v32RenderLaggardsInto("v32Laggards");v32RenderTonight()}catch(e){}return o};
+
+// ---- Earnings ----------------------------------------------------------------------
+let v32EarnMounted=false;
+function v32MountEarnings(){
+ if(v32EarnMounted)return;const host=document.getElementById("v32EarnHost"),src=document.getElementById("earnings");
+ if(host&&src){[...src.children].forEach(ch=>host.appendChild(ch));v32EarnMounted=true;}
+}
+const _renderEarningsV32=renderEarnings;
+renderEarnings=function(){const o=_renderEarningsV32.apply(this,arguments);try{document.querySelectorAll("#earnRows tr[data-pe-open]").forEach(tr=>{if(tr.querySelector("[data-v32-strangle]"))return;const td=tr.lastElementChild;if(td)td.insertAdjacentHTML("beforeend",`<div style="margin-top:6px"><button type="button" class="v32Btn" style="min-height:32px;font-size:12px" data-v32-strangle="${v32E(tr.dataset.peOpen)}">Plan strangle</button></div>`);});}catch(e){}return o};
+document.getElementById("v32StrangleForm")?.addEventListener("submit",ev=>{ev.preventDefault();const t=String(document.getElementById("v32StrangleTicker").value||"").toUpperCase().trim();if(t)v32PlanStrangle(t);});
+async function v32PlanStrangle(t){
+ const out=document.getElementById("v32StrangleOut"),inp=document.getElementById("v32StrangleTicker");if(inp)inp.value=t;if(!out)return;
+ out.innerHTML=`<span class="v32Muted">Pricing ${v32E(t)} strangle…</span>`;
+ try{
+   const j=await (await fetch(`/api/strangle-plan/${encodeURIComponent(t)}?budget=${encodeURIComponent(v26Budget())}`)).json();
+   if(!j.ok||!j.available){out.innerHTML=`<span class="v32Muted">${v32E(j.reason||j.error||"Unavailable")}</span>`;return}
+   window.__v32Strangle=j;
+   const leg=(L,lbl,c,mv)=>`<div class="v32Leg"><span style="font-size:11px;font-weight:700;color:${c}">${lbl}</span><b class="v32Num">${v32E(L.expiration)} $${Number(L.strike).toFixed(L.strike%1?1:0)}${L.type==="put"?"P":"C"}</b><span class="v32Num v32Muted">≈ ${v32$(L.mid)} · Δ ${Math.abs(Number(L.delta)).toFixed(2)}</span><span class="v32Num" style="color:${c}">+150% needs ${mv?`${v32$(mv.stock_price)} (${v32Pct(mv.move_pct,1)})`:"—"}</span></div>`;
+   out.innerHTML=`<div class="v32Muted v32Num">${v32E(j.ticker)} · spot ${v32$(j.spot)} · ${j.dte} DTE</div><div class="v32Legs">${leg(j.put,"PUT LEG","#FF8A78",j.put_move_for_150)}${leg(j.call,"CALL LEG","#3DD68C",j.call_move_for_150)}</div>
+    <div class="v32Contract" style="flex-direction:row;justify-content:space-between;align-items:baseline"><span class="v32Muted">Total cost</span><b class="v32Num" style="font-size:18px;color:${j.fits_budget?"#E6EDF3":"#FF8A78"}">${v32$(j.cost,0)} <span class="v32Muted" style="font-size:12px">of ${v32$(j.budget,0)}</span></b></div>
+    ${j.note?`<div style="color:#FF8A78;font-size:12px">${v32E(j.note)}</div>`:""}<ul style="margin:0 0 0 16px;padding:0;font-size:13px">${(j.rules||[]).map(r=>`<li>${v32E(r)}</li>`).join("")}</ul>
+    <div class="v32Btns"><button type="button" class="v32Btn v32Go grow" id="v32LogStrangle">Log strangle at these prices</button></div><span class="v32Muted" id="v32StrangleMsg"></span>
+    <div class="v32Muted" style="font-size:11px">Indicative quotes on the free feed — confirm the live bid/ask in your broker.</div>`;
+ }catch(e){out.innerHTML=`<span class="v32Muted">${v32E(e.message||e)}</span>`;}
+}
+document.addEventListener("click",async ev=>{
+ if(!ev.target?.closest?.("#v32LogStrangle"))return;const j=window.__v32Strangle,msg=document.getElementById("v32StrangleMsg");if(!j)return;
+ try{await v30PostJSON("/api/positions",{ticker:j.ticker,kind:"strangle",legs:[{symbol:j.call.symbol,type:"call",strike:j.call.strike,expiration:j.call.expiration,fill:j.call.mid,qty:1},{symbol:j.put.symbol,type:"put",strike:j.put.strike,expiration:j.put.expiration,fill:j.put.mid,qty:1}],plan:{lane:"post-earnings strangle"}});
+   if(msg)msg.textContent="Logged ✓ — edit fills in Positions if yours differ.";v30LoadPositions();}catch(e){if(msg)msg.textContent=e.message;}
+});
+
+// ---- wiring --------------------------------------------------------------------------
+const _renderTopSetupsV32=renderTopSetups;
+renderTopSetups=function(){const o=_renderTopSetupsV32();try{v32RenderTonight()}catch(e){console.warn("v32 tonight",e)}return o};
+const _v29LoadNightlyStatusV32=v29LoadNightlyStatus;
+v29LoadNightlyStatus=async function(){const o=await _v29LoadNightlyStatusV32();try{v32RenderMeta()}catch(e){}return o};
+(function(){let start="tonight";try{start=localStorage.getItem("v32View")||"tonight"}catch(e){}if(!["tonight","rotation","positions","earnings","record"].includes(start))start="tonight";v32Show(start);})();
 
 </script>
 """
