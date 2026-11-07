@@ -94,3 +94,17 @@ def test_nightly_guard_is_per_close(monkeypatch):
     appmod.NIGHTLY.update(running=False, started=1_000_000.0 + 60)       # already ran after the close
     assert c.post("/api/nightly/run").get_json()["started"] is False
     appmod.NIGHTLY.update(running=False, started=None)
+
+
+def test_outperformer_with_spiky_beta_is_not_a_laggard():
+    idx = pd.bdate_range("2026-05-01", periods=120)
+    rng = np.random.default_rng(5)
+    etf_r = rng.normal(.0015, .006, 120)
+    stock_r = etf_r * 5 + rng.normal(0, .01, 120)   # very high beta
+    etf = pd.Series(100 * np.exp(np.cumsum(etf_r)), index=idx)
+    stock = pd.Series(50 * np.exp(np.cumsum(stock_r)), index=idx)
+    m = appmod.laggard_metrics(stock, etf)
+    assert m["beta"] <= 2.0 and m["raw_beta"] > 2.0
+    # if it beat the group, it must not pass the laggard screen
+    if m["ret20"] >= m["group_ret20"]:
+        assert not (m["ret20"] < m["group_ret20"] and m["rs_lag_20d"] < 0)

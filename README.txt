@@ -1,3 +1,6 @@
+v30.2 — LAGGARD FIX
+- Laggards must have trailed their group in raw terms over 20 sessions (stock return below the group's, relative line down). Beta is clamped to 0.5–2.0. A news-spiked outperformer (MRNA: +13% vs IBB +3.5%, raw β 5.5) had been flagged as "behind".
+
 v30.1 — NIGHTLY GUARD PER CLOSE
 - /api/nightly/run now allows one run per market close (and never twice within 30 minutes). Previously, a manual run during the day blocked that afternoon's scheduled run through its 6-hour window.
 
