@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.2.1"
+APP_VERSION = "34.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5163,28 +5163,89 @@ def _volume_flow_20(df):
         return None
 
 
+def since_low_read(df, lookback=30):
+    """v34.3: read the bounce off the most recent swing low, not the whole 20 days.
+    - selling climax: the low (or a bar within 2 of it) printed on >= 1.8x the
+      50-day average volume after a real decline;
+    - bounce flow: up- vs down-day volume since the low;
+    - test: after the bounce, a pullback that holds above the low on light volume
+      (down-day volume since the bounce peak <= 0.6x the climax volume and <= the
+      50-day average) -- Coulling's "test" of the climax."""
+    try:
+        d=df.dropna(subset=["High","Low","Close"])
+        if len(d)<70: return None
+        h=d["High"].values.astype(float); l=d["Low"].values.astype(float); c=d["Close"].values.astype(float); v=d["Volume"].fillna(0).values.astype(float)
+        n=len(d); w0=n-lookback
+        li=w0+int(np.argmin(l[w0:]))
+        after=n-1-li
+        if after<3: return {"after":after,"climax":False,"test":False,"bounce_udr":None}
+        v50=float(v[max(0,li-50):li].mean()) if li>10 else float(v[:li+1].mean())
+        pre=c[max(0,li-10)]; decline=(pre-l[li])/pre if pre else 0
+        win=v[max(0,li-2):min(n,li+3)]
+        climax_vol=float(win.max()) if len(win) else 0.0
+        climax=bool(v50>0 and climax_vol>=1.8*v50 and decline>=.05)
+        cc,pc,vv=c[li+1:],c[li:-1],v[li+1:]
+        up=float(vv[cc>pc].sum()); dn=float(vv[cc<pc].sum())
+        udr=up/dn if dn>0 else (3.0 if up>0 else 1.0)
+        test=False
+        if climax and after>=5:
+            pk=li+1+int(np.argmax(h[li+1:]))
+            if pk<n-1:
+                seg=slice(pk+1,n); sc,sp,sv=c[seg],c[pk:n-1],v[seg]
+                dvol=sv[sc<sp]
+                held=float(l[pk+1:].min())>l[li]
+                pulled=float(c[-1])<float(h[pk])
+                test=bool(held and pulled and len(dvol)>=1 and float(dvol.mean())<=.6*climax_vol and float(dvol.mean())<=v50)
+        bounce=(float(c[-1])/l[li]-1)*100
+        return {"after":after,"low_date":str(d.index[li].date()),"climax":climax,"test":test,"bounce_udr":round(udr,2),"bounce_pct":round(bounce,1),
+                "climax_vol_x":round(climax_vol/v50,2) if v50>0 else None}
+    except Exception:
+        return None
+
+
 def group_volume_rotation(data, memberships, rrg):
     """Second layer: where is volume going inside each group, and does the RRG agree?
-    flow = % of members accumulating (20d up/down volume ≥ 1.2) minus % distributing (≤ 0.83)."""
+    flow = % of members accumulating (20d up/down volume >= 1.2) minus % distributing (<= 0.83).
+    v34.3: when the 20-day read is distribution but the group just bounced off a
+    selling climax, the bounce itself is judged: buying on the bounce or a
+    light-volume test of the low replaces the 20-day read ("flow" becomes the
+    since-the-low flow; the 20-day number stays in "flow_20d")."""
     by={}
     for t,groups in memberships.items():
         if t not in data: continue
         f=_volume_flow_20(data[t])
         if not f: continue
-        for g in groups: by.setdefault(g,[]).append(f)
+        sl=since_low_read(data[t])
+        for g in groups: by.setdefault(g,[]).append((f[0],f[1],sl))
     out={}
     for g,fl in by.items():
         if len(fl)<5: continue
         u=np.array([x[0] for x in fl]); ad=np.array([x[1] for x in fl])
-        acc=float((u>=1.2).mean()*100); dist=float((u<=1/1.2).mean()*100); flow=acc-dist
+        acc=float((u>=1.2).mean()*100); dist=float((u<=1/1.2).mean()*100); flow20=acc-dist
+        sls=[x[2] for x in fl if x[2] and x[2].get("bounce_udr") is not None]
+        climax_pct=round(sum(1 for x in sls if x["climax"])/len(fl)*100) if fl else 0
+        test_pct=round(sum(1 for x in sls if x["test"])/len(fl)*100) if fl else 0
+        if sls:
+            bu=np.array([x["bounce_udr"] for x in sls])
+            bflow=float((bu>=1.2).mean()*100-(bu<=1/1.2).mean()*100)
+        else:
+            bflow=None
+        bounce_read=None if bflow is None else ("Bounce has buying" if bflow>=15 else ("Bounce on light volume" if bflow<=-15 else "Bounce mixed"))
         r=rrg.get(g) or {}; q=r.get("quadrant"); traj=r.get("tail_trajectory")
-        if q in ("Leading","Improving") and flow>=15: sig="Rotating in · volume confirms"
-        elif q in ("Lagging","Weakening") and flow>=15: sig="Quiet accumulation · volume ahead of price"
-        elif q in ("Leading","Improving") and flow<=-15: sig="Distribution under the surface"
-        elif q in ("Lagging","Weakening") and flow<=-15: sig="Rotating out · volume confirms"
-        else: sig="Mixed"
+        flow=flow20; sig=None
+        if flow20<=-15 and climax_pct>=25 and bflow is not None:
+            if test_pct>=20 and bflow>-15: sig="Selling climax · testing the low"; flow=max(bflow,0)
+            elif bflow>=15: sig="Selling climax · bounce has buying"; flow=bflow
+        if sig is None:
+            if q in ("Leading","Improving") and flow>=15: sig="Rotating in · volume confirms"
+            elif q in ("Lagging","Weakening") and flow>=15: sig="Quiet accumulation · volume ahead of price"
+            elif q in ("Leading","Improving") and flow<=-15: sig="Distribution under the surface"
+            elif q in ("Lagging","Weakening") and flow<=-15: sig="Rotating out · volume confirms"
+            else: sig="Mixed"
         out[g]={"group":g,"name":RRG_UNIVERSE.get(g,g),"quadrant":q,"trajectory":traj,"members":len(fl),"accumulating_pct":round(acc),
-                "distributing_pct":round(dist),"flow":round(flow),"median_up_down":round(float(np.median(u)),2),"median_ad":round(float(np.median(ad)),2),"signal":sig}
+                "distributing_pct":round(dist),"flow":round(flow),"flow_20d":round(flow20),"bounce_flow":round(bflow) if bflow is not None else None,
+                "bounce_read":bounce_read,"climax_pct":climax_pct,"test_pct":test_pct,
+                "median_up_down":round(float(np.median(u)),2),"median_ad":round(float(np.median(ad)),2),"signal":sig}
     return out
 
 
@@ -5234,7 +5295,7 @@ def group_flow_payload():
 def api_group_flow():
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe("group-flow-v34",group_flow_payload,force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe("group-flow-v34-3",group_flow_payload,force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -5295,7 +5356,7 @@ def api_accumulation():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"accum-v34:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"accum-v34-3:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -12592,7 +12653,7 @@ function v33BaseChips(b){
  if(b.volume_building)ch.push(`volume building${b.vol_build?` ${b.vol_build}×`:""}`);
  if(b.spring&&b.direction==="bullish")ch.push(`spring ${b.spring.date.slice(5)}`);
  if(b.upthrust&&b.direction==="bearish")ch.push(`upthrust ${b.upthrust.date.slice(5)}`);
- const ro=b.rotation||{};if(ro.group)ch.unshift(`${ro.adj>0?"✓ ":ro.adj<0?"✗ ":""}${ro.group} ${v34Word(ro.flow).toLowerCase()}`);
+ const ro=b.rotation||{};if(ro.group)ch.unshift(`${ro.adj>0?"✓ ":ro.adj<0?"✗ ":""}${ro.group} ${v34Word(ro.flow,{signal:ro.signal}).toLowerCase()}`);
  if(b.compression<.95)ch.push(`range squeeze ${Math.round((1-b.compression)*100)}%`);else if(b.bb_width_pct<=25)ch.push(`Bollinger squeeze (${b.bb_width_pct}th pct)`);
  return ch;
 }
@@ -12622,7 +12683,7 @@ function v33RenderAccum(){
  const j=window.__accum;
  const gh=document.getElementById("v34Groups");
  if(gh&&j){const G=(j.groups||[]).slice(0,14);const qc={Leading:"#3DD68C",Improving:"#5AB8F0",Weakening:"#F2B84B",Lagging:"#FF8A78"};
-   gh.innerHTML=G.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Group</th><th>RRG</th><th>Holdings' volume</th><th>Bases ↑ / ↓</th><th>Read</th></tr></thead><tbody>${G.map(g=>`<tr><td><b class="v32Num">${v32E(g.group)}</b> <span class="v32Muted">${v32E(g.name)}</span></td><td style="color:${qc[g.quadrant]||"#8B97A6"}">${v32E(g.quadrant||"—")}${g.trajectory&&g.trajectory!=="Neutral"?` <span class="v32Muted">${v32E(g.trajectory.toLowerCase())}</span>`:""}</td><td style="color:${g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6"}" title="flow ${g.flow>0?"+":""}${g.flow}: ${g.accumulating_pct}% accumulating, ${g.distributing_pct}% distributing of ${g.members}">${v34Word(g.flow)}</td><td class="v32Num">${g.acc_bases} / ${g.dist_bases}</td><td>${g.signal==="Quiet accumulation · volume ahead of price"?`<b style="color:#3DD68C">${v32E(g.signal)}</b>`:g.signal==="Distribution under the surface"?`<b style="color:#FF8A78">${v32E(g.signal)}</b>`:v32E(g.signal)}</td></tr>`).join("")}</tbody></table></div>`:"No group read.";}
+   gh.innerHTML=G.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Group</th><th>RRG</th><th>Holdings' volume</th><th>Bases ↑ / ↓</th><th>Read</th></tr></thead><tbody>${G.map(g=>`<tr><td><b class="v32Num">${v32E(g.group)}</b> <span class="v32Muted">${v32E(g.name)}</span></td><td style="color:${qc[g.quadrant]||"#8B97A6"}">${v32E(g.quadrant||"—")}${g.trajectory&&g.trajectory!=="Neutral"?` <span class="v32Muted">${v32E(g.trajectory.toLowerCase())}</span>`:""}</td><td style="color:${g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6"}" title="20d flow ${g.flow_20d>0?"+":""}${g.flow_20d}${g.bounce_read?` · since the low: ${g.bounce_read.toLowerCase()}`:""}">${v34Word(g.flow,g)}${g.bounce_read&&g.flow<=-15&&!/^Selling climax/.test(g.signal)?`<div class="v32Muted" style="font-size:11px">${v32E(g.bounce_read.toLowerCase())}</div>`:""}</td><td class="v32Num">${g.acc_bases} / ${g.dist_bases}</td><td>${g.signal==="Quiet accumulation · volume ahead of price"?`<b style="color:#3DD68C">${v32E(g.signal)}</b>`:g.signal==="Distribution under the surface"?`<b style="color:#FF8A78">${v32E(g.signal)}</b>`:v32E(g.signal)}</td></tr>`).join("")}</tbody></table></div>`:"No group read.";}
  else if(gh)gh.textContent=v33AccLoading?"Scanning…":"—";
  if(!j){host.innerHTML=`<div class="v32Empty">${v33AccLoading?"Scanning sector holdings for bases… the first run takes about a minute.":window.__accumErr?`Scan failed: ${v32E(window.__accumErr)}`:"Loading…"}</div>`;if(wh)wh.innerHTML="";return}
  const ideas=v33AccIdeas().filter(c=>v33AccFilter==="all"||c.dir===v33AccFilter);
@@ -12653,19 +12714,23 @@ setTimeout(()=>{try{v33LoadAccum()}catch(e){}},4000);
 // ---- v34.1 group volume flow everywhere ----------------------------------------------
 window.__groupFlow=null;
 function v34Flow(){return (window.__groupFlow&&window.__groupFlow.groups)||Object.fromEntries(((window.__accum||{}).groups||[]).map(g=>[g.group,g]))}
-const V34_SHORT={"Rotating in · volume confirms":"confirms in","Quiet accumulation · volume ahead of price":"quiet accumulation","Distribution under the surface":"distribution under surface","Rotating out · volume confirms":"confirms out","Mixed":"mixed"};
+const V34_SHORT={"Selling climax · testing the low":"climax · testing low","Selling climax · bounce has buying":"climax · bounce has buying","Rotating in · volume confirms":"confirms in","Quiet accumulation · volume ahead of price":"quiet accumulation","Distribution under the surface":"distribution under surface","Rotating out · volume confirms":"confirms out","Mixed":"mixed"};
 function v34FlowCell(g){
  if(!g)return `<span class="v32Muted">—</span>`;
  const c=g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6";
- return `<span title="flow ${g.flow>0?"+":""}${g.flow}: ${g.accumulating_pct}% of top ${g.members} holdings accumulating, ${g.distributing_pct}% distributing"><b style="color:${c};font-size:13px">${v34Word(g.flow)}</b>${g.signal!=="Mixed"?`<div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div>`:""}</span>`;
+ return `<span title="20d flow ${g.flow_20d>0?"+":""}${g.flow_20d}${g.bounce_read?` · since the low: ${g.bounce_read.toLowerCase()}`:""}"><b style="color:${c};font-size:13px">${v34Word(g.flow,g)}</b>${g.signal!=="Mixed"?`<div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div>`:""}</span>`;
 }
-function v34Word(f){f=Number(f);if(!Number.isFinite(f))return "—";return f>=40?"Strong accumulation":f>=15?"Accumulating":f<=-40?"Strong distribution":f<=-15?"Distributing":"Mixed"}
-const V34_SENT={"Quiet accumulation · volume ahead of price":"its holdings are being accumulated while the group still looks weak on the RRG — volume is ahead of price, often an early sign of rotation in.",
+function v34Word(f,g){if(g&&/^Selling climax/.test(g.signal||""))return g.signal.includes("testing")?"Testing the low":"Bounce has buying";f=Number(f);if(!Number.isFinite(f))return "—";return f>=40?"Strong accumulation":f>=15?"Accumulating":f<=-40?"Strong distribution":f<=-15?"Distributing":"Mixed"}
+const V34_SENT={"Selling climax · testing the low":"the low came on a heavy-volume selling climax, and the pullback since is holding above it on light volume — a test of the low, which often marks the bottom.",
+ "Selling climax · bounce has buying":"the last 20 days look like distribution only because of the heavy-volume flush; since that climax low, the bounce is getting real buying.",
+"Quiet accumulation · volume ahead of price":"its holdings are being accumulated while the group still looks weak on the RRG — volume is ahead of price, often an early sign of rotation in.",
  "Rotating in · volume confirms":"it's rotating in on the RRG and its holdings' volume backs it up.",
  "Distribution under the surface":"it looks strong on the RRG, but its holdings are being distributed — the move isn't backed by volume.",
  "Rotating out · volume confirms":"it's rotating out on the RRG and its holdings' volume confirms the selling.",
  "Mixed":"no clear volume lean across its holdings."};
-function v34FlowSentence(g){return `<b>${v32E(g.group)} · ${v34Word(g.flow)}:</b> ${v32E(V34_SENT[g.signal]||g.signal)}`}
+function v34FlowSentence(g){
+ const extra=g.bounce_read&&!/^Selling climax/.test(g.signal)&&g.flow<=-15?` Since the recent low: ${g.bounce_read.toLowerCase()}${g.bounce_read==="Bounce on light volume"?" — sellers stepped back more than buyers stepped in":g.bounce_read==="Bounce has buying"?" — watch for a shift":""}.`:"";
+ return `<b>${v32E(g.group)} · ${v34Word(g.flow)}:</b> ${v32E(V34_SENT[g.signal]||g.signal)}${v32E(extra)}`}
 // v34.2: group flow in the laggard lane — a laggard in a group being accumulated
 // is a stronger catch-up candidate; one in a group being distributed is weaker.
 function v34LagAdj(m){
@@ -12693,7 +12758,7 @@ topSetupEvaluation=function(x){
    const g=v34Flow()[x._parentTicker];if(!g||!e||!e.direction)return e;
    const bull=e.direction==="bullish",f=Number(g.flow)*(bull?1:-1);
    let d=0;const reasons=(e.reasons||[]).slice(),gates=(e.gateFailures||[]).slice();let hard=e.hardPass;
-   const lbl=`${x._parentTicker} holdings ${v34Word(g.flow).toLowerCase()}${g.signal!=="Mixed"?` · ${V34_SHORT[g.signal]||g.signal}`:""}`;
+   const lbl=`${x._parentTicker} holdings ${v34Word(g.flow,g).toLowerCase()}${g.signal!=="Mixed"?` · ${V34_SHORT[g.signal]||g.signal}`:""}`;
    if(f>=40){d=8;reasons.push([lbl,"good"]);}
    else if(f>=15){d=5;reasons.push([lbl,"good"]);}
    else if(f<=-40){d=-12;reasons.unshift([lbl,"warn"]);gates.push(`${x._parentTicker} holdings are under heavy ${bull?"distribution":"accumulation"} — the money is going the other way`);hard=false;}
