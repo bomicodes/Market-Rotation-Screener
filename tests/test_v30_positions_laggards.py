@@ -247,3 +247,9 @@ def test_post_reaction_moves_and_odds():
     assert o["call_path"]["clear"] is False and o["call_path"]["walls"] == 2
     assert o["put_path"]["clear"] is True and o["put_path"]["air"] is True
     assert o["label"] in ("High", "Medium", "Low") and any("reports" in n for n in o["notes"])
+
+
+def test_post_reaction_moves_dedupes_same_report():
+    df, dates = _hist_df()
+    dup = dates + [d + pd.Timedelta(hours=16) for d in dates] + [d + pd.Timedelta(days=1) for d in dates]
+    assert len(appmod.post_reaction_moves(df, dup, 2)) == len(appmod.post_reaction_moves(df, dates, 2))
