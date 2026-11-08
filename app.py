@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.6"
+APP_VERSION = "34.6.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -11450,7 +11450,7 @@ function renderEarnings(){
    const flags=`${x.setup_type==="CONTINUATION"?'<span class="histRunner">CONTINUATION</span>':'<span class="reversionFlag">REVERSION</span>'}${structureBadge}${x.reversion_confirmed?'<span class="histRunner">REVERSION CONFIRMED</span>':""}${x.round_trip?'<span class="givebackFlag">ROUND TRIP</span>':""}`;
    const windowNote=`<div class="tiny"><b>${structure}</b>${x.reaction_retained_pct==null?"":` · reaction retained ${Number(x.reaction_retained_pct).toFixed(0)}%`}${x.post_reaction_range_pct==null?"":` · post-reaction range ${Number(x.post_reaction_range_pct).toFixed(1)}%`}</div><div class="tiny">Historical magnitude: ${x.setup_stage||"—"} · consumed ${x.move_consumed_pct==null?"—":Number(x.move_consumed_pct).toFixed(0)+"%"} · magnitude runway ${x.remaining_runway_pct==null?"—":Number(x.remaining_runway_pct).toFixed(0)+"%"}</div><div class="tiny">Drift window: ${x.drift_window_progress_pct==null?"—":x.drift_window_progress_pct+"%"} of ~${x.drift_window_sessions}D${x.setup_type==="REVERSION"&&x.recovery_pct!=null?` · reaction recovery ${Number(x.recovery_pct).toFixed(0)}%`:""}</div>`;
    const surpriseNote=x.eps_surprise_pct==null?"":`<div class="tiny">EPS surprise: ${x.eps_surprise_pct>0?"+":""}${x.eps_surprise_pct}%</div>`;
-   const historySummary=p?`${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div>`:`<span class="mover">LOAD HISTORY</span><div class="tiny">Current reaction: ${fmt(x.expected_continuation_pct)}%</div>`;
+   const historySummary=p?`${moverHTML(p)}<div class="tiny">Expected 10–14D excursion: ${fmt(x.expected_continuation_pct)}%</div><div class="tiny">${p.behavior||"—"} · ${p.n||0} events</div>`:`<span class="mover">${x.historyError?"NO HISTORY":"LOADING…"}</span><div class="tiny">Current reaction: ${fmt(x.expected_continuation_pct)}%</div>`;
    return `<tr class="clickrow" data-pe-open="${x.ticker}"><td>${k+1}</td><td><b>${x.ticker}</b><div class="tiny">${x.name||""}</div><div class="peScore">${x.trade_score==null?`SETUP ${Number(x.opportunity_score||0).toFixed(0)}`:`TRADE ${Number(x.trade_score||0).toFixed(0)} · setup ${Number(x.opportunity_score||0).toFixed(0)}`}/100</div>${flags}<div class="tiny">${x.trade_direction||x.direction||"—"}</div></td><td>${x.earnings_date}<div class="tiny">${x.calendar_days_ago}d ago · ${x.direction}</div>${surpriseNote}</td><td>${historySummary}</td><td>${x.current?.current_move_pct==null?"—":histPct(x.current.current_move_pct)}<div class="tiny">${compactRRG(r.fast)}</div><div class="tiny">Trend: ${r.trend?`${r.trend.quadrant} · ${r.trend.rs_up?"RS↑":"RS↓"} · ${r.trend.mom_up?"Mom↑":"Mom↓"}`:"—"}</div>${windowNote}</td><td>${contract}</td><td><button class="detailBtn" data-id="${id}" data-ticker="${x.ticker}" data-event="${x.earnings_date}">History ▾</button></td></tr><tr id="${id}" class="details"><td colspan="7">${detailHTML(x)}</td></tr>`;
  }).join("");
  document.querySelectorAll(".detailBtn").forEach(b=>b.addEventListener("click",e=>{
@@ -11477,10 +11477,18 @@ function detailHTML(x){
 // v34.6: fill the "Historical continuation" column for every row in the
 // background (two at a time) instead of waiting for a click on each row.
 async function v346FillHistories(){
- const todo=(earnResults||[]).filter(x=>x&&!x.profile&&!x.historyLoading&&!x._histTried);
- const one=async x=>{x._histTried=true;try{const r=await fetch(`/api/earnings-history/${encodeURIComponent(x.ticker)}?event_date=${encodeURIComponent(x.earnings_date||"")}`);const j=await r.json();if(r.ok&&j.ok){x.profile=j.profile;x.historyDates=j.dates||[];}else{x.historyError=j.error||null;x.historyDates=j.dates||[];}}catch(e){}
-   const open=[...document.querySelectorAll("#earnRows tr.open, .open[id]")].map(el=>el.id).filter(Boolean);renderEarnings();open.forEach(id=>document.getElementById(id)?.classList.add("open"));};
- const q=todo.slice();const worker=async()=>{while(q.length)await one(q.shift())};
+ const one=async x=>{
+   for(let attempt=0;attempt<3&&!x.profile;attempt++){
+     if(attempt)await new Promise(r=>setTimeout(r,4000*attempt));
+     try{const r=await fetch(`/api/earnings-history/${encodeURIComponent(x.ticker)}?event_date=${encodeURIComponent(x.earnings_date||"")}`);
+       const j=await r.json().catch(()=>null);
+       if(r.ok&&j&&j.ok){x.profile=j.profile;x.historyDates=j.dates||[];x.historyError=null;break}
+       if(r.status===422&&j){x.historyError=j.error||null;x.historyDates=j.dates||[];break}   // genuinely not enough events
+     }catch(e){}
+   }
+   const open=[...document.querySelectorAll("#earnRows .open[id]")].map(el=>el.id);renderEarnings();open.forEach(id=>document.getElementById(id)?.classList.add("open"));};
+ const q=(earnResults||[]).filter(x=>x&&!x.profile&&!x.historyLoading&&!x.historyError);
+ const worker=async()=>{while(q.length)await one(q.shift())};
  await Promise.all([worker(),worker()]);
 }
 async function loadHistory(ticker,eventDate,rowId){
@@ -11568,7 +11576,7 @@ async function runEarnings(){
    st.textContent=`${j.recent_reporters||0} recent reporters · ${j.universe||0} unique holdings scanned · showing ${earnResults.length} curated opportunities`;
    renderEarnings();
    v346FillHistories();
-   if(j.options_deferred) hydratePostEarningsOptions();
+   if(j.options_deferred) hydratePostEarningsOptions().then(()=>v346FillHistories()).catch(()=>{});
  }catch(e){
    earnResults=previousResults;
    st.innerHTML=`<span class="error">Earnings scan incomplete: ${e?.message||e}</span>${previousResults.length?` <span class="note">· showing ${previousResults.length} prior result${previousResults.length===1?"":"s"}</span>`:""}`;

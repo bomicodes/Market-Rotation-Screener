@@ -95,7 +95,7 @@ def test_history_button_loads_profile_and_never_renders_undefined():
     renderer = APP_SOURCE[start:end]
     assert 'const p=x.profile||null' in renderer
     assert 'loadHistory(b.dataset.ticker,b.dataset.event,b.dataset.id)' in renderer
-    assert 'LOAD HISTORY' in renderer
+    assert 'LOADING…' in renderer
 
 
 def test_scan_holdings_prefers_persistent_cache(monkeypatch):
