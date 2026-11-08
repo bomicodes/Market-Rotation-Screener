@@ -185,7 +185,7 @@ def test_strangle_plan_picks_budget_pair_and_moves():
         legs = [_row("call", k, dte, spot, iv=.6) for k in range(100, 131)] + [_row("put", k, dte, spot, iv=.6) for k in range(70, 101)]
         for r in legs: r["expiration"] = exp
         rows += legs
-    out = appmod.strangle_plan("TEST", 400, rows, spot)
+    out = appmod.strangle_plan("TEST", 400, rows, spot, history=(None, []), vp={"available": False})
     assert out["available"] and out["fits_budget"] and out["cost"] <= 400
     assert {c["tenor"] for c in out["choices"]} == {"1 week", "2 week"}
     assert out["tenor"] == "1 week" and out["dte"] == 7          # 30 DTE never offered
@@ -194,7 +194,7 @@ def test_strangle_plan_picks_budget_pair_and_moves():
     assert out["time_stop_sessions"] == 2 and out["exit_by"] == "2026-11-30"
     two = next(c for c in out["choices"] if c["tenor"] == "2 week")
     assert two["time_stop_sessions"] == 3 and two["exit_by"] == "2026-12-06"
-    tight = appmod.strangle_plan("TEST", 50, rows, spot)
+    tight = appmod.strangle_plan("TEST", 50, rows, spot, history=(None, []), vp={"available": False})
     assert tight["available"] and not tight["fits_budget"] and "over the" in tight["note"]
 
 
@@ -213,8 +213,37 @@ def test_strangle_pair_balances_premium():
     # put skew: puts priced at higher IV, so equal-delta legs would be uneven
     rows = [_row("call", k, 7, spot, iv=.5) for k in range(100, 121)] + [_row("put", k, 7, spot, iv=.8) for k in range(75, 101)]
     for r in rows: r["expiration"] = "2026-12-01"
-    out = appmod.strangle_plan("TEST", 400, rows, spot)
+    out = appmod.strangle_plan("TEST", 400, rows, spot, history=(None, []), vp={"available": False})
     b = out["balance"]
     assert b["balanced"] and b["imbalance_pct"] <= 10
     assert 90 <= b["call"]["breakeven_gain_pct"] <= 125 and 90 <= b["put"]["breakeven_gain_pct"] <= 125
     assert b["call"]["pl_at_150"] > 0 and b["put"]["pl_at_150"] > 0
+
+
+def _hist_df():
+    idx = pd.bdate_range(end="2026-10-30", periods=400)
+    c = np.full(len(idx), 100.0)
+    df = pd.DataFrame({"Open": c, "High": c + .5, "Low": c - .5, "Close": c, "Volume": 1e6}, index=idx)
+    dates = []
+    for k in range(60, 400, 63):              # quarterly "reports"
+        d = idx[k]; dates.append(d)
+        # day 1 reaction, then a big follow-through in the next two sessions on most events
+        big = (k // 63) % 4 != 0
+        df.iloc[k + 1, df.columns.get_loc("High")] = 100 * (1.10 if big else 1.01)
+        df.iloc[k + 2, df.columns.get_loc("Low")] = 100 * (.99)
+    return df, dates
+
+
+def test_post_reaction_moves_and_odds():
+    df, dates = _hist_df()
+    mv = appmod.post_reaction_moves(df, dates, 2)
+    assert len(mv) >= 4 and any(m["up_pct"] >= 9 for m in mv)
+    choice = {"hold_days_assumed": 2, "call_move_for_150": {"move_pct": 5.0, "stock_price": 105.0},
+              "put_move_for_150": {"move_pct": -8.0, "stock_price": 92.0}}
+    vp = {"available": True, "poc": 100.0, "vah": 101.0, "val": 99.5, "hvn": [103.0], "lvn": [96.0], "prior_week": None}
+    o = appmod.strangle_odds(choice, 100.0, mv, vp)
+    assert o["hits"] is not None and o["hits"] >= 3
+    assert o["location"] == "inside value"
+    assert o["call_path"]["clear"] is False and o["call_path"]["walls"] == 2
+    assert o["put_path"]["clear"] is True and o["put_path"]["air"] is True
+    assert o["label"] in ("High", "Medium", "Low") and any("reports" in n for n in o["notes"])

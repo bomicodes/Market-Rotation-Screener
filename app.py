@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.3.1"
+APP_VERSION = "34.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34","earn-dates-v1:","earnings-profile-v19:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2337,7 +2337,7 @@ def nasdaq_earnings_history_dates(ticker):
         "Referer":f"https://www.nasdaq.com/market-activity/stocks/{ticker.lower()}/earnings",
     }
     try:
-        resp = requests.get(url, timeout=20, headers=headers)
+        resp = requests.get(url, timeout=8, headers=headers)
         resp.raise_for_status()
         payload = resp.json() or {}
         data = payload.get("data") or {}
@@ -2370,17 +2370,15 @@ def merged_historical_earnings_dates(ticker, current_event_date=None):
     earnings dates are created.
     """
     dates = []
-    # yfinance first
-    try:
-        dates.extend(get_earnings_dates(ticker, 24))
-    except Exception:
-        pass
-
-    # Nasdaq one-request history fallback
-    try:
-        dates.extend(nasdaq_earnings_history_dates(ticker))
-    except Exception:
-        pass
+    # v34.4: Yahoo and Nasdaq are fetched in parallel (they were sequential, and
+    # a slow Nasdaq response alone could hold the History button for 20 s).
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [ex.submit(get_earnings_dates, ticker, 24), ex.submit(nasdaq_earnings_history_dates, ticker)]
+        for f in futs:
+            try:
+                dates.extend(f.result(timeout=15) or [])
+            except Exception:
+                pass
 
     # Optional UW history if user ever configures a token
     if UW_API_TOKEN:
@@ -4637,7 +4635,74 @@ def _strangle_balance(c_mid, p_mid, gain=1.5):
             "balanced":abs(c_mid-p_mid)/tot<=STRANGLE_MAX_IMBALANCE}
 
 
-def strangle_plan(ticker, budget=250.0, rows=None, spot=None):
+def post_reaction_moves(df, dates, sessions):
+    """For each past earnings event: buy at the close of the first post-earnings
+    session (when the trader enters the strangle) and measure the largest move up
+    and down over the next `sessions` sessions (highs/lows)."""
+    out=[]
+    if df is None or len(df)<40: return out
+    for d in sorted(set(pd.Timestamp(x) for x in dates or [])):
+        try:
+            pos=event_session_index(df,d)
+        except Exception:
+            pos=None
+        if pos is None or pos<=0 or pos+sessions>=len(df): continue
+        entry=float(df["Close"].iloc[pos])
+        seg=df.iloc[pos+1:pos+1+sessions]
+        if len(seg)<sessions or entry<=0: continue
+        out.append({"date":pd.Timestamp(d).strftime("%Y-%m-%d"),"up_pct":round((float(seg["High"].max())/entry-1)*100,2),
+                    "down_pct":round((float(seg["Low"].min())/entry-1)*100,2)})
+    return out[-8:]
+
+
+def _vp_path(spot, target, vp):
+    """What volume sits between spot and a leg's +150% stock price?
+    Walls = POC / value-area edges / HVNs in the way (price tends to stall there);
+    air = low-volume nodes in the way (price tends to move fast through them)."""
+    lo,hi=sorted((spot,target)); pad=abs(target-spot)*.08
+    named=[("POC",vp.get("poc")),("value-area high",vp.get("vah")),("value-area low",vp.get("val"))]
+    pw=vp.get("prior_week") or {}
+    named+=[("prior-week POC",pw.get("poc")),("prior-week value high",pw.get("vah")),("prior-week value low",pw.get("val"))]
+    named+=[("high-volume node",x) for x in vp.get("hvn") or []]
+    walls=sorted([(n,float(v)) for n,v in named if v and lo+pad<float(v)<hi-pad],key=lambda z:abs(z[1]-spot))
+    air=[float(x) for x in vp.get("lvn") or [] if lo<float(x)<hi]
+    return {"clear":not walls,"wall":{"name":walls[0][0],"price":round(walls[0][1],2)} if walls else None,"walls":len(walls),"air":bool(air)}
+
+
+def strangle_odds(choice, spot, moves, vp):
+    """Plain-language odds for one strangle choice: history first, volume profile second."""
+    cm=(choice.get("call_move_for_150") or {}).get("move_pct"); pm=(choice.get("put_move_for_150") or {}).get("move_pct")
+    out={"hits":None,"n":len(moves or []),"sessions":choice.get("hold_days_assumed"),"notes":[]}
+    pts=50.0
+    if moves and len(moves)>=4 and (cm is not None or pm is not None):
+        hits=[m for m in moves if (cm is not None and m["up_pct"]>=cm) or (pm is not None and m["down_pct"]<=pm)]
+        rate=len(hits)/len(moves); out.update(hits=len(hits),hit_rate=round(rate*100))
+        pts=rate*100
+        out["notes"].append(f"After {len(hits)} of the last {len(moves)} reports, the stock moved enough within {choice.get('hold_days_assumed')} sessions of day 1 for a leg to reach +150%.")
+    else:
+        out["notes"].append("Not enough past reports to measure how often it moved this far after day 1.")
+    if vp and vp.get("available"):
+        val,vah=vp.get("val"),vp.get("vah")
+        inside=bool(val and vah and val<=spot<=vah)
+        out["location"]="inside value" if inside else "outside value"
+        if inside: pts-=8; out["notes"].append("Price is sitting inside its 20-day value area — balanced, so it needs a push to start moving.")
+        else: pts+=6; out["notes"].append("Price is outside its 20-day value area — out of balance, where moves tend to travel.")
+        for side,tgt in (("call",(choice.get("call_move_for_150") or {}).get("stock_price")),("put",(choice.get("put_move_for_150") or {}).get("stock_price"))):
+            if not tgt: continue
+            pth=_vp_path(spot,float(tgt),vp); out[f"{side}_path"]=pth
+            way="upside" if side=="call" else "downside"
+            if pth["clear"]:
+                pts+=5; out["notes"].append(f"The {way} path to ${float(tgt):.2f} is clear{' and runs through thin volume' if pth['air'] else ''}.")
+            else:
+                pts-=5; out["notes"].append(f"The {way} has a {pth['wall']['name']} at ${pth['wall']['price']:.2f} before ${float(tgt):.2f} — price often stalls there.")
+    pts=max(0,min(100,pts))
+    out["score"]=round(pts)
+    out["label"]="High" if pts>=65 else ("Medium" if pts>=45 else "Low")
+    if out["hits"] is None and not (vp and vp.get("available")): out["label"]="Unrated"
+    return out
+
+
+def strangle_plan(ticker, budget=250.0, rows=None, spot=None, event_date=None, history=None, vp=None):
     """Post-earnings strangle on 1-week and 2-week contracts (the trader's style).
     Returns both tenors under `choices`; the top-level fields are the preferred
     one: the 1-week pair if it fits the budget, else the 2-week, else the 1-week."""
@@ -4684,7 +4749,30 @@ def strangle_plan(ticker, budget=250.0, rows=None, spot=None):
         if len(mine)>1:
             keep=next((x for x in mine if x["fits_budget"]),mine[0]); choices=[x for x in choices if x["tenor"]!=label or x is keep]
     if not choices: return {"ticker":ticker,"available":False,"reason":"No 1–2 week call/put pair in the 0.10–0.45 delta band."}
-    best=next((x for x in choices if x["fits_budget"]),choices[0])
+    # v34.4: odds from past post-earnings moves + where the volume sits.
+    try:
+        if history is None:
+            dates=list(earnings_dates_cached(ticker))
+            if event_date:
+                try: dates.append(pd.Timestamp(event_date))
+                except Exception: pass
+            history=(dl_ohlc(ticker,"4y"),dates)
+        df_h,dates_h=history
+        cutoff=pd.Timestamp(event_date).normalize() if event_date else pd.Timestamp.now().normalize()-pd.Timedelta(days=10)
+        past=[d for d in dates_h if pd.Timestamp(d).normalize()<cutoff-pd.Timedelta(days=5)]
+    except Exception:
+        df_h,past=None,[]
+    if vp is None:
+        try:
+            vb=vp_bundle_cached(ticker); vp=vb.get("vp") if vb.get("available") else None
+        except Exception: vp=None
+    for ch in choices:
+        try:
+            ch["odds"]=strangle_odds(ch,spot,post_reaction_moves(df_h,past,ch["hold_days_assumed"]),vp)
+        except Exception as e:
+            ch["odds"]={"label":"Unrated","notes":[f"Odds unavailable: {e}"]}
+    fit=[x for x in choices if x["fits_budget"]]
+    best=max(fit,key=lambda x:(x.get("odds") or {}).get("score",0)) if len(fit)>1 else (fit[0] if fit else choices[0])
     return {"ticker":ticker,"available":True,"spot":round(spot,2),"budget":budget,**best,"choices":choices,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
 
 
@@ -4693,7 +4781,8 @@ def api_strangle_plan(ticker):
     try:
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
-        payload,stale,err=cached_refresh_safe(f"strangle-v34:{ticker.upper()}:{int(budget)}",lambda:strangle_plan(ticker,budget),ttl=600)
+        ev=request.args.get("event_date") or None
+        payload,stale,err=cached_refresh_safe(f"strangle-v35:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -5716,6 +5805,10 @@ def nightly_run():
             try:
                 lg=get(f"/api/laggards?groups={','.join(hints['groups'][:10])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
             except Exception as e: st["errors"].append(f"laggards: {e}")
+        st["stage"]="earnings"
+        try:
+            pe=get("/api/postearnings-opportunities?days=5"); st["counts"]["earnings_rows"]=len(pe.get("results") or [])
+        except Exception as e: st["errors"].append(f"earnings: {e}")
         st["stage"]="group flow"
         try:
             gf=get("/api/group-flow"); st["counts"]["group_flow"]=len(gf.get("groups") or {})
@@ -6423,6 +6516,57 @@ def api_postearnings(etf):
 
 
 
+def earnings_dates_cached(ticker):
+    """Historical earnings dates change once a quarter: keep them a week (L2-backed)."""
+    t=ticker.upper().strip()
+    return cached_refresh_safe(f"earn-dates-v1:{t}",lambda:merged_historical_earnings_dates(t),ttl=7*86400)[0] or []
+
+
+def earnings_history_payload(ticker, event_date=None):
+    ticker=ticker.upper().strip()
+    def build():
+        dates=list(earnings_dates_cached(ticker))
+        if event_date:
+            try: dates.append(pd.Timestamp(event_date).normalize())
+            except Exception: pass
+        uniq={}
+        for d in dates:
+            try: uniq.setdefault(pd.Timestamp(d).normalize(),pd.Timestamp(d))
+            except Exception: pass
+        dates=sorted(uniq.values(),reverse=True)
+        profile=earnings_profile(ticker,dates)
+        return {"profile":profile,"dates_found":len(dates),"dates":[pd.Timestamp(d).strftime("%Y-%m-%d") for d in dates[:12]]}
+    return cached_refresh_safe(f"earnings-profile-v19:{ticker}:{event_date or 'latest'}",build,ttl=12*3600)[0]
+
+
+_EARN_WARM={"running":set(),"lock":threading.Lock()}
+def warm_earnings_histories(rows, workers=3):
+    """Build History for every row of the post-earnings scan in the background,
+    so the History button is instant by the time it is clicked."""
+    todo=[]
+    for r in rows or []:
+        t=str(r.get("ticker") or "").upper(); d=r.get("earnings_date")
+        if not t: continue
+        key=f"earnings-profile-v19:{t}:{d or 'latest'}"
+        hit=CACHE.get(key)
+        if hit and time.time()-hit[0]<12*3600: continue
+        with _EARN_WARM["lock"]:
+            if key in _EARN_WARM["running"]: continue
+            _EARN_WARM["running"].add(key)
+        todo.append((t,d,key))
+    if not todo: return 0
+    def one(item):
+        t,d,key=item
+        try: earnings_history_payload(t,d)
+        except Exception: pass
+        finally:
+            with _EARN_WARM["lock"]: _EARN_WARM["running"].discard(key)
+    def run():
+        with ThreadPoolExecutor(max_workers=workers) as ex: list(ex.map(one,todo))
+    threading.Thread(target=run,daemon=True).start()
+    return len(todo)
+
+
 @app.get("/api/postearnings-opportunities")
 def api_postearnings_opportunities():
     """Fast market-wide post-earnings scanner.
@@ -6611,6 +6755,8 @@ def api_postearnings_opportunities():
     try:
         key=f"postearnings-opportunities-v6:{recent_days}"
         payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
+        try: warm_earnings_histories(payload.get("results") or [])
+        except Exception: pass
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -6647,46 +6793,19 @@ def api_postearnings_option(ticker):
 
 @app.get("/api/earnings-history/<ticker>")
 def api_earnings_history(ticker):
-    """
-    Lazy-load one ticker's historical earnings-move profile.
-    Returns explicit diagnostics instead of silently returning profile:null.
-    """
+    """Lazy-load one ticker's historical earnings-move profile (warmed in the background by the scan)."""
     ticker = ticker.upper().strip()
     try:
         event_date = request.args.get("event_date")
-        cache_key = f"earnings-profile-v18:{ticker}:{event_date or 'latest'}"
-
-        def build():
-            dates = merged_historical_earnings_dates(ticker, event_date)
-            profile = earnings_profile(ticker, dates)
-            return {
-                "profile": profile,
-                "dates_found": len(dates),
-                "dates": [pd.Timestamp(d).strftime("%Y-%m-%d") for d in dates[:12]],
-            }
-
-        payload = cached(cache_key, build, ttl=3600)
+        payload = earnings_history_payload(ticker, event_date)
         profile = payload.get("profile")
         if profile is None:
-            return jsonify({
-                "ok":False,
-                "ticker":ticker,
-                "error":f"Not enough completed historical earnings events were available to build a profile for {ticker}.",
-                "dates_found":payload.get("dates_found",0),
-                "dates":payload.get("dates",[])
-            }),422
-
-        return jsonify({
-            "ok":True,
-            "ticker":ticker,
-            "profile":profile,
-            "dates_found":payload.get("dates_found",0),
-            "dates":payload.get("dates",[])
-        })
-
+            return jsonify({"ok":False,"ticker":ticker,
+                            "error":f"Not enough completed historical earnings events were available to build a profile for {ticker}.",
+                            "dates_found":payload.get("dates_found",0),"dates":payload.get("dates",[])}),422
+        return jsonify({"ok":True,"ticker":ticker,"profile":profile,"dates_found":payload.get("dates_found",0),"dates":payload.get("dates",[])})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
-
 
 
 def dark_pool_spike_context(ticker, spike_date_str):
@@ -12618,7 +12737,9 @@ async function v32PlanStrangle(t){
  const out=document.getElementById("v32StrangleOut"),inp=document.getElementById("v32StrangleTicker");if(inp)inp.value=t;if(!out)return;
  out.innerHTML=`<span class="v32Muted">Pricing ${v32E(t)} strangle…</span>`;
  try{
-   const j=await (await fetch(`/api/strangle-plan/${encodeURIComponent(t)}?budget=${encodeURIComponent(v26Budget())}`)).json();
+   const ev=(typeof earnResults!=="undefined"&&earnResults.find(x=>x.ticker===t)?.earnings_date)||"";
+   out.innerHTML=`<span class="v32Muted">Pricing ${v32E(t)} strangle and checking past post-earnings moves + volume profile…</span>`;
+   const j=await (await fetch(`/api/strangle-plan/${encodeURIComponent(t)}?budget=${encodeURIComponent(v26Budget())}${ev?`&event_date=${encodeURIComponent(ev)}`:""}`)).json();
    if(!j.ok||!j.available){out.innerHTML=`<span class="v32Muted">${v32E(j.reason||j.error||"Unavailable")}</span>`;return}
    window.__v32StrangleAll=j;v32DrawStrangle(j,j.tenor);
  }catch(e){out.innerHTML=`<span class="v32Muted">${v32E(e.message||e)}</span>`;}
@@ -12627,9 +12748,11 @@ function v32DrawStrangle(all,tenor){
  const out=document.getElementById("v32StrangleOut");if(!out)return;
  const ch=(all.choices||[]).find(x=>x.tenor===tenor)||all;const j={...all,...ch};
    window.__v32Strangle=j;
-   const tabs=(all.choices||[]).length>1?`<div class="v32Seg" role="tablist" style="margin-bottom:6px">${all.choices.map(x=>`<button type="button" role="tab" aria-selected="${x.tenor===j.tenor}" class="${x.tenor===j.tenor?"on":""}" data-v32-tenor="${v32E(x.tenor)}">${v32E(x.tenor)} · ${v32$(x.cost,0)}${x.fits_budget?"":" ⚠"}</button>`).join("")}</div>`:"";
+   const tabs=(all.choices||[]).length>1?`<div class="v32Seg" role="tablist" style="margin-bottom:6px">${all.choices.map(x=>`<button type="button" role="tab" aria-selected="${x.tenor===j.tenor}" class="${x.tenor===j.tenor?"on":""}" data-v32-tenor="${v32E(x.tenor)}">${v32E(x.tenor)} · ${v32$(x.cost,0)}${x.fits_budget?"":" ⚠"}${x.odds?.label&&x.odds.label!=="Unrated"?` · ${v32E(x.odds.label)} odds`:""}</button>`).join("")}</div>`:"";
    const leg=(L,lbl,c,mv,bal)=>`<div class="v32Leg"><span style="font-size:11px;font-weight:700;color:${c}">${lbl}</span><b class="v32Num">${v32E(L.expiration)} $${Number(L.strike).toFixed(L.strike%1?1:0)}${L.type==="put"?"P":"C"}</b><span class="v32Num v32Muted">≈ ${v32$(L.mid)} · Δ ${Math.abs(Number(L.delta)).toFixed(2)}</span><span class="v32Num" style="color:${c}">+150% needs ${mv?`${v32$(mv.stock_price)} (${v32Pct(mv.move_pct,1)})`:"—"}</span>${bal?`<span class="v32Num v32Muted" style="font-size:11px">${bal.share_pct}% of cost · alone: breakeven +${bal.breakeven_gain_pct}% · at +150% ${bal.pl_at_150>=0?"+":"−"}${v32$(Math.abs(bal.pl_at_150),0)}</span>`:""}</div>`;
-   out.innerHTML=`${tabs}<div class="v32Muted v32Num">${v32E(j.ticker)} · spot ${v32$(j.spot)} · ${v32E(j.tenor||"")} · ${j.dte} DTE · move math assumes ${j.hold_days_assumed||3} days held</div><div class="v32Legs">${leg(j.put,"PUT LEG","#FF8A78",j.put_move_for_150,j.balance?.put)}${leg(j.call,"CALL LEG","#3DD68C",j.call_move_for_150,j.balance?.call)}</div>
+   const od=j.odds,oc={High:"#3DD68C",Medium:"#F2B84B",Low:"#FF8A78"}[od?.label]||"#8B97A6";
+   const oddsHTML=od?`<div class="v32Contract" style="gap:6px"><div style="display:flex;justify-content:space-between;align-items:baseline"><span class="v32Muted">Odds this works</span><b style="color:${oc};font-size:16px">${v32E(od.label)}</b></div><ul style="margin:0 0 0 16px;padding:0;font-size:12.5px;line-height:1.5">${(od.notes||[]).map(n=>`<li>${v32E(n)}</li>`).join("")}</ul></div>`:"";
+   out.innerHTML=`${tabs}${oddsHTML}<div class="v32Muted v32Num">${v32E(j.ticker)} · spot ${v32$(j.spot)} · ${v32E(j.tenor||"")} · ${j.dte} DTE · move math assumes ${j.hold_days_assumed||3} days held</div><div class="v32Legs">${leg(j.put,"PUT LEG","#FF8A78",j.put_move_for_150,j.balance?.put)}${leg(j.call,"CALL LEG","#3DD68C",j.call_move_for_150,j.balance?.call)}</div>
     <div class="v32Contract" style="flex-direction:row;justify-content:space-between;align-items:baseline"><span class="v32Muted">Total cost${j.balance?` · split ${v32$(j.balance.put.premium)} / ${v32$(j.balance.call.premium)}${j.balance.balanced?" ✓ balanced":" ⚠ uneven"}`:""}</span><b class="v32Num" style="font-size:18px;color:${j.fits_budget?"#E6EDF3":"#FF8A78"}">${v32$(j.cost,0)} <span class="v32Muted" style="font-size:12px">of ${v32$(j.budget,0)}</span></b></div>
     ${j.note?`<div style="color:#FF8A78;font-size:12px">${v32E(j.note)}</div>`:""}<ul style="margin:0 0 0 16px;padding:0;font-size:13px">${(j.rules||[]).map(r=>`<li>${v32E(r)}</li>`).join("")}</ul>
     <div class="v32Btns"><button type="button" class="v32Btn v32Go grow" id="v32LogStrangle">Log strangle at these prices</button></div><span class="v32Muted" id="v32StrangleMsg"></span>
