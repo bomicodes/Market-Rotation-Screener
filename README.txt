@@ -1,4 +1,5 @@
-v34.5 — STRANGLE ODDS ON EVERY EARNINGS ROW
-- Each post-earnings row shows a badge: "High/Medium/Low odds · 1 week $217" (⚠ if over budget; hover for the reasons).
-- The server prices every row's strangle right after warming its history; the page fills badges two at a time. Changing the budget re-prices.
+v34.6 — HISTORY COLUMN FILLS ITSELF
+- The post-earnings scan returns any History already built on the server, and the page loads the rest in the background
+  (two at a time) — no more clicking "Load history" row by row.
+- The scan itself is cached 15 min in market hours and 6 h otherwise (was 5 min), and persisted across restarts.
 

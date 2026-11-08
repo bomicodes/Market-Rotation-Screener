@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.5"
+APP_VERSION = "34.6"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -6799,9 +6799,22 @@ def api_postearnings_opportunities():
 
     try:
         key=f"postearnings-opportunities-v6:{recent_days}"
-        payload,stale,err=cached_refresh_safe(key,_build,ttl=300)
+        # v34.6: the reporter list barely changes intraday; 15 min in market hours, 6 h otherwise.
+        try:
+            from zoneinfo import ZoneInfo
+            et=datetime.now(ZoneInfo("America/New_York")); open_now=et.weekday()<5 and (9*60+30)<=et.hour*60+et.minute<=16*60
+        except Exception: open_now=True
+        payload,stale,err=cached_refresh_safe(key,_build,ttl=900 if open_now else 6*3600)
         try: warm_earnings_histories(payload.get("results") or [])
         except Exception: pass
+        # attach any history already built, without computing anything here
+        rows=[]
+        for r in payload.get("results") or []:
+            hit=CACHE.get(f"earnings-profile-v20:{str(r.get('ticker') or '').upper()}:{r.get('earnings_date') or 'latest'}")
+            if hit and (hit[1] or {}).get("profile"):
+                r=dict(r); r["profile"]=hit[1]["profile"]; r["history_pending"]=False
+            rows.append(r)
+        payload=dict(payload); payload["results"]=rows
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:
         return jsonify({"ok":False,"error":str(e)}),500
@@ -11461,6 +11474,15 @@ function detailHTML(x){
  return `<div class="detailgrid"><div class="metric"><div class="tiny">EVENTS USED</div><b>${p.n}</b></div><div class="metric"><div class="tiny">DIRECTION PERSISTED</div><b>${fmt(p.pct_directional_persist,0)}%</b></div><div class="metric"><div class="tiny">DIRECTION REVERTED</div><b>${fmt(p.pct_directional_revert,0)}%</b></div><div class="metric"><div class="tiny">MEDIAN 10D EXCURSION</div><b>${fmt(p.median_exc10)}%</b></div><div class="metric"><div class="tiny">MEDIAN 14D EXCURSION</div><b>${fmt(p.median_exc14)}%</b></div><div class="metric"><div class="tiny">&gt;5% WITHIN 10D</div><b>${fmt(p.pct_gt5_10d,0)}%</b></div></div><div class="tiny" style="margin:12px 0 6px">Signed close path shows whether the original earnings reaction actually persisted or reversed; max excursion preserves total opportunity size.</div><table class="eventtable"><thead><tr><th>Date</th><th>Day 1 close</th><th>Day 5 close</th><th>Day 10 close</th><th>Day 14 close</th><th>Max 14D excursion</th><th>Retained</th></tr></thead><tbody>${ev.map(e=>`<tr><td>${e.date}</td><td>${sp(e.close1)}</td><td>${sp(e.close5)}</td><td>${sp(e.close10)}</td><td>${sp(e.close14)}</td><td>${fmt(e.exc14)}%</td><td>${retained(e)}</td></tr>`).join("")}</tbody></table>`;
 }
 
+// v34.6: fill the "Historical continuation" column for every row in the
+// background (two at a time) instead of waiting for a click on each row.
+async function v346FillHistories(){
+ const todo=(earnResults||[]).filter(x=>x&&!x.profile&&!x.historyLoading&&!x._histTried);
+ const one=async x=>{x._histTried=true;try{const r=await fetch(`/api/earnings-history/${encodeURIComponent(x.ticker)}?event_date=${encodeURIComponent(x.earnings_date||"")}`);const j=await r.json();if(r.ok&&j.ok){x.profile=j.profile;x.historyDates=j.dates||[];}else{x.historyError=j.error||null;x.historyDates=j.dates||[];}}catch(e){}
+   const open=[...document.querySelectorAll("#earnRows tr.open, .open[id]")].map(el=>el.id).filter(Boolean);renderEarnings();open.forEach(id=>document.getElementById(id)?.classList.add("open"));};
+ const q=todo.slice();const worker=async()=>{while(q.length)await one(q.shift())};
+ await Promise.all([worker(),worker()]);
+}
 async function loadHistory(ticker,eventDate,rowId){
  const item=earnResults.find(x=>x.ticker===ticker);
  if(!item)return;
@@ -11545,6 +11567,7 @@ async function runEarnings(){
    earnResults=j.results||[];
    st.textContent=`${j.recent_reporters||0} recent reporters · ${j.universe||0} unique holdings scanned · showing ${earnResults.length} curated opportunities`;
    renderEarnings();
+   v346FillHistories();
    if(j.options_deferred) hydratePostEarningsOptions();
  }catch(e){
    earnResults=previousResults;
