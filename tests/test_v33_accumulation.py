@@ -80,3 +80,39 @@ def test_group_volume_rotation_and_alignment():
     assert appmod._rotation_alignment("bullish", g["XLK"])[0] == 10
     assert appmod._rotation_alignment("bullish", g["XLE"])[0] == -15
     assert appmod._rotation_alignment("bearish", g["XLE"])[0] == 10
+
+
+def _climax(test=True, buying=True, seed=5):
+    rng = np.random.default_rng(seed)
+    c = list(100 + np.cumsum(rng.normal(.05, .8, 100))); v = list(rng.uniform(1e6, 1.2e6, 100))
+    for i in range(12):                       # decline into the low
+        c.append(c[-1] - 1.2); v.append(1.3e6)
+    c.append(c[-1] - 2.5); v.append(4.0e6)   # climax bar
+    low_i = len(c) - 1
+    for i in range(6):                        # bounce
+        c.append(c[-1] + 1.0); v.append(1.8e6 if buying else .5e6)
+        if not buying: c[-1] -= .0
+    if not buying:
+        for i in range(3): c.append(c[-1] - .4); v.append(1.6e6)
+    if test:
+        for i in range(4):                    # light-volume pullback holding above the low
+            c.append(c[-1] - .6); v.append(.6e6)
+    c = np.array(c); h = c + .6; l = c - .6
+    l[low_i] = c[low_i] - 1.5
+    return _frame(c, h, l, np.array(v))
+
+
+def test_since_low_read_climax_and_test():
+    r = appmod.since_low_read(_climax(test=True))
+    assert r["climax"] and r["test"] and r["bounce_udr"] >= 1.2
+    r2 = appmod.since_low_read(_climax(test=False, buying=False, seed=6))
+    assert r2["climax"] and not r2["test"]
+
+
+def test_group_climax_overrides_distribution():
+    data = {f"S{i}": _climax(test=True, seed=20 + i) for i in range(6)}
+    mem = {t: ["SMH"] for t in data}
+    g = appmod.group_volume_rotation(data, mem, {"SMH": {"quadrant": "Improving"}})["SMH"]
+    assert g["flow_20d"] <= -15
+    assert g["signal"].startswith("Selling climax") and g["flow"] >= 0
+    assert appmod._rotation_alignment("bullish", g)[0] >= 0
