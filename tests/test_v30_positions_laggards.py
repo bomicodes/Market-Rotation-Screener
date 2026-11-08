@@ -253,3 +253,12 @@ def test_post_reaction_moves_dedupes_same_report():
     df, dates = _hist_df()
     dup = dates + [d + pd.Timedelta(hours=16) for d in dates] + [d + pd.Timedelta(days=1) for d in dates]
     assert len(appmod.post_reaction_moves(df, dup, 2)) == len(appmod.post_reaction_moves(df, dates, 2))
+
+
+def test_date_only_after_close_maps_to_reaction_session():
+    idx = pd.bdate_range("2026-01-05", periods=30)
+    c = np.full(30, 100.0); c[11:] = 110.0      # gap on session 11 (report after close on session 10)
+    df = pd.DataFrame({"Open": c, "High": c + .5, "Low": c - .5, "Close": c, "Volume": 1e6}, index=idx)
+    pos = appmod.event_session_index(df, idx[10])  # date-only, the report day
+    assert pos == 11
+    assert appmod.event_session_index(df, idx[11]) == 11
