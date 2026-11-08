@@ -1,5 +1,4 @@
-v34.4.2 — EARNINGS REACTION DAY FIX
-- Date-only earnings dates (no time of day) now map to the session with the bigger reaction (the date or the next session),
-  so an after-close report's gap is "day 1", not "day 2". Affects the History table and the strangle odds.
-- Two listed dates within 30 sessions are one report: the one with the bigger reaction is kept. History rows show the reaction session's date.
+v34.5 — STRANGLE ODDS ON EVERY EARNINGS ROW
+- Each post-earnings row shows a badge: "High/Medium/Low odds · 1 week $217" (⚠ if over budget; hover for the reasons).
+- The server prices every row's strangle right after warming its history; the page fills badges two at a time. Changing the budget re-prices.
 
