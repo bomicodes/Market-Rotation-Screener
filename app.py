@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.3"
+APP_VERSION = "34.3.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5236,6 +5236,9 @@ def group_volume_rotation(data, memberships, rrg):
         if flow20<=-15 and climax_pct>=25 and bflow is not None:
             if test_pct>=20 and bflow>-15: sig="Selling climax · testing the low"; flow=max(bflow,0)
             elif bflow>=15: sig="Selling climax · bounce has buying"; flow=bflow
+        # 20-day distribution but the bounce off the low is getting clear buying:
+        # keep the distribution read, but soften it (no hard gate downstream).
+        if sig is None and flow20<=-15 and bflow is not None and bflow>=40: flow=max(flow20,-20)
         if sig is None:
             if q in ("Leading","Improving") and flow>=15: sig="Rotating in · volume confirms"
             elif q in ("Lagging","Weakening") and flow>=15: sig="Quiet accumulation · volume ahead of price"
@@ -5295,7 +5298,7 @@ def group_flow_payload():
 def api_group_flow():
     try:
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe("group-flow-v34-3",group_flow_payload,force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe("group-flow-v34-4",group_flow_payload,force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -5356,7 +5359,7 @@ def api_accumulation():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"accum-v34-3:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"accum-v34-4:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
