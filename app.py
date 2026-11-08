@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.4.1"
+APP_VERSION = "34.4.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34","earn-dates-v1:","earnings-profile-v19:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2436,11 +2436,21 @@ def event_session_index(df, earnings_date):
     d=ts.normalize()
     pos=int(idx.searchsorted(d))
     if pos>=len(idx):return None
-    # An after-close report belongs to the NEXT regular session. Premarket or
-    # date-only events use the first session on/after the calendar date.
+    # An after-close report belongs to the NEXT regular session. Premarket
+    # events use the first session on/after the calendar date.
     if ts.hour>=16:
         while pos<len(idx) and pd.Timestamp(idx[pos]).normalize()<=d: pos+=1
     if pos>=len(idx):return None
+    # v34.4.2: a date-only event (no time of day) can be either. The reaction
+    # session is the one with the bigger gap/return, so pick between the session
+    # on the date and the next one -- otherwise an after-close report's gap lands
+    # on "day 2" and is counted as post-earnings drift.
+    if ts.hour==0 and ts.minute==0 and pos+1<len(idx) and pos>=1 and "Close" in getattr(df,"columns",[]):
+        try:
+            c=df["Close"].values
+            r0=abs(float(c[pos])/float(c[pos-1])-1); r1=abs(float(c[pos+1])/float(c[pos])-1)
+            if r1>r0*1.5: pos+=1
+        except Exception: pass
     return int(pos)
 
 def abs_excursion(df, start_pos, days):
@@ -2471,10 +2481,17 @@ def earnings_profile(ticker, dates):
     if len(df)<80 or not dates:
         return None
     events=[]
+    cands=[]
     for d in sorted(dates):
         pos=event_session_index(df,d)
         if pos is None or pos<=0: continue
-        row={"date":pd.Timestamp(d).strftime("%Y-%m-%d")}
+        rx=abs(float(df["Close"].iloc[pos])/float(df["Close"].iloc[pos-1])-1)
+        if cands and pos-cands[-1][0]<30:
+            if rx>cands[-1][1]: cands[-1]=(pos,rx,d)
+            continue
+        cands.append((pos,rx,d))
+    for pos,rx,d in cands:
+        row={"date":pd.Timestamp(df.index[pos]).strftime("%Y-%m-%d")}
         for n in (1,3,5,10,14):
             row[f"close{n}"]=close_return(df,pos,n)
             row[f"exc{n}"]=abs_excursion(df,pos,n)
@@ -4653,16 +4670,23 @@ def post_reaction_moves(df, dates, sessions):
             except Exception: t=t.tz_localize(None)
         k=t.normalize()
         if k not in by_day or (by_day[k].hour==0 and t.hour!=0): by_day[k]=t
-    seen=set()
+    cands=[]
     for d in sorted(by_day.values()):
-        try:
-            pos=event_session_index(df,d)
-        except Exception:
-            pos=None
-        if pos is None or pos<=0 or pos+sessions>=len(df) or pos in seen: continue
-        # two "reports" within 30 sessions are one report listed twice
-        if any(abs(pos-q)<30 for q in seen): continue
-        seen.add(pos)
+        try: pos=event_session_index(df,d)
+        except Exception: pos=None
+        if pos is None or pos<=0: continue
+        rx=abs(float(df["Close"].iloc[pos])/float(df["Close"].iloc[pos-1])-1)
+        cands.append((pos,rx,d))
+    # two "reports" within 30 sessions are one report listed twice: keep the date
+    # with the bigger reaction (the real one)
+    picked=[]
+    for pos,rx,d in cands:
+        if picked and pos-picked[-1][0]<30:
+            if rx>picked[-1][1]: picked[-1]=(pos,rx,d)
+            continue
+        picked.append((pos,rx,d))
+    for pos,rx,d in picked:
+        if pos+sessions>=len(df): continue
         entry=float(df["Close"].iloc[pos])
         seg=df.iloc[pos+1:pos+1+sessions]
         if len(seg)<sessions or entry<=0: continue
@@ -4798,7 +4822,7 @@ def api_strangle_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         ev=request.args.get("event_date") or None
-        payload,stale,err=cached_refresh_safe(f"strangle-v35-1:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"strangle-v35-2:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -6552,7 +6576,7 @@ def earnings_history_payload(ticker, event_date=None):
         dates=sorted(uniq.values(),reverse=True)
         profile=earnings_profile(ticker,dates)
         return {"profile":profile,"dates_found":len(dates),"dates":[pd.Timestamp(d).strftime("%Y-%m-%d") for d in dates[:12]]}
-    return cached_refresh_safe(f"earnings-profile-v19:{ticker}:{event_date or 'latest'}",build,ttl=12*3600)[0]
+    return cached_refresh_safe(f"earnings-profile-v20:{ticker}:{event_date or 'latest'}",build,ttl=12*3600)[0]
 
 
 _EARN_WARM={"running":set(),"lock":threading.Lock()}
@@ -6563,7 +6587,7 @@ def warm_earnings_histories(rows, workers=3):
     for r in rows or []:
         t=str(r.get("ticker") or "").upper(); d=r.get("earnings_date")
         if not t: continue
-        key=f"earnings-profile-v19:{t}:{d or 'latest'}"
+        key=f"earnings-profile-v20:{t}:{d or 'latest'}"
         hit=CACHE.get(key)
         if hit and time.time()-hit[0]<12*3600: continue
         with _EARN_WARM["lock"]:
