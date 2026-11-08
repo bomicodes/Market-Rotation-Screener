@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.4.2"
+APP_VERSION = "34.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6595,9 +6595,14 @@ def warm_earnings_histories(rows, workers=3):
             _EARN_WARM["running"].add(key)
         todo.append((t,d,key))
     if not todo: return 0
+    try: budget=int(float((_kv_get("nightly-hints",{}) or {}).get("budget") or 250))
+    except Exception: budget=250
     def one(item):
         t,d,key=item
         try: earnings_history_payload(t,d)
+        except Exception: pass
+        try:   # v34.5: price the strangle too, so the row badge is instant
+            cached_refresh_safe(f"strangle-v35-2:{t}:{budget}:{d or '-'}",lambda:strangle_plan(t,budget,event_date=d),ttl=600)
         except Exception: pass
         finally:
             with _EARN_WARM["lock"]: _EARN_WARM["running"].discard(key)
@@ -12771,7 +12776,26 @@ function v32MountEarnings(){
  if(host&&src){[...src.children].forEach(ch=>host.appendChild(ch));v32EarnMounted=true;}
 }
 const _renderEarningsV32=renderEarnings;
-renderEarnings=function(){const o=_renderEarningsV32.apply(this,arguments);try{document.querySelectorAll("#earnRows tr[data-pe-open]").forEach(tr=>{if(tr.querySelector("[data-v32-strangle]"))return;const td=tr.lastElementChild;if(td)td.insertAdjacentHTML("beforeend",`<div style="margin-top:6px"><button type="button" class="v32Btn" style="min-height:32px;font-size:12px" data-v32-strangle="${v32E(tr.dataset.peOpen)}">Plan strangle</button></div>`);});}catch(e){}return o};
+renderEarnings=function(){const o=_renderEarningsV32.apply(this,arguments);try{document.querySelectorAll("#earnRows tr[data-pe-open]").forEach(tr=>{if(tr.querySelector("[data-v32-strangle]"))return;const td=tr.lastElementChild;const t=tr.dataset.peOpen;if(td)td.insertAdjacentHTML("beforeend",`<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px;align-items:flex-start"><span class="v35Odds" data-v35-odds="${v32E(t)}">${v35BadgeHTML(t)}</span><button type="button" class="v32Btn" style="min-height:32px;font-size:12px" data-v32-strangle="${v32E(t)}">Plan strangle</button></div>`);});v35QueueOdds();}catch(e){}return o};
+// ---- v34.5 strangle odds badge on every Earnings row ---------------------------------
+window.__v35Odds={};let v35Running=0;const v35Queue=[];
+function v35BadgeHTML(t){
+ const r=window.__v35Odds[t];
+ if(!r)return `<span class="v32Muted" style="font-size:11px">strangle odds…</span>`;
+ if(r.err)return `<span class="v32Muted" style="font-size:11px">${v32E(r.err)}</span>`;
+ const c={High:"#3DD68C",Medium:"#F2B84B",Low:"#FF8A78"}[r.label]||"#8B97A6";
+ return `<span style="font-size:11.5px;font-weight:600;color:${c};border:1px solid ${c}55;border-radius:999px;padding:2px 8px" title="${v32E((r.notes||[]).join(" "))}">${v32E(r.label)} odds · ${v32E(r.tenor)} ${v32$(r.cost,0)}${r.fits?"":" ⚠"}</span>`;
+}
+function v35Paint(t){document.querySelectorAll(`[data-v35-odds="${CSS.escape(t)}"]`).forEach(el=>el.innerHTML=v35BadgeHTML(t));}
+function v35QueueOdds(){
+ (earnResults||[]).forEach(x=>{if(x?.ticker&&!(x.ticker in window.__v35Odds)&&!v35Queue.some(q=>q.ticker===x.ticker)&&!x._v35)v35Queue.push(x)});
+ while(v35Running<2&&v35Queue.length){const x=v35Queue.shift();x._v35=true;v35Running++;
+   fetch(`/api/strangle-plan/${encodeURIComponent(x.ticker)}?budget=${encodeURIComponent(v26Budget())}${x.earnings_date?`&event_date=${encodeURIComponent(x.earnings_date)}`:""}`).then(r=>r.json()).then(j=>{
+     if(!j.ok||!j.available){window.__v35Odds[x.ticker]={err:j.ok?"no 1–2 week pair":"odds unavailable"};return}
+     window.__v35Odds[x.ticker]={label:j.odds?.label||"Unrated",notes:j.odds?.notes||[],tenor:j.tenor,cost:j.cost,fits:j.fits_budget,score:j.odds?.score};
+   }).catch(()=>{window.__v35Odds[x.ticker]={err:"odds unavailable"}}).finally(()=>{v35Running--;v35Paint(x.ticker);v35QueueOdds();});}
+}
+document.addEventListener("change",e=>{if(e.target&&(e.target.id==="v32Budget"||e.target.id==="v26BudgetInput")){window.__v35Odds={};(earnResults||[]).forEach(x=>{if(x)x._v35=false});try{renderEarnings()}catch(err){}}});
 document.getElementById("v32StrangleForm")?.addEventListener("submit",ev=>{ev.preventDefault();const t=String(document.getElementById("v32StrangleTicker").value||"").toUpperCase().trim();if(t)v32PlanStrangle(t);});
 async function v32PlanStrangle(t){
  const out=document.getElementById("v32StrangleOut"),inp=document.getElementById("v32StrangleTicker");if(inp)inp.value=t;if(!out)return;
