@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.4"
+APP_VERSION = "34.4.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4641,12 +4641,28 @@ def post_reaction_moves(df, dates, sessions):
     and down over the next `sessions` sessions (highs/lows)."""
     out=[]
     if df is None or len(df)<40: return out
-    for d in sorted(set(pd.Timestamp(x) for x in dates or [])):
+    # one event per calendar date (Yahoo and Nasdaq list the same report with
+    # different timestamps), keeping the timed entry so after-close reports map
+    # to the next session; and one event per session index.
+    by_day={}
+    for x in dates or []:
+        try: t=pd.Timestamp(x)
+        except Exception: continue
+        if getattr(t,"tzinfo",None) is not None:
+            try: t=t.tz_convert("America/New_York").tz_localize(None)
+            except Exception: t=t.tz_localize(None)
+        k=t.normalize()
+        if k not in by_day or (by_day[k].hour==0 and t.hour!=0): by_day[k]=t
+    seen=set()
+    for d in sorted(by_day.values()):
         try:
             pos=event_session_index(df,d)
         except Exception:
             pos=None
-        if pos is None or pos<=0 or pos+sessions>=len(df): continue
+        if pos is None or pos<=0 or pos+sessions>=len(df) or pos in seen: continue
+        # two "reports" within 30 sessions are one report listed twice
+        if any(abs(pos-q)<30 for q in seen): continue
+        seen.add(pos)
         entry=float(df["Close"].iloc[pos])
         seg=df.iloc[pos+1:pos+1+sessions]
         if len(seg)<sessions or entry<=0: continue
@@ -4782,7 +4798,7 @@ def api_strangle_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         ev=request.args.get("event_date") or None
-        payload,stale,err=cached_refresh_safe(f"strangle-v35:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"strangle-v35-1:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
