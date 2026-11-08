@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.1"
+APP_VERSION = "34.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7484,7 +7484,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
  <div class="v32Main"><div class="v32Title"><h1>Accumulation &amp; distribution</h1><span class="v32Muted" id="v33AccSub">Tight ranges with inside bars and building volume · the lean comes from where the volume goes</span>
    <div class="v32Seg" role="group" aria-label="Filter bases"><button type="button" data-v33-filter="all" class="on">All</button><button type="button" data-v33-filter="bullish">Accumulation</button><button type="button" data-v33-filter="bearish">Distribution</button></div>
    <button type="button" class="v32Ghost" id="v33AccRefresh" aria-label="Rescan bases">↻</button></div>
-  <section class="v32Panel"><div class="v32PanelHead"><h2>Group rotation × volume</h2><span class="v32Muted">RRG position vs where volume is going inside each group (20d: % of members accumulating − % distributing)</span></div><div id="v34Groups" class="v32Muted">Loading…</div></section>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>Group rotation × volume</h2><span class="v32Muted">Where the group sits on the RRG vs whether its holdings are being accumulated or distributed (last 20 sessions)</span></div><div id="v34Groups" class="v32Muted">Loading…</div></section>
   <div id="v33AccCards" class="v32Cards"><div class="v32Empty">Loading…</div></div>
   <section class="v32Panel"><div class="v32PanelHead"><h2>Still building</h2><span class="v32Muted">Bases without a tradeable plan yet: no clear lean, against the group, low quality, reward/risk under 1.5, or thin options</span></div><div id="v33AccWatch"></div></section>
   <section class="v32Panel"><div class="v32PanelHead"><h2>How to read it</h2></div><div class="v32Muted" style="font-size:13px;line-height:1.55">
@@ -12428,10 +12428,10 @@ function v32CollectIdeas(){
        chips:[ct.signal?`${ct.signal.timeframe} ${ct.signal.type}`:null,ct.level_name?`${ct.level_name} ${v32$(ct.level)}`:null,"Against the rotation"].filter(Boolean)});
    }
  });
- (window.__laggards?.rows||[]).forEach(m=>{
-   ideas.push({ticker:m.ticker,parent:m.parent,dir:"bullish",kind:"laggard",lane:"laggard",laneLabel:"Laggard catch-up",plan:m.entry_plan,vs:m.vp_strat,score:m.score,
+ v34LagRows().forEach(m=>{
+   ideas.push({ticker:m.ticker,parent:m.parent,dir:"bullish",kind:"laggard",lane:"laggard",laneLabel:"Laggard catch-up",plan:m.entry_plan,vs:m.vp_strat,score:m._score,
      summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)} · relative line ${v32Pct(m.rs_turn_5d,1)} last 5d.`,
-     chips:[`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)});
+     chips:[m._flow.chip,`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)});
  });
  try{v33AccIdeas().slice(0,3).forEach(c=>{if(!ideas.some(x=>x.ticker===c.ticker&&x.dir===c.dir))ideas.push(c)})}catch(e){}
  const shownT=new Set(ideas.map(c=>c.ticker));
@@ -12533,9 +12533,9 @@ drawRRG=function(id,rows,focus,fixed){const o=_drawRRGV32(id,rows,focus,fixed);i
 function v32RenderLaggardsInto(id){
  const el=document.getElementById(id);if(!el)return;const j=window.__laggards||{};
  if(j.loading){el.innerHTML=`<div class="v32Empty">Screening rotating-in groups…</div>`;return}
- const rows=j.rows||[];
+ const rows=v34LagRows();
  el.innerHTML=rows.length?rows.map(m=>v32CardHTML({ticker:m.ticker,parent:m.parent,dir:"bullish",kind:"laggard",lane:"laggard",laneLabel:"Laggard catch-up",plan:m.entry_plan,vs:m.vp_strat,
-   summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)}.`,chips:[`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)})).join("")
+   summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)}.`,chips:[m._flow.chip,`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)})).join("")
    :`<div class="v32Empty">${j.screened?`${j.screened} holdings screened · ${j.candidates} lagging · none with liquid options.`:"Runs after the board scan."}</div>`;
 }
 const _v30RenderLaggardsV32=v30RenderLaggards;
@@ -12592,7 +12592,7 @@ function v33BaseChips(b){
  if(b.volume_building)ch.push(`volume building${b.vol_build?` ${b.vol_build}×`:""}`);
  if(b.spring&&b.direction==="bullish")ch.push(`spring ${b.spring.date.slice(5)}`);
  if(b.upthrust&&b.direction==="bearish")ch.push(`upthrust ${b.upthrust.date.slice(5)}`);
- const ro=b.rotation||{};if(ro.group)ch.unshift(`${ro.adj>0?"✓ ":ro.adj<0?"✗ ":""}${ro.group} ${ro.quadrant||""} · flow ${ro.flow>0?"+":""}${ro.flow??"—"}`);
+ const ro=b.rotation||{};if(ro.group)ch.unshift(`${ro.adj>0?"✓ ":ro.adj<0?"✗ ":""}${ro.group} ${v34Word(ro.flow).toLowerCase()}`);
  if(b.compression<.95)ch.push(`range squeeze ${Math.round((1-b.compression)*100)}%`);else if(b.bb_width_pct<=25)ch.push(`Bollinger squeeze (${b.bb_width_pct}th pct)`);
  return ch;
 }
@@ -12601,7 +12601,7 @@ function v33BaseExtra(b){
  return `<div><b>Why ${v32E(b.bias)}</b> ${v32E((b.why||[]).join(" · ")||"—")} · lean score ${b.bias_score>0?"+":""}${b.bias_score}</div>
   <div><b>Base</b> ${b.base_days} sessions · daily range now ${Math.round(b.compression*100)}% of normal · Bollinger width at the ${b.bb_width_pct}th pct of 6 months · before the base: ${v32Pct(b.prior_move_pct,1)} over 40 sessions</div>
   <div><b>Volume</b> last 10d ${b.vol_build?b.vol_build+"×":"—"} the first half of the base · up/down-day volume ${b.up_down_vol}× · A/D ${b.ad>0?"+":""}${b.ad}</div>
-  <div><b>Group</b> ${v32E(b.rotation?.group||"—")}: ${v32E(b.rotation?.quadrant||"—")}${b.rotation?.trajectory?` (${v32E(b.rotation.trajectory)})`:""} · ${v32E(b.rotation?.signal||"")} · ${v32E(b.rotation?.alignment||"")} (${(b.rotation?.adj||0)>0?"+":""}${b.rotation?.adj||0} quality; base alone ${b.base_quality})</div>
+  <div><b>Group</b> ${v32E(b.rotation?.group||"—")}: ${v32E(b.rotation?.quadrant||"—")}${b.rotation?.trajectory?` (${v32E(b.rotation.trajectory)})`:""} · holdings ${v32E(v34Word(b.rotation?.flow).toLowerCase())} · ${v32E(b.rotation?.signal||"")} · <b>${v32E(b.rotation?.alignment||"")}</b></div>
   <div><b>Confirm</b> ${v32E(p.confirm||"")}. If it breaks on light volume or closes back inside the range, it's a false break — out.</div>`;
 }
 function v33AccIdeas(){
@@ -12622,7 +12622,7 @@ function v33RenderAccum(){
  const j=window.__accum;
  const gh=document.getElementById("v34Groups");
  if(gh&&j){const G=(j.groups||[]).slice(0,14);const qc={Leading:"#3DD68C",Improving:"#5AB8F0",Weakening:"#F2B84B",Lagging:"#FF8A78"};
-   gh.innerHTML=G.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Group</th><th>RRG</th><th>Volume flow</th><th>Accum / dist members</th><th>Bases ↑ / ↓</th><th>Read</th></tr></thead><tbody>${G.map(g=>`<tr><td><b class="v32Num">${v32E(g.group)}</b> <span class="v32Muted">${v32E(g.name)}</span></td><td style="color:${qc[g.quadrant]||"#8B97A6"}">${v32E(g.quadrant||"—")}${g.trajectory&&g.trajectory!=="Neutral"?` <span class="v32Muted">${v32E(g.trajectory.toLowerCase())}</span>`:""}</td><td class="v32Num" style="color:${g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6"}">${g.flow>0?"+":""}${g.flow}</td><td class="v32Num">${g.accumulating_pct}% / ${g.distributing_pct}% <span class="v32Muted">of ${g.members}</span></td><td class="v32Num">${g.acc_bases} / ${g.dist_bases}</td><td>${g.signal==="Quiet accumulation · volume ahead of price"?`<b style="color:#3DD68C">${v32E(g.signal)}</b>`:g.signal==="Distribution under the surface"?`<b style="color:#FF8A78">${v32E(g.signal)}</b>`:v32E(g.signal)}</td></tr>`).join("")}</tbody></table></div>`:"No group read.";}
+   gh.innerHTML=G.length?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Group</th><th>RRG</th><th>Holdings' volume</th><th>Bases ↑ / ↓</th><th>Read</th></tr></thead><tbody>${G.map(g=>`<tr><td><b class="v32Num">${v32E(g.group)}</b> <span class="v32Muted">${v32E(g.name)}</span></td><td style="color:${qc[g.quadrant]||"#8B97A6"}">${v32E(g.quadrant||"—")}${g.trajectory&&g.trajectory!=="Neutral"?` <span class="v32Muted">${v32E(g.trajectory.toLowerCase())}</span>`:""}</td><td style="color:${g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6"}" title="flow ${g.flow>0?"+":""}${g.flow}: ${g.accumulating_pct}% accumulating, ${g.distributing_pct}% distributing of ${g.members}">${v34Word(g.flow)}</td><td class="v32Num">${g.acc_bases} / ${g.dist_bases}</td><td>${g.signal==="Quiet accumulation · volume ahead of price"?`<b style="color:#3DD68C">${v32E(g.signal)}</b>`:g.signal==="Distribution under the surface"?`<b style="color:#FF8A78">${v32E(g.signal)}</b>`:v32E(g.signal)}</td></tr>`).join("")}</tbody></table></div>`:"No group read.";}
  else if(gh)gh.textContent=v33AccLoading?"Scanning…":"—";
  if(!j){host.innerHTML=`<div class="v32Empty">${v33AccLoading?"Scanning sector holdings for bases… the first run takes about a minute.":window.__accumErr?`Scan failed: ${v32E(window.__accumErr)}`:"Loading…"}</div>`;if(wh)wh.innerHTML="";return}
  const ideas=v33AccIdeas().filter(c=>v33AccFilter==="all"||c.dir===v33AccFilter);
@@ -12657,13 +12657,31 @@ const V34_SHORT={"Rotating in · volume confirms":"confirms in","Quiet accumulat
 function v34FlowCell(g){
  if(!g)return `<span class="v32Muted">—</span>`;
  const c=g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6";
- return `<b class="v32Num" style="color:${c}">${g.flow>0?"+":""}${g.flow}</b><div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div>`;
+ return `<span title="flow ${g.flow>0?"+":""}${g.flow}: ${g.accumulating_pct}% of top ${g.members} holdings accumulating, ${g.distributing_pct}% distributing"><b style="color:${c};font-size:13px">${v34Word(g.flow)}</b><div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div></span>`;
 }
-function v34FlowSentence(g){
- return `<b>Volume inside ${v32E(g.group)}:</b> ${g.accumulating_pct}% of its top ${g.members} holdings accumulating, ${g.distributing_pct}% distributing (flow ${g.flow>0?"+":""}${g.flow}) · <b>${v32E(g.signal)}</b>.`;
+function v34Word(f){f=Number(f);if(!Number.isFinite(f))return "—";return f>=40?"Strong accumulation":f>=15?"Accumulating":f<=-40?"Strong distribution":f<=-15?"Distributing":"Mixed"}
+const V34_SENT={"Quiet accumulation · volume ahead of price":"its holdings are being accumulated while the group still looks weak on the RRG — volume is ahead of price, often an early sign of rotation in.",
+ "Rotating in · volume confirms":"it's rotating in on the RRG and its holdings' volume backs it up.",
+ "Distribution under the surface":"it looks strong on the RRG, but its holdings are being distributed — the move isn't backed by volume.",
+ "Rotating out · volume confirms":"it's rotating out on the RRG and its holdings' volume confirms the selling.",
+ "Mixed":"no clear volume lean across its holdings."};
+function v34FlowSentence(g){return `<b>${v32E(g.group)} · ${v34Word(g.flow)}:</b> ${v32E(V34_SENT[g.signal]||g.signal)}`}
+// v34.2: group flow in the laggard lane — a laggard in a group being accumulated
+// is a stronger catch-up candidate; one in a group being distributed is weaker.
+function v34LagAdj(m){
+ const g=v34Flow()[m.parent];if(!g)return {adj:0,chip:null};
+ const f=Number(g.flow);
+ if(f>=40)return {adj:5,chip:`✓ ${m.parent} strong accumulation`};
+ if(f>=15)return {adj:3,chip:`✓ ${m.parent} accumulating`};
+ if(f<=-40)return {adj:-6,chip:`✗ ${m.parent} strong distribution`,warn:true};
+ if(f<=-15)return {adj:-3,chip:`✗ ${m.parent} distributing`,warn:true};
+ return {adj:0,chip:null};
+}
+function v34LagRows(){
+ return ((window.__laggards||{}).rows||[]).map(m=>{const a=v34LagAdj(m);return {...m,_flow:a,_score:Number(m.score||0)+a.adj}}).sort((x,y)=>y._score-x._score);
 }
 async function v34LoadGroupFlow(){
- try{const j=await (await fetch("/api/group-flow")).json();if(j.ok&&j.groups){window.__groupFlow=j;try{v32RenderSectors()}catch(e){}try{if(typeof renderTopSetups==="function"&&(globalTopSetupData||[]).length)renderTopSetups()}catch(e){}try{v32RenderTonight()}catch(e){}}}catch(e){console.warn("group flow",e)}
+ try{const j=await (await fetch("/api/group-flow")).json();if(j.ok&&j.groups){window.__groupFlow=j;try{v32RenderSectors()}catch(e){}try{v32RenderLaggardsInto("v32Laggards")}catch(e){}try{if(typeof renderTopSetups==="function"&&(globalTopSetupData||[]).length)renderTopSetups()}catch(e){}try{v32RenderTonight()}catch(e){}}}catch(e){console.warn("group flow",e)}
 }
 // Top Setups: group volume flow as a scoring factor. Longs gain when the group's
 // holdings are accumulating and lose when they are distributing; a group with
@@ -12675,10 +12693,10 @@ topSetupEvaluation=function(x){
    const g=v34Flow()[x._parentTicker];if(!g||!e||!e.direction)return e;
    const bull=e.direction==="bullish",f=Number(g.flow)*(bull?1:-1);
    let d=0;const reasons=(e.reasons||[]).slice(),gates=(e.gateFailures||[]).slice();let hard=e.hardPass;
-   const lbl=`${x._parentTicker} volume flow ${g.flow>0?"+":""}${g.flow} (${V34_SHORT[g.signal]||g.signal})`;
+   const lbl=`${x._parentTicker} holdings ${v34Word(g.flow).toLowerCase()}${g.signal!=="Mixed"?` · ${V34_SHORT[g.signal]||g.signal}`:""}`;
    if(f>=40){d=8;reasons.push([lbl,"good"]);}
    else if(f>=15){d=5;reasons.push([lbl,"good"]);}
-   else if(f<=-40){d=-12;reasons.unshift([lbl,"warn"]);gates.push(`${x._parentTicker} holdings are ${bull?"distributing":"accumulating"} (volume flow ${g.flow>0?"+":""}${g.flow}) — the money is going the other way`);hard=false;}
+   else if(f<=-40){d=-12;reasons.unshift([lbl,"warn"]);gates.push(`${x._parentTicker} holdings are under heavy ${bull?"distribution":"accumulation"} — the money is going the other way`);hard=false;}
    else if(f<=-15){d=-6;reasons.unshift([lbl,"warn"]);}
    if(!d&&gates.length===(e.gateFailures||[]).length)return {...e,groupFlow:g};
    const raw=Number(e.rawScore||0)+d;
