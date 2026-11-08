@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.2"
+APP_VERSION = "34.2.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -12657,7 +12657,7 @@ const V34_SHORT={"Rotating in · volume confirms":"confirms in","Quiet accumulat
 function v34FlowCell(g){
  if(!g)return `<span class="v32Muted">—</span>`;
  const c=g.flow>=15?"#3DD68C":g.flow<=-15?"#FF8A78":"#8B97A6";
- return `<span title="flow ${g.flow>0?"+":""}${g.flow}: ${g.accumulating_pct}% of top ${g.members} holdings accumulating, ${g.distributing_pct}% distributing"><b style="color:${c};font-size:13px">${v34Word(g.flow)}</b><div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div></span>`;
+ return `<span title="flow ${g.flow>0?"+":""}${g.flow}: ${g.accumulating_pct}% of top ${g.members} holdings accumulating, ${g.distributing_pct}% distributing"><b style="color:${c};font-size:13px">${v34Word(g.flow)}</b>${g.signal!=="Mixed"?`<div class="v32Muted" style="font-size:11px">${v32E(V34_SHORT[g.signal]||g.signal)}</div>`:""}</span>`;
 }
 function v34Word(f){f=Number(f);if(!Number.isFinite(f))return "—";return f>=40?"Strong accumulation":f>=15?"Accumulating":f<=-40?"Strong distribution":f<=-15?"Distributing":"Mixed"}
 const V34_SENT={"Quiet accumulation · volume ahead of price":"its holdings are being accumulated while the group still looks weak on the RRG — volume is ahead of price, often an early sign of rotation in.",
