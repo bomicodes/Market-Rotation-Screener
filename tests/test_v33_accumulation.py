@@ -124,3 +124,15 @@ def test_scan_caches_are_refreshed_by_nightly():
     prefixes = [x.strip().strip('"') for x in line.split("(", 1)[1].replace("\n", "").split(",") if x.strip()]
     for k in ("accum-v34-4:250", "group-flow-v34-4"):
         assert any(k.startswith(p) for p in prefixes)
+
+
+def test_patch_latest_bars_appends_scaled_volume(monkeypatch):
+    idx = pd.bdate_range(end="2026-11-06", periods=100)
+    df = pd.DataFrame({"Open": 10.0, "High": 11.0, "Low": 9.0, "Close": 10.0, "Volume": 1e6}, index=idx)
+    al = {"AAA": {idx[-2].normalize(): (10, 11, 9, 10, 2e4), idx[-1].normalize(): (10, 11, 9, 10, 2e4),
+                  pd.Timestamp("2026-11-09"): (10, 12, 10, 11.5, 4e4)}}
+    monkeypatch.setattr(appmod, "_alpaca_multi_daily_ohlcv", lambda syms, days=12: al)
+    out = appmod._patch_latest_bars({"AAA": df})
+    last = out["AAA"].iloc[-1]
+    assert out["AAA"].index[-1] == pd.Timestamp("2026-11-09") and last["Close"] == 11.5
+    assert abs(last["Volume"] - 2e6) < 1     # 4e4 IEX x (1e6 / 2e4) ratio
