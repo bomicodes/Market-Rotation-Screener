@@ -262,3 +262,13 @@ def test_date_only_after_close_maps_to_reaction_session():
     pos = appmod.event_session_index(df, idx[10])  # date-only, the report day
     assert pos == 11
     assert appmod.event_session_index(df, idx[11]) == 11
+
+
+def test_participation_liquidity_overrides_wide_after_hours_spreads():
+    rows = []
+    for k, (oi, vol, spr) in enumerate([(10813, 324, 14.7), (5145, 81, 17.6), (1683, 119, 27.5), (1002, 99, 29.8), (922, 32, 16.7), (2301, 10, 25.0)]):
+        rows.append({"symbol": f"S{k}", "type": "call", "strike": 60 + k, "mid": 1.0, "dte": 11, "iv": 45, "delta": .4,
+                     "moneyness_pct": k * 1.0, "open_interest": oi, "volume": vol, "spread_pct": spr,
+                     "liquidity": "Tradable" if spr <= 15 and oi >= 100 and vol >= 25 else "Thin"})
+    out = appmod._summarize_option_rows("PYPL", 60.0, rows, .3)
+    assert out["liquidity"] == "Tradable" and out["liquidity_basis"] == "participation"

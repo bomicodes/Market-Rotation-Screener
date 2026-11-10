@@ -1,5 +1,8 @@
-v34.6.2–34.6.3 — NIGHTLY DATA FRESHNESS
-- The nightly job now refreshes the base scan (its cache key wasn't covered) and drops the 1-hour bulk OHLCV cache.
-- When Yahoo's bulk daily bars lag a session, the missing sessions come from Alpaca, with IEX volume scaled to consolidated
-  volume by each stock's own Yahoo/IEX ratio over the overlapping sessions.
+v34.7 — LIQUIDITY READ + NIGHTLY BACKUPS
+- Options liquidity: besides the spread-based rule, a chain counts by participation — Liquid with ≥ 4 near-the-money contracts
+  (within 10%) having OI ≥ 1,000, volume ≥ 100 and spread ≤ 40%; Tradable with ≥ 3 having OI ≥ 300, volume ≥ 25, spread ≤ 50%.
+  The free indicative feed (and every feed after the close, when the nightly runs) shows spreads far wider than the live market,
+  which had liquid names like PYPL reading "Thin".
+- Nightly: GitHub cron at 21:50, 22:25, 23:40 and 01:15 UTC (later ones exit if the run already happened), plus an in-app
+  watchdog that starts the run 45+ min after the close if nothing started.
 

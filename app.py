@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.6.3"
+APP_VERSION = "34.7"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -388,7 +388,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # evening visit) survives the free Render instance going to sleep. During
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
-L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
+L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
              "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
@@ -3621,13 +3621,24 @@ def _summarize_option_rows(ticker, spot, rows, rv20):
     liquid=sum(r["liquidity"]=="Liquid" for r in rows)
     tradable=sum(r["liquidity"] in ("Liquid","Tradable") for r in rows)
     liq="Liquid" if liquid>=3 else ("Tradable" if tradable>=3 else "Thin")
+    # v34.7: participation-based read. The free indicative feed (and every feed
+    # after the close, when the nightly runs) shows much wider spreads than the
+    # live market, so a heavily traded chain can read "Thin" on spreads alone.
+    # Real open interest + volume near the money counts, with a looser spread cap.
+    liq_basis="spread"
+    if liq!="Liquid":
+        near=[r for r in rows if r.get("moneyness_pct") is not None and abs(r["moneyness_pct"])<=10 and r.get("spread_pct") is not None]
+        p_liq=sum(1 for r in near if (r.get("open_interest") or 0)>=1000 and (r.get("volume") or 0)>=100 and r["spread_pct"]<=40)
+        p_trd=sum(1 for r in near if (r.get("open_interest") or 0)>=300 and (r.get("volume") or 0)>=25 and r["spread_pct"]<=50)
+        p="Liquid" if p_liq>=4 else ("Tradable" if p_trd>=3 else "Thin")
+        if {"Liquid":0,"Tradable":1,"Thin":2}[p]<{"Liquid":0,"Tradable":1,"Thin":2}[liq]: liq=p; liq_basis="participation"
     rank={"Liquid":0,"Tradable":1,"Thin":2}
     rows.sort(key=lambda r:(rank.get(r["liquidity"],3),abs(r["moneyness_pct"] or 999),-(r["open_interest"] or 0),-(r["volume"] or 0)))
     return {
         "ticker":ticker,"spot":round(spot,2),"rv20":round(rv_pct,1) if rv_pct is not None else None,
         "atm_iv":round(atm_iv,1) if atm_iv is not None else None,
         "iv_rv_ratio":round(ratio,2) if ratio is not None else None,
-        "iv_state":ivstate,"liquidity":liq,"liquid_contracts":liquid,
+        "iv_state":ivstate,"liquidity":liq,"liquidity_basis":liq_basis,"liquid_contracts":liquid,
         "tradable_contracts":tradable,"contracts_checked":len(rows),"contracts":rows[:120]
     }
 
@@ -3721,7 +3732,7 @@ def contract_liquidity_gate(ticker, gex_window="0-30", allow_leaps=True):
     clear the bar.
     """
     ticker=ticker.upper().strip()
-    front=cached_refresh_safe(f"options-scan-v27-21:{ticker}:{gex_window}:7:35",
+    front=cached_refresh_safe(f"options-scan-v34-7:{ticker}:{gex_window}:7:35",
                                lambda:options_scan_payload(ticker,gex_window,35,7),ttl=600)[0]
     if front.get("liquidity")=="Liquid" or not allow_leaps:
         return {**front,"liquidity_source":"front-month","leaps_checked":False}
@@ -5550,7 +5561,7 @@ def api_accumulation():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"accum-v34-4:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"accum-v34-7:{budget}",lambda:accumulation_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -5950,6 +5961,30 @@ def api_nightly_run():
         NIGHTLY["running"]=True
         threading.Thread(target=nightly_run,daemon=True,name="nightly").start()
     return jsonify({"ok":True,"started":True})
+
+
+def _nightly_watchdog():
+    """v34.7 backup: if the scheduled GitHub trigger is late (it has been hours
+    late twice), start the nightly scan from inside the app once it is 45 min
+    past the close and no run has started since. The app only runs while awake,
+    so the extra GitHub cron times are what wake it up."""
+    while True:
+        time.sleep(600)
+        try:
+            close=float(last_market_close_ts()); now=time.time()
+            if not (2700<=now-close<=12*3600): continue
+            with NIGHTLY["lock"]:
+                if NIGHTLY["running"]: continue
+                last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
+                if last and float(last)>=close: continue
+                NIGHTLY["running"]=True
+                threading.Thread(target=nightly_run,daemon=True,name="nightly-watchdog").start()
+        except Exception:
+            pass
+
+
+if os.environ.get("NIGHTLY_WATCHDOG","1")=="1" and "pytest" not in __import__("sys").modules:
+    threading.Thread(target=_nightly_watchdog,daemon=True,name="nightly-watchdog-loop").start()
 
 
 @app.get("/api/nightly/status")
