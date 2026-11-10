@@ -2,9 +2,15 @@ name: Nightly screener scan
 
 # Runs after the US close on weekdays. 21:50 UTC is 3:50 PM Central in winter
 # (CST) and 4:50 PM Central in summer (CDT) — both after the 4:00 PM ET close.
+# GitHub's scheduler can run hours late (it did on 11/06 and skipped 11/09), so
+# there are backup times. The app runs once per close; later triggers just see
+# "already ran" and exit. The app also has its own watchdog (v34.7).
 on:
   schedule:
     - cron: "50 21 * * 1-5"
+    - cron: "25 22 * * 1-5"
+    - cron: "40 23 * * 1-5"
+    - cron: "15 1 * * 2-6"
   workflow_dispatch: {}
 
 jobs:
