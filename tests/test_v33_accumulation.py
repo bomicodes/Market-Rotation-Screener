@@ -116,3 +116,11 @@ def test_group_climax_overrides_distribution():
     assert g["flow_20d"] <= -15
     assert g["signal"].startswith("Selling climax") and g["flow"] >= 0
     assert appmod._rotation_alignment("bullish", g)[0] >= 0
+
+
+def test_scan_caches_are_refreshed_by_nightly():
+    src = open(appmod.__file__).read()
+    line = src[src.index("L2_PREFIXES=("):src.index(")", src.index("L2_PREFIXES=("))]
+    prefixes = [x.strip().strip('"') for x in line.split("(", 1)[1].replace("\n", "").split(",") if x.strip()]
+    for k in ("accum-v34-4:250", "group-flow-v34-4"):
+        assert any(k.startswith(p) for p in prefixes)

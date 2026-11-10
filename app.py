@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.6.1"
+APP_VERSION = "34.6.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v33","group-flow-v34","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
 L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -5776,7 +5776,7 @@ def nightly_run():
     with client.session_transaction() as sess: sess["authenticated"]=True
     # Drop in-memory payloads so every request below recomputes from fresh data.
     for k in list(CACHE.keys()):
-        if _l2_enabled(k): CACHE.pop(k,None)
+        if _l2_enabled(k) or str(k).startswith("ohlcv-bulk:"): CACHE.pop(k,None)
     def get(url):
         r=client.get(url); return r.get_json(silent=True) or {}
     def post(url,body):
