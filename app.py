@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.6.2"
+APP_VERSION = "34.6.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5137,8 +5137,70 @@ def dl_ohlcv_bulk(tickers, period="9mo"):
     hit=CACHE.get(key)
     if hit and time.time()-hit[0]<3600: return hit[1]
     out=_dl_ohlcv_bulk_raw(tickers,period)
+    try: out=_patch_latest_bars(out)
+    except Exception: pass
     if len(out)>=max(5,len(tickers)//3): CACHE[key]=(time.time(),out)
     return out
+
+
+def _alpaca_multi_daily_ohlcv(symbols, days=12):
+    """Recent daily OHLCV for many symbols from Alpaca (IEX volume on the free plan)."""
+    symbols=list(dict.fromkeys(str(t or "").upper().strip() for t in symbols if t))
+    if not symbols or not (ALPACA_API_KEY and ALPACA_API_SECRET): return {}
+    from zoneinfo import ZoneInfo
+    end=datetime.now(ZoneInfo("America/New_York")); start=end-timedelta(days=days)
+    out={}
+    for off in range(0,len(symbols),100):
+        chunk=symbols[off:off+100]
+        params={"symbols":",".join(chunk),"timeframe":"1Day","start":start.isoformat(),"end":end.isoformat(),
+                "adjustment":"raw","feed":ALPACA_STOCK_FEED,"sort":"asc","limit":10000}
+        token=None
+        for _ in range(10):
+            if token: params["page_token"]=token
+            r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v2/stocks/bars",params=params,timeout=30)
+            if r.status_code!=200: break
+            j=r.json() or {}
+            for sym,rows in (j.get("bars") or {}).items():
+                for b in rows or []:
+                    try:
+                        ts=pd.Timestamp(b.get("t"))
+                        if ts.tzinfo is None: ts=ts.tz_localize("UTC")
+                        d=ts.tz_convert("America/New_York").tz_localize(None).normalize()
+                        out.setdefault(sym,{})[d]=(float(b["o"]),float(b["h"]),float(b["l"]),float(b["c"]),float(b.get("v") or 0))
+                    except Exception: pass
+            token=j.get("next_page_token")
+            if not token: break
+    return out
+
+
+def _patch_latest_bars(data):
+    """v34.6.3: Yahoo's bulk daily bars can lag a session after the close. Append
+    the missing latest sessions from Alpaca. Free-plan Alpaca volume is IEX-only
+    (a few % of consolidated), so it is scaled by the stock's own Yahoo/IEX
+    volume ratio over the sessions both sources have."""
+    if not data: return data
+    last=max(df.index[-1] for df in data.values())
+    al=_alpaca_multi_daily_ohlcv(list(data))
+    if not al: return data
+    newest=max((max(v) for v in al.values() if v),default=None)
+    if newest is None or newest<=pd.Timestamp(last).normalize(): return data
+    for t,df in list(data.items()):
+        bars=al.get(t)
+        if not bars: continue
+        idx=pd.DatetimeIndex(df.index).normalize()
+        missing=sorted(d for d in bars if d>idx[-1])
+        if not missing: continue
+        both=[d for d in bars if d in set(idx)]
+        ratios=[float(df["Volume"].iloc[list(idx).index(d)])/bars[d][4] for d in both if bars[d][4]>0 and float(df["Volume"].iloc[list(idx).index(d)])>0]
+        ratio=float(np.median(ratios)) if ratios else None
+        rows=[]
+        for d in missing:
+            o,h,l,c,v=bars[d]
+            rows.append({"Open":o,"High":h,"Low":l,"Close":c,"Volume":(v*ratio) if ratio else np.nan})
+        add=pd.DataFrame(rows,index=pd.DatetimeIndex(missing))
+        if df.index.tz is not None: add.index=add.index.tz_localize(df.index.tz)
+        data[t]=pd.concat([df,add])
+    return data
 
 
 def _dl_ohlcv_bulk_raw(tickers, period):
