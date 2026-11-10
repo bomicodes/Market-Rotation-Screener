@@ -1,0 +1,19 @@
+name: tmp price check
+on:
+  push:
+    branches: [tmp/price-check]
+jobs:
+  prices:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pip install -q yfinance pandas
+      - run: |
+          python - <<'PY'
+          import yfinance as yf
+          T=["SPY","QQQ","SMH","XLF","XLC","VZ","PYPL","DVN","RKLB","UBER","CARR","PLD","CDNS","SW","RL","JBHT","APP","XYZ","DDOG","AXON"]
+          df=yf.download(T,period="7d",interval="1d",group_by="ticker",auto_adjust=False,progress=False)
+          for t in T:
+              d=df[t].dropna().tail(3)
+              for i,r in d.iterrows():
+                  print(f"{t} {i.date()} O{r['Open']:.2f} H{r['High']:.2f} L{r['Low']:.2f} C{r['Close']:.2f} V{int(r['Volume'])}")
+          PY
