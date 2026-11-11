@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.8"
+APP_VERSION = "34.8.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5868,6 +5868,9 @@ def _loose_rrg_rank(x):
     return sc
 
 
+_NIGHTLY_HEAVY=("visible-","alpaca-day","alpaca-hour","alpaca-intraday","yf-","flow-","news-company","options-v","options-scan","options-selected","chart-","strat-","institutional-","premium-support","early-rev","entry-plan","vp-bundle","rv1y-","earn-next")
+
+
 def _nightly_free_memory(prefixes):
     """Drop finished stages' payloads from memory (they're saved to L2 or cheap
     to rebuild) and collect, so the nightly fits in the 512 MB instance."""
@@ -5922,6 +5925,7 @@ def nightly_run():
         reversal=list(dict.fromkeys(hinted+ranked))[:90]
         st["stage"]="early reversal"; get("/api/early-reversal-scan?tickers="+",".join(reversal)); st["counts"]["early_reversal"]=len(reversal)
         opt=list(dict.fromkeys(finals+hinted+ranked))[:60]
+        _nightly_free_memory(_NIGHTLY_HEAVY)
         st["stage"]="options"
         liquid=[]
         for i in range(0,len(opt),20):
@@ -5930,6 +5934,7 @@ def nightly_run():
                 if r.get("ok")!=False and r.get("liquidity") in ("Liquid","Tradable"): liquid.append(r.get("ticker"))
         st["counts"]["options"]=len(opt)
         deep=list(dict.fromkeys(finals+[t for t in hinted if t in liquid]+[t for t in ranked if t in liquid]))[:24]
+        _nightly_free_memory(_NIGHTLY_HEAVY)
         st["stage"]="deep dive"; done=0
         for t in deep:
             try:
@@ -5947,10 +5952,13 @@ def nightly_run():
                 if (s.get("vp_plans") or {}).get(opp): get(f"/api/entry-plan/{t}?direction={opp}&plan=vp&budget={budget}")
                 get(f"/api/premium-support/{t}?direction={d}")
                 done+=1
+                # v34.8.1: free this ticker's raw data before the next one (the
+                # 11/10 runs were OOM-killed mid deep dive). Results are in L2.
+                _nightly_free_memory(_NIGHTLY_HEAVY)
             except Exception as e:
                 st["errors"].append(f"{t}: {e}")
         st["counts"]["deep_dive"]=done
-        _nightly_free_memory(("visible-","alpaca-day","options-v","options-scan","chart-","strat-","institutional-","premium-support","early-rev","entry-plan","vp-bundle"))
+        _nightly_free_memory(_NIGHTLY_HEAVY)
         if hints.get("groups"):
             st["stage"]="laggards"
             try:
