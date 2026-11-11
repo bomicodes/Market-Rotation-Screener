@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.8.1"
+APP_VERSION = "34.8.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5881,6 +5881,9 @@ def _nightly_free_memory(prefixes):
         while L2_STATE["queue"] and len(L2_STATE["queue"])>50: time.sleep(.5)   # let the L2 writer drain
     except Exception: pass
     gc.collect()
+    try:   # hand freed heap back to the OS (pandas/numpy fragmentation keeps RSS growing otherwise)
+        import ctypes; ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception: pass
 
 
 def nightly_run():
@@ -5897,6 +5900,13 @@ def nightly_run():
     try:
         hints=_kv_get("nightly-hints",{}) or {}
         budget=int(float(hints.get("budget") or 250))
+        # v34.8.2: grade yesterday's/today's setups first -- cheap, and it is the
+        # part that answers "how did the picks do" even if a later stage fails.
+        st["stage"]="outcomes"
+        try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
+        except Exception as e: st["errors"].append(f"outcomes: {e}")
+        try: _kv_put("nightly-status",{k:v for k,v in st.items() if k!="lock"})
+        except Exception: pass
         st["stage"]="market"; m=get("/api/market?refresh=1")
         groups=[r["ticker"] for r in (m.get("sectors") or []) if r.get("group") in ("Core Sector","Industry / Theme")]
         st["counts"]["groups"]=len(groups)
@@ -5933,7 +5943,7 @@ def nightly_run():
             for r in res.get("results") or []:
                 if r.get("ok")!=False and r.get("liquidity") in ("Liquid","Tradable"): liquid.append(r.get("ticker"))
         st["counts"]["options"]=len(opt)
-        deep=list(dict.fromkeys(finals+[t for t in hinted if t in liquid]+[t for t in ranked if t in liquid]))[:24]
+        deep=list(dict.fromkeys(finals+[t for t in hinted if t in liquid]+[t for t in ranked if t in liquid]))[:16]
         _nightly_free_memory(_NIGHTLY_HEAVY)
         st["stage"]="deep dive"; done=0
         for t in deep:
@@ -5979,9 +5989,6 @@ def nightly_run():
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
         except Exception as e: st["errors"].append(f"accumulation: {e}")
         _nightly_free_memory(("ohlcv-bulk:","accum-","group-flow","holdings:"))
-        st["stage"]="outcomes"
-        try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
-        except Exception as e: st["errors"].append(f"outcomes: {e}")
         st["stage"]="done"
     except Exception as e:
         st["errors"].append(str(e)); st["stage"]="failed"
