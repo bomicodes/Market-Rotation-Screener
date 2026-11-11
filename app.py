@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.7"
+APP_VERSION = "34.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -390,7 +390,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
              "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
-L2_MEMORY={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
+L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
 def _et_now():
@@ -440,18 +440,33 @@ def _l2_preload():
             backend=_setup_storage_backend()
             with _setup_db() as con:
                 _l2_table(con,backend); con.commit()
-                q="SELECT key,saved_at,payload FROM l2_cache WHERE saved_at>=%s" if backend=="postgresql" else "SELECT key,saved_at,payload FROM l2_cache WHERE saved_at>=?"
+                # v34.8: index only (key + time); payloads load on first use, so
+                # the 512 MB instance doesn't hold every cached payload twice.
+                q="SELECT key,saved_at FROM l2_cache WHERE saved_at>=%s" if backend=="postgresql" else "SELECT key,saved_at FROM l2_cache WHERE saved_at>=?"
                 rows=con.execute(q,(close,)).fetchall()
         except Exception as e:
             L2_STATE["errors"]+=1; _mark_source("l2_cache",False,e)
-        L2_MEMORY.clear()
+        L2_MEMORY.clear(); L2_INDEX.clear()
         for r in rows:
             try:
-                k=r["key"] if hasattr(r,"keys") else r[0]; ts=r["saved_at"] if hasattr(r,"keys") else r[1]; raw=r["payload"] if hasattr(r,"keys") else r[2]
-                L2_MEMORY[k]=(float(ts),json.loads(raw))
+                k=r["key"] if hasattr(r,"keys") else r[0]; ts=r["saved_at"] if hasattr(r,"keys") else r[1]
+                L2_INDEX[k]=float(ts)
             except Exception:
                 continue
         L2_STATE["loaded_for"]=close
+
+
+def _l2_fetch_one(key):
+    try:
+        backend=_setup_storage_backend()
+        with _setup_db() as con:
+            q="SELECT saved_at,payload FROM l2_cache WHERE key=%s" if backend=="postgresql" else "SELECT saved_at,payload FROM l2_cache WHERE key=?"
+            r=con.execute(q,(key,)).fetchone()
+        if not r: return None
+        ts=r["saved_at"] if hasattr(r,"keys") else r[0]; raw=r["payload"] if hasattr(r,"keys") else r[1]
+        return (float(ts),json.loads(raw))
+    except Exception as e:
+        L2_STATE["errors"]+=1; _mark_source("l2_cache",False,e); return None
 
 
 def l2_get(key):
@@ -459,8 +474,15 @@ def l2_get(key):
     if threading.current_thread().name=="nightly": return None
     if not _l2_enabled(key) or market_open_now(): return None
     _l2_preload()
+    close=last_market_close_ts()
     hit=L2_MEMORY.get(key)
-    if hit and hit[0]>=last_market_close_ts(): return hit
+    if hit and hit[0]>=close: return hit
+    if L2_INDEX.get(key,0)>=close:
+        hit=_l2_fetch_one(key)
+        if hit and hit[0]>=close:
+            L2_MEMORY[key]=hit
+            while len(L2_MEMORY)>200: L2_MEMORY.pop(next(iter(L2_MEMORY)),None)
+            return hit
     return None
 
 
@@ -491,7 +513,10 @@ def l2_put(key, val, ts=None):
         try: raw=json.dumps(json.loads(json.dumps(val,default=str).replace("NaN","null").replace("Infinity","null")),separators=(",",":"))
         except Exception: return
     ts=float(ts or time.time())
-    if ts>=last_market_close_ts(): L2_MEMORY[key]=(ts,json.loads(raw))
+    # v34.8: no second in-memory copy -- CACHE already holds the value; record it
+    # in the index so it is lazily re-read from the database after eviction/restart.
+    if ts>=last_market_close_ts(): L2_INDEX[key]=ts
+    L2_MEMORY.pop(key,None)
     L2_STATE["queue"].append((key,ts,raw))
     if L2_STATE["writer"] is None or not L2_STATE["writer"].is_alive():
         t=threading.Thread(target=_l2_writer_loop,daemon=True,name="l2-writer"); L2_STATE["writer"]=t; t.start()
@@ -5843,6 +5868,18 @@ def _loose_rrg_rank(x):
     return sc
 
 
+def _nightly_free_memory(prefixes):
+    """Drop finished stages' payloads from memory (they're saved to L2 or cheap
+    to rebuild) and collect, so the nightly fits in the 512 MB instance."""
+    import gc
+    try:
+        for k in list(CACHE.keys()):
+            if str(k).startswith(prefixes): CACHE.pop(k,None)
+        while L2_STATE["queue"] and len(L2_STATE["queue"])>50: time.sleep(.5)   # let the L2 writer drain
+    except Exception: pass
+    gc.collect()
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     client=app.test_client()
@@ -5913,15 +5950,18 @@ def nightly_run():
             except Exception as e:
                 st["errors"].append(f"{t}: {e}")
         st["counts"]["deep_dive"]=done
+        _nightly_free_memory(("visible-","alpaca-day","options-v","options-scan","chart-","strat-","institutional-","premium-support","early-rev","entry-plan","vp-bundle"))
         if hints.get("groups"):
             st["stage"]="laggards"
             try:
                 lg=get(f"/api/laggards?groups={','.join(hints['groups'][:10])}&budget={budget}"); st["counts"]["laggards"]=len(lg.get("rows") or [])
             except Exception as e: st["errors"].append(f"laggards: {e}")
+        _nightly_free_memory(("laggards-",))
         st["stage"]="earnings"
         try:
             pe=get("/api/postearnings-opportunities?days=5"); st["counts"]["earnings_rows"]=len(pe.get("results") or [])
         except Exception as e: st["errors"].append(f"earnings: {e}")
+        _nightly_free_memory(("earnings-profile","earn-dates","postearnings","options-v","strangle-"))
         st["stage"]="group flow"
         try:
             gf=get("/api/group-flow"); st["counts"]["group_flow"]=len(gf.get("groups") or {})
@@ -5930,6 +5970,7 @@ def nightly_run():
         try:
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
         except Exception as e: st["errors"].append(f"accumulation: {e}")
+        _nightly_free_memory(("ohlcv-bulk:","accum-","group-flow","holdings:"))
         st["stage"]="outcomes"
         try: st["counts"]["outcomes_updated"]=update_setup_outcomes()
         except Exception as e: st["errors"].append(f"outcomes: {e}")
@@ -5951,6 +5992,15 @@ def _nightly_public_status():
 
 @app.post("/api/nightly/run")
 def api_nightly_run():
+    # v34.8: ?if_due=1 (sent by the page itself on load) only starts a run when
+    # it is 45 min to 12 h after a close -- the scheduled GitHub triggers have
+    # been skipped or hours late, and someone opening the site is a reliable waker.
+    if request.args.get("if_due")=="1":
+        try:
+            since=time.time()-float(last_market_close_ts())
+            if not (2700<=since<=12*3600): return jsonify({"ok":True,"started":False,"reason":"not due"})
+        except Exception:
+            return jsonify({"ok":True,"started":False,"reason":"not due"})
     with NIGHTLY["lock"]:
         if NIGHTLY["running"]: return jsonify({"ok":True,"started":False,"reason":"already running","status":_nightly_public_status()})
         last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
@@ -6694,11 +6744,14 @@ def warm_earnings_histories(rows, workers=3):
     if not todo: return 0
     try: budget=int(float((_kv_get("nightly-hints",{}) or {}).get("budget") or 250))
     except Exception: budget=250
+    light=bool(NIGHTLY.get("running"))
+    if light: workers=1
     def one(item):
         t,d,key=item
         try: earnings_history_payload(t,d)
         except Exception: pass
-        try:   # v34.5: price the strangle too, so the row badge is instant
+        try:   # v34.5: price the strangle too, so the row badge is instant (skipped during the nightly, to save memory)
+            if light: raise StopIteration
             cached_refresh_safe(f"strangle-v35-2:{t}:{budget}:{d or '-'}",lambda:strangle_plan(t,budget,event_date=d),ttl=600)
         except Exception: pass
         finally:
@@ -13089,6 +13142,9 @@ topSetupEvaluation=function(x){
 };
 setTimeout(()=>{try{v34LoadGroupFlow()}catch(e){}},2500);
 
+// v34.8: opening the site after the close starts the nightly scan if the
+// scheduled trigger hasn't (the server ignores this unless a run is due).
+setTimeout(()=>{fetch("/api/nightly/run?if_due=1",{method:"POST"}).then(r=>r.json()).then(j=>{if(j&&j.started)console.info("nightly scan started by page load")}).catch(()=>{})},6000);
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;
 renderTopSetups=function(){const o=_renderTopSetupsV32();try{v32RenderTonight()}catch(e){console.warn("v32 tonight",e)}return o};
