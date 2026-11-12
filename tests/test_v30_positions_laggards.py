@@ -272,3 +272,10 @@ def test_participation_liquidity_overrides_wide_after_hours_spreads():
                      "liquidity": "Tradable" if spr <= 15 and oi >= 100 and vol >= 25 else "Thin"})
     out = appmod._summarize_option_rows("PYPL", 60.0, rows, .3)
     assert out["liquidity"] == "Tradable" and out["liquidity_basis"] == "participation"
+
+
+def test_dead_nightly_run_reported_interrupted(monkeypatch):
+    monkeypatch.setattr(appmod, "_kv_get", lambda k, d=None: {"running": True, "stage": "deep dive", "started": 1.0, "finished": None})
+    monkeypatch.setitem(appmod.NIGHTLY, "started", None); monkeypatch.setitem(appmod.NIGHTLY, "running", False)
+    st = appmod._nightly_public_status()
+    assert st["running"] is False and st["stage"].startswith("interrupted")
