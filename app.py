@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.8.2"
+APP_VERSION = "34.9"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -13159,7 +13159,34 @@ setTimeout(()=>{try{v34LoadGroupFlow()}catch(e){}},2500);
 
 // v34.8: opening the site after the close starts the nightly scan if the
 // scheduled trigger hasn't (the server ignores this unless a run is due).
-setTimeout(()=>{fetch("/api/nightly/run?if_due=1",{method:"POST"}).then(r=>r.json()).then(j=>{if(j&&j.started)console.info("nightly scan started by page load")}).catch(()=>{})},6000);
+// v34.9: one gate for the page's heavy loads. If the nightly scan is due it is
+// started first; while it runs, the page waits and shows progress instead of
+// running its own full scan next to it (two at once ran the 512 MB server out
+// of memory on 11/11 and it restarted mid-load).
+const V349_STAGES={start:"starting",outcomes:"grading yesterday's setups",market:"loading the market",universe:"building sector universes","early reversal":"scanning for reversals",options:"checking options",
+ "deep dive":"modeling entries and contracts",laggards:"finding laggards",earnings:"post-earnings movers","group flow":"group volume flow",accumulation:"accumulation / distribution bases"};
+function v349Show(st){
+ const msg=`Tonight's board is being built on the server — ${V349_STAGES[st?.stage]||st?.stage||"working"}… (about 15 min; this page fills in when it's done)`;
+ const ts=document.getElementById("topSetupsStatus");if(ts)ts.textContent=msg;
+ const sub=document.getElementById("v32PlanSub");if(sub)sub.textContent=msg;
+ const cards=document.getElementById("v32Cards");if(cards&&!cards.querySelector(".v32Card"))cards.innerHTML=`<div class="v32Empty">${v32E(msg)}</div>`;
+ const ac=document.getElementById("v33AccCards");if(ac&&!window.__accum)ac.innerHTML=`<div class="v32Empty">${v32E(msg)}</div>`;
+}
+window.__v349Gate=(async()=>{
+ try{
+   let j=await (await fetch("/api/nightly/run?if_due=1",{method:"POST"})).json().catch(()=>null);
+   let st=await (await fetch("/api/nightly/status")).json().catch(()=>null);
+   if(!(st&&st.running))return false;
+   for(let i=0;i<90&&st&&st.running;i++){v349Show(st);await new Promise(r=>setTimeout(r,20000));st=await (await fetch("/api/nightly/status")).json().catch(()=>st);}
+   return true;
+ }catch(e){return false}
+})();
+const _runAutomaticTopSetupsV349=runAutomaticTopSetups;
+runAutomaticTopSetups=async function(force=false){await window.__v349Gate;return _runAutomaticTopSetupsV349(force)};
+const _v33LoadAccumV349=v33LoadAccum;
+v33LoadAccum=async function(force=false){await window.__v349Gate;return _v33LoadAccumV349(force)};
+const _v34LoadGroupFlowV349=v34LoadGroupFlow;
+v34LoadGroupFlow=async function(){await window.__v349Gate;return _v34LoadGroupFlowV349()};
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;
 renderTopSetups=function(){const o=_renderTopSetupsV32();try{v32RenderTonight()}catch(e){console.warn("v32 tonight",e)}return o};
