@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.9"
+APP_VERSION = "34.9.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5999,7 +5999,11 @@ def nightly_run():
 
 
 def _nightly_public_status():
-    st=NIGHTLY if (NIGHTLY["started"] or NIGHTLY["running"]) else (_kv_get("nightly-status",{}) or {})
+    st=NIGHTLY if (NIGHTLY["started"] or NIGHTLY["running"]) else dict(_kv_get("nightly-status",{}) or {})
+    # v34.9: a saved "running" from a process that has since restarted means
+    # that run died (e.g. out of memory) -- report it as interrupted.
+    if st is not NIGHTLY and st.get("running"):
+        st["running"]=False; st["stage"]=f"interrupted during {st.get('stage') or 'run'}"
     fmt=lambda t:datetime.fromtimestamp(t).astimezone(_et_now().tzinfo).isoformat(timespec="minutes") if t else None
     return {"running":bool(st.get("running")),"stage":st.get("stage"),"started":fmt(st.get("started")),"finished":fmt(st.get("finished")),
             "counts":st.get("counts") or {},"errors":(st.get("errors") or [])[:5],"fresh_for_close":bool(st.get("finished") and st.get("finished")>=last_market_close_ts())}
@@ -6018,7 +6022,10 @@ def api_nightly_run():
             return jsonify({"ok":True,"started":False,"reason":"not due"})
     with NIGHTLY["lock"]:
         if NIGHTLY["running"]: return jsonify({"ok":True,"started":False,"reason":"already running","status":_nightly_public_status()})
-        last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
+        saved=_kv_get("nightly-status",{}) or {}
+        last=NIGHTLY.get("started") or saved.get("started")
+        # v34.9: a run that started but never finished (process restarted) doesn't count
+        if not NIGHTLY.get("started") and saved.get("started") and not saved.get("finished"): last=None
         # One run per market close: a manual run during the day must not block
         # the scheduled after-close run. Also never more than once per 30 min.
         if last and request.args.get("force")!="1" and (float(last)>=last_market_close_ts() or time.time()-float(last)<1800):
@@ -6040,7 +6047,8 @@ def _nightly_watchdog():
             if not (2700<=now-close<=12*3600): continue
             with NIGHTLY["lock"]:
                 if NIGHTLY["running"]: continue
-                last=NIGHTLY.get("started") or (_kv_get("nightly-status",{}) or {}).get("started")
+                saved=_kv_get("nightly-status",{}) or {}
+                last=NIGHTLY.get("started") or (saved.get("started") if saved.get("finished") else None)
                 if last and float(last)>=close: continue
                 NIGHTLY["running"]=True
                 threading.Thread(target=nightly_run,daemon=True,name="nightly-watchdog").start()
