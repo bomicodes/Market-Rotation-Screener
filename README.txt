@@ -1,4 +1,4 @@
-v34.8 (cont.) — NIGHTLY MEMORY
-- 11/10's nightly was killed at 534 of 537 MB. L2 no longer keeps a second in-memory copy of every payload (index + lazy load, 200-entry cap);
-  the nightly drops finished stages' payloads and runs gc between stages; the earnings warm-up runs single-threaded without strangle pricing during the nightly.
+v34.9 — the page waits for the nightly scan
+- Opening the site starts the nightly scan if it's due; while it runs, the page shows its progress and waits instead of running its own
+  Top Setups / bases / group-flow scans alongside it (both at once ran the server out of memory on 11/11).
 
