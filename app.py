@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.9.2"
+APP_VERSION = "35.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
+             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -3899,7 +3899,10 @@ def market_payload():
         raise RuntimeError("SPY price history was returned empty after provider retry.")
 
     internals={}
-    internals["SPY"]={"value":float(spy.iloc[-1]),"d1":pct_change(spy,1),"d5":pct_change(spy,5),"d20":pct_change(spy,20)}
+    _s20=float(spy.rolling(20).mean().iloc[-1]) if len(spy)>=20 else None
+    _s50=float(spy.rolling(50).mean().iloc[-1]) if len(spy)>=50 else None
+    internals["SPY"]={"value":float(spy.iloc[-1]),"d1":pct_change(spy,1),"d5":pct_change(spy,5),"d20":pct_change(spy,20),
+                      "sma20":_s20,"sma50":_s50,"above20":(float(spy.iloc[-1])>_s20) if _s20 else None,"above50":(float(spy.iloc[-1])>_s50) if _s50 else None}
 
     for t,label in [("RSP","Breadth"),("IWM","Small caps"),("QQQ","Growth")]:
         raw = prices[t].dropna() if t in prices.columns else pd.Series(dtype=float)
@@ -4924,29 +4927,42 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
     # Pullback / VP-level plans fill at or better than the level; breakout and
     # rejection plans need price to trade through the trigger.
     fill=row.get("fill") or ("limit" if lane=="pullback" else "stop")
+    # v35: trigger ("stop") plans fill on a DAILY CLOSE beyond the trigger, at that
+    # close -- the trader works 9-5 and buys near the close / next open, and an
+    # intraday poke that closes back inside doesn't count. Limit plans unchanged.
     def touched(bar):
         if fill=="limit": return (bar["Low"]<=entry) if bull else (bar["High"]>=entry)
-        return (bar["High"]>=entry) if bull else (bar["Low"]<=entry)
+        return (bar["Close"]>=entry) if bull else (bar["Close"]<=entry)
     fill_i=None
     for i in range(min(max_wait,len(after))):
         if touched(after.iloc[i]): fill_i=i; break
     if fill_i is None:
         return {"status":"expired" if len(after)>=max_wait else "waiting","sessions":int(len(after))}
+    start_j=fill_i
+    if fill=="stop":
+        entry=float(after.iloc[fill_i]["Close"]); start_j=fill_i+1
+        if (bull and entry>=target) or ((not bull) and entry<=target):
+            return {"status":"skipped","reason":"closed past the target on the trigger day","filled":str(after.index[fill_i])[:10],"sessions":int(len(after))}
+        risk=abs(entry-stop) or 1e-9
+        if (bull and entry<=stop) or ((not bull) and entry>=stop):
+            return {"status":"skipped","reason":"closed beyond the stop","filled":str(after.index[fill_i])[:10],"sessions":int(len(after))}
+        if start_j>=len(after):
+            return {"status":"open","r":0.0,"filled":str(after.index[fill_i])[:10],"fill_price":round(entry,2),"days":0,"mfe_r":0.0,"mae_r":0.0}
     mfe=0.0; mae=0.0
-    for j in range(fill_i,min(len(after),fill_i+max_hold)):
+    for j in range(start_j,min(len(after),fill_i+max_hold)):
         b=after.iloc[j]; hi,lo=float(b["High"]),float(b["Low"])
         fav=(hi-entry) if bull else (entry-lo); adv=(entry-lo) if bull else (hi-entry)
         mfe=max(mfe,fav/risk); mae=max(mae,adv/risk)
         hit_stop=(lo<=stop) if bull else (hi>=stop); hit_tgt=(hi>=target) if bull else (lo<=target)
         if hit_stop:
-            return {"status":"loss","r":-1.0,"filled":str(after.index[fill_i])[:10],"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+            return {"status":"loss","r":-1.0,"fill_price":round(entry,2),"filled":str(after.index[fill_i])[:10],"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
         if hit_tgt:
             rr=abs(target-entry)/risk
-            return {"status":"win","r":round(rr,2),"filled":str(after.index[fill_i])[:10],"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+            return {"status":"win","r":round(rr,2),"fill_price":round(entry,2),"filled":str(after.index[fill_i])[:10],"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
     last=after.iloc[min(len(after),fill_i+max_hold)-1]; close=float(last["Close"])
     r=((close-entry) if bull else (entry-close))/risk
     done=len(after)>=fill_i+max_hold
-    return {"status":"timeout" if done else "open","r":round(r,2),"filled":str(after.index[fill_i])[:10],"days":int(min(len(after),fill_i+max_hold)-fill_i),"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+    return {"status":"timeout" if done else "open","r":round(r,2),"fill_price":round(entry,2),"filled":str(after.index[fill_i])[:10],"days":int(min(len(after),fill_i+max_hold)-fill_i),"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
 
 
 def option_outcome(symbol, out, bars=None):
@@ -5116,7 +5132,12 @@ def laggards_payload(groups, budget=250, top=6):
         m.update(ticker=t,parent=etf,turning=m["rs_turn_5d"]>0)
         m["score"]=round(-m["catch_up_gap"]*m["corr"]+(3 if m["turning"] else 0)+min(3,max(0,m["rs_turn_5d"])),2)
         cands.append(m)
-    cands.sort(key=lambda z:-z["score"]); rows=[]
+    cands.sort(key=lambda z:-z["score"]); rows=[]; rejected=[]
+    group_flow={}
+    try:
+        hit=CACHE.get("group-flow-v34-4") or l2_get("group-flow-v34-4")
+        group_flow=((hit[1] if hit else {}) or {}).get("groups") or {}
+    except Exception: group_flow={}
     for m in cands[:14]:
         if len(rows)>=top: break
         try:
@@ -5129,14 +5150,27 @@ def laggards_payload(groups, budget=250, top=6):
             vpp=(vb.get("plans") or {}).get("bullish") if vb.get("available") else None
             sig=[z for z in ((vb.get("strat") or {}).get("signals") or []) if z.get("timeframe") in ("1D","1W") and z.get("direction") in ("bullish","either")]
             m["setup_forming"]=bool(sig) or bool(vpp and vpp.get("in_zone"))
-            if m["setup_forming"]: m["score"]=round(m["score"]+3,2)
+            # v35: a lag alone isn't a setup -- require its own STRAT trigger or price
+            # at a volume-profile level.
+            if not m["setup_forming"]:
+                rejected.append({"ticker":m["ticker"],"reason":"no STRAT trigger / VP level yet"}); continue
+            m["score"]=round(m["score"]+3,2)
+            # v35: the group's holdings must not be under distribution
+            gf=(group_flow.get(m["parent"]) or {})
+            if gf and (gf.get("flow") or 0)<=-15:
+                rejected.append({"ticker":m["ticker"],"reason":f"{m['parent']} holdings distributing"}); continue
             plan="vp" if (vpp and (vpp.get("rr") or 0)>=1.5) else None
             m["entry_plan"]=option_entry_plan(m["ticker"],"bullish",budget,plan)
+            # v35: stop under real structure -- at least 1 ATR below entry (UBER's
+            # 2.6% stop got clipped by noise)
+            u=(m["entry_plan"] or {}).get("underlying") or {}; atr=float(vb.get("atr14") or 0)
+            if u.get("entry") and u.get("stop") and atr>0 and (float(u["entry"])-float(u["stop"]))<1.0*atr:
+                rejected.append({"ticker":m["ticker"],"reason":f"stop only {(float(u['entry'])-float(u['stop']))/atr:.1f} ATR away"}); continue
         except Exception as e:
             m["entry_plan"]={"available":False,"reason":str(e)}
         rows.append(m)
     rows.sort(key=lambda z:-z["score"])
-    return {"available":True,"groups":groups,"rows":rows,"screened":len(members),"candidates":len(cands)}
+    return {"available":True,"groups":groups,"rows":rows,"screened":len(members),"candidates":len(cands),"rejected":rejected[:12]}
 
 
 @app.get("/api/laggards")
@@ -5145,7 +5179,7 @@ def api_laggards():
         groups=[g.strip().upper() for g in (request.args.get("groups") or "").split(",") if g.strip()]
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
-        key=f"laggards-v31:{','.join(sorted(set(groups)))}:{budget}"
+        key=f"laggards-v35:{','.join(sorted(set(groups)))}:{budget}"
         payload,stale,err=cached_refresh_safe(key,lambda:laggards_payload(groups,budget),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
@@ -12207,6 +12241,15 @@ function v28Regime(){
  const state=!window.__marketPayload?"Unknown":stress>=3?"Risk-Off":stress>=1?"Caution":"Supportive";
  return {state,stress,why};
 }
+// v35: short ideas only when the tape agrees -- SPY below its 20-day average
+// AND credit weakening or a risk-off reading. This week's shorts all lost
+// fighting a market bounce.
+function v35ShortsAllowed(){
+ const i=(window.__marketPayload||{}).internals||{},spy=i.SPY||{},cr=i.CREDIT||{},reg=v28Regime();
+ const below=spy.above20===false||(spy.above20==null&&Number(spy.d20)<0);
+ const weak=Number(cr.d5)<=0||reg.state==="Risk-Off";
+ return {ok:!!(below&&weak),why:below?(weak?"SPY below its 20-day and credit/tape weak":"SPY below its 20-day but credit isn't weakening"):"SPY is above its 20-day average"};
+}
 function v28Direction(x,b){
  // The stock's own trend structure decides direction when it has one; value
  // acceptance / STRAT only break ties (they disagree often on extended names).
@@ -12482,6 +12525,7 @@ function v29LogRows(){
  (globalTopSetupData||[]).slice(0,10).forEach(x=>{
    const e=topSetupEvaluation(x),reg=e.regime?.state;
    const add=(direction,plan,lane,score)=>{
+     if(direction==="bearish"&&!v35ShortsAllowed().ok)return;
      const p=v28PlanFor(x.ticker,direction,plan);if(!p||!p.available||!p.underlying)return;
      const z=v28Pick(p),u=p.underlying;
      const fill=(lane==="pullback"||(lane==="vp"&&p.vp_plan&&!p.vp_plan.in_zone))?"limit":"stop";
@@ -12832,7 +12876,7 @@ function v32Status(p,mode){
  const limit=p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone);
  if(limit&&!u.in_zone)return {t:`Wait for ${v32$(u.entry)}`,c:V32_TONE.wait,edge:V32_TONE.wait};
  if(limit&&u.in_zone)return {t:"In the entry zone now",c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
- return {t:`Trigger set · ${bear?"2D below":"2U above"} ${v32$(u.entry)}`,c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
+ return {t:`Trigger set · daily close ${bear?"below":"above"} ${v32$(u.entry)}`,c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
 }
 function v32CardHTML(c){
  const p=c.plan,u=p?.underlying||{},z=v28Pick(p),st=v32Status(p,c.mode),bear=c.dir==="bearish",lp=v32LogPieces(p,c.lane);
@@ -12841,6 +12885,8 @@ function v32CardHTML(c){
  const vs=c.vs,v=vs?.vp,ft=vs?.strat?.ftfc;
  const more=[];
  if(c.extra)more.push(c.extra);
+ {const lim=p&&(p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone));
+  if(u.entry!=null&&!lim)more.unshift(`<div><b>Entry rule</b> Only on a <b>daily close ${c.dir==="bearish"?"below":"above"} ${v32$(u.entry)}</b> — buy near the close (3:45–4:00 ET) or at the next open. An intraday poke that closes back ${c.dir==="bearish"?"above":"below"} doesn't count.</div>`);}
  if(lp.rules)more.push(`<b>Exit plan</b><ul>${lp.rules}</ul>`);
  if(v?.available)more.push(`<div><b>VP</b> 20-session POC ${v32$(v.poc)} · VA ${v32$(v.val)}–${v32$(v.vah)}${v.prior_week?` · prior-week VA ${v32$(v.prior_week.val)}–${v32$(v.prior_week.vah)}`:""}</div>`);
  if(ft?.frames)more.push(`<div><b>STRAT</b> ${(vs.strat.frames||[]).map(f=>`${f.timeframe} ${f.scenario}`).join(" · ")} · FTFC ${ft.state}</div>`);
@@ -12857,7 +12903,7 @@ function v32CardHTML(c){
  </article>`;
 }
 function v32CollectIdeas(){
- const ideas=[],filtered=[];
+ const ideas=[],filtered=[];window.__v35HeldShorts=new Set();
  (globalTopSetupData||[]).slice(0,10).forEach(x=>{
    const e=topSetupEvaluation(x),vs=institutionalContextMap[x.ticker]?.vp_strat;
    if(e.hardPass&&e.qualificationScore>=45&&e.entryMode){
@@ -12867,7 +12913,8 @@ function v32CollectIdeas(){
        summary:p?.vp_plan?.trigger?p.vp_plan.trigger.charAt(0).toUpperCase()+p.vp_plan.trigger.slice(1)+".":(e.entryMode==="pullback"?"Rotating in, but let it come back to the 20-day.":"Rotating in with a valid breakout plan."),
        chips:(e.reasons||[]).map(r=>r[0])});
    }else if((e.gateFailures||[]).some(g=>/downtrend/i.test(g)))filtered.push(x.ticker);
-   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR){
+   if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR&&e.counter.direction==="bearish"&&!v35ShortsAllowed().ok){window.__v35HeldShorts=(window.__v35HeldShorts||new Set());window.__v35HeldShorts.add(x.ticker);}
+   else if(e.counter&&Number(e.counter.rr)>=V28_MIN_RR){
      const ct=e.counter,p=v28PlanFor(x.ticker,ct.direction,ct.plan||"rejection");
      ideas.push({ticker:x.ticker,parent:x._parentTicker,dir:ct.direction,kind:"counter",lane:ct.lane||"rejection",laneLabel:ct.type==="vp_strat_reversal"?"VP + STRAT reversal":(ct.type==="supply_rejection"?"Supply rejection":"Demand hold"),plan:p,vs,score:(e.score||0)-5,
        summary:ct.type==="vp_strat_reversal"?`${ct.signal?.detail||ct.signal?.type} · ${ct.direction==="bearish"?"capped by":"holding"} the ${ct.level_name} at ${v32$(ct.level)}.`:`${ct.bar_date}: tested the prior 1-year ${ct.type==="supply_rejection"?"high":"low"} zone (${v32$(ct.level)}) and closed in the ${ct.type==="supply_rejection"?"bottom":"top"} of its range.`,
@@ -12890,7 +12937,8 @@ function v32RenderTonight(){
  const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard")||(v32Filter==="base"&&c.kind==="base"));
  const st=document.getElementById("topSetupsStatus")?.textContent||"";
  const sub=document.getElementById("v32PlanSub");
- if(sub)sub.textContent=automaticTopSetupsRunning?st:`${ideas.length} idea${ideas.length===1?"":"s"}${ideas.length&&!ideas.some(c=>c.kind==="setup")?" · no clean rotation long in this tape":""}`;
+ const held=[...(window.__v35HeldShorts||[])];
+ if(sub)sub.textContent=automaticTopSetupsRunning?st:`${ideas.length} idea${ideas.length===1?"":"s"}${ideas.length&&!ideas.some(c=>c.kind==="setup")?" · no clean rotation long in this tape":""}${held.length?` · ${held.length} short idea${held.length===1?"":"s"} held back (${v35ShortsAllowed().why}): ${held.join(", ")}`:""}`;
  const scanned=!!automaticTopSetupsLastRun||(globalTopSetupData||[]).length>0;
  host.innerHTML=shown.length?shown.map(v32CardHTML).join(""):`<div class="v32Empty">${automaticTopSetupsRunning?v32E(st||"Scanning…"):ideas.length?"Nothing in this filter.":!scanned?(automaticTopSetupsError?`Scan didn't finish: ${v32E(automaticTopSetupsError.message)} · it retries on refresh.`:"Waiting for market data and the first scan…"):"No setups right now. The scan ran — nothing passed the trend, reward/risk and budget checks."}</div>`;
  const fd=document.getElementById("v32Filtered");
@@ -12982,7 +13030,7 @@ function v32RenderLaggardsInto(id){
  const rows=v34LagRows();
  el.innerHTML=rows.length?rows.map(m=>v32CardHTML({ticker:m.ticker,parent:m.parent,dir:"bullish",kind:"laggard",lane:"laggard",laneLabel:"Laggard catch-up",plan:m.entry_plan,vs:m.vp_strat,
    summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)}.`,chips:[m._flow.chip,`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)})).join("")
-   :`<div class="v32Empty">${j.screened?`${j.screened} holdings screened · ${j.candidates} lagging · none with liquid options.`:"Runs after the board scan."}</div>`;
+   :`<div class="v32Empty">${j.screened?`${j.screened} holdings screened · ${j.candidates} lagging${(j.rejected||[]).length?` · held back: ${(j.rejected||[]).slice(0,6).map(r=>`${v32E(r.ticker)} (${v32E(r.reason)})`).join(", ")}`:" · none with liquid options"}.`:"Runs after the board scan."}</div>`;
 }
 const _v30RenderLaggardsV32=v30RenderLaggards;
 v30RenderLaggards=function(){const o=_v30RenderLaggardsV32();try{v32RenderLaggardsInto("v32Laggards");v32RenderTonight()}catch(e){}return o};
@@ -13074,7 +13122,8 @@ function v33BaseExtra(b){
   <div><b>Confirm</b> ${v32E(p.confirm||"")}. If it breaks on light volume or closes back inside the range, it's a false break — out.</div>`;
 }
 function v33AccIdeas(){
- return ((window.__accum||{}).rows||[]).filter(b=>b.entry_plan&&b.plan).map(b=>({ticker:b.ticker,parent:b.parent,dir:b.direction,kind:"base",lane:"base",
+ const shortsOk=v35ShortsAllowed().ok;
+ return ((window.__accum||{}).rows||[]).filter(b=>b.entry_plan&&b.plan&&(b.direction!=="bearish"||shortsOk)).map(b=>({ticker:b.ticker,parent:b.parent,dir:b.direction,kind:"base",lane:"base",
    laneLabel:(b.phase||b.bias).replace(/^./,m=>m.toUpperCase()),plan:b.entry_plan,score:b.quality,summary:v33BaseSummary(b),chips:v33BaseChips(b),extra:v33BaseExtra(b)}));
 }
 async function v33LoadAccum(force=false){
@@ -13103,7 +13152,7 @@ function v33RenderAccum(){
 async function v33LogAccum(){
  try{
    const date=v29TradeDate(),rows=[];
-   ((window.__accum||{}).rows||[]).forEach(b=>{const p=b.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;
+   ((window.__accum||{}).rows||[]).forEach(b=>{const p=b.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;if(b.direction==="bearish"&&!v35ShortsAllowed().ok)return;
      rows.push({ticker:b.ticker,trade_date:date,lane:"base",direction:b.direction,fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:b.quality,
        regime:v28Regime().state,parent:b.parent,bias:b.bias,base_days:b.base_days,
        contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
