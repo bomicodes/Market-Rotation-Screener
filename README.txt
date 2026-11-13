@@ -1,6 +1,7 @@
-v35.1 — MIDDLE-GROUND ENTRIES
-- Trigger plans: enter on the intraday trigger (a conditional order set in the morning), at the open on a gap; exit at the close if it
-  closes back through the trigger (failed 2U/2D) — a small loss instead of the full stop.
-- The track record grades that way and also keeps the strict daily-close-confirmation result per setup ("If you'd waited for the close")
-  so the two can be compared after a few weeks.
+v35.2 — WEBULL-READY ORDERS
+- Every plan card shows a premium-based order you can type straight into Webull (tap a number to copy):
+  trigger plans → buy stop-limit (stop ≈ modeled premium when the stock hits the trigger, limit +8%);
+  level/pullback plans → buy limit at the modeled premium, nudged to the contract's own premium-chart support when it lines up;
+  in the zone now → buy limit near the mid. Exits: take half at +50%, rest at the stock-target premium, stop-limit at the stock-stop premium.
+- Warns when the premium is already above the stop price (a buy stop would fill at once) and notes the premium's 30-day high as resistance.
 
