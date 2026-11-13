@@ -1,4 +1,2 @@
-v34.9 — the page waits for the nightly scan
-- Opening the site starts the nightly scan if it's due; while it runs, the page shows its progress and waits instead of running its own
-  Top Setups / bases / group-flow scans alongside it (both at once ran the server out of memory on 11/11).
+v34.9.2 — the nightly keeps the free Render instance awake (self-ping /health every 4 min while running); 11/12's run was put to sleep mid-way.
 
