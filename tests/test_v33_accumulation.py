@@ -136,3 +136,15 @@ def test_patch_latest_bars_appends_scaled_volume(monkeypatch):
     last = out["AAA"].iloc[-1]
     assert out["AAA"].index[-1] == pd.Timestamp("2026-11-09") and last["Close"] == 11.5
     assert abs(last["Volume"] - 2e6) < 1     # 4e4 IEX x (1e6 / 2e4) ratio
+
+
+def test_reversal_prefilter_finds_failed_2d():
+    import numpy as np, pandas as pd
+    idx = pd.bdate_range(end="2026-11-11", periods=80)   # a Wednesday
+    c = np.linspace(80, 60, 80)
+    df = pd.DataFrame({"Open": c + .2, "High": c + 1, "Low": c - 1, "Close": c, "Volume": 2e6}, index=idx)
+    # last bar takes out the prior low and closes green above its open
+    df.iloc[-1] = [59.0, 60.5, 58.0, 60.4, 3e6]
+    out = appmod._rev_prefilter(df, ["XLK"], {"XLK": {"flow": 30}})
+    assert out and out["direction"] == "bullish" and any(x["type"] == "Failed 2D" for x in out["signals"])
+    assert out["prescore"] >= 4   # daily signal + near the 20d low + group flow aligned

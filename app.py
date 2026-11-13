@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "35.2"
+APP_VERSION = "36.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
+             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -5742,6 +5742,104 @@ def api_accumulation():
 
 
 # ---------------------------------------------------------------------------
+# v36 WIDE VP + STRAT REVERSAL SCAN (Standard plan, 2 GB)
+# The best lane in week 1 (VP + STRAT reversals) only came from the Top Setups
+# deep dive (~16 names). This scans the whole ~350-stock universe:
+#   1) cheap prefilter on daily/weekly bars: a directional STRAT signal
+#      (failed 2D/2U, hammer/shooter) on the last completed bar;
+#   2) for the best ~40, the full volume-profile bundle: price must be AT a VP
+#      level (composite/prior-week VAH/POC/VAL or an HVN) in the signal's
+#      direction with reward/risk >= 1.5;
+#   3) liquid options + a priced single-leg plan (and the Webull order).
+# ---------------------------------------------------------------------------
+def _rev_prefilter(df, groups_for_t, flows):
+    d=df.dropna(subset=["Open","High","Low","Close"])
+    if len(d)<60: return None
+    c=d["Close"].astype(float); v=d["Volume"].fillna(0).astype(float)
+    spot=float(c.iloc[-1]); adv=float((c.iloc[-20:]*v.iloc[-20:]).mean())
+    if spot<10 or adv<20e6: return None
+    sigs=[x for x in strat_actionable(d,"1D") if x.get("direction") in ("bullish","bearish")]
+    wk=d.resample("W-FRI").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna()
+    # use only completed weeks (drop the current partial week unless today is Friday)
+    if len(wk)>=2 and d.index[-1].weekday()!=4: wk=wk.iloc[:-1]
+    sigs+= [x for x in strat_actionable(wk,"1W") if x.get("direction") in ("bullish","bearish")]
+    if not sigs: return None
+    best=None
+    for direction in ("bullish","bearish"):
+        ds=[x for x in sigs if x["direction"]==direction]
+        if not ds: continue
+        sc=sum(3 if x["timeframe"]=="1W" else 2 for x in ds)+(2 if len({x["timeframe"] for x in ds})>1 else 0)
+        h=d["High"].astype(float); l=d["Low"].astype(float)
+        prev=c.shift(1); tr=pd.concat([(h-l).abs(),(h-prev).abs(),(l-prev).abs()],axis=1).max(axis=1); atr=float(tr.rolling(14).mean().iloc[-1])
+        lo20,hi20=float(l.iloc[-20:].min()),float(h.iloc[-20:].max())
+        if direction=="bullish" and atr>0 and spot-lo20<=1.5*atr: sc+=1
+        if direction=="bearish" and atr>0 and hi20-spot<=1.5*atr: sc+=1
+        gbest=None
+        for g in groups_for_t:
+            f=(flows.get(g) or {}).get("flow")
+            if f is None: continue
+            adj=(2 if f>=15 else (-3 if f<=-15 else 0)) if direction=="bullish" else (2 if f<=-15 else (-3 if f>=15 else 0))
+            if gbest is None or adj>gbest[1]: gbest=(g,adj,f)
+        if gbest: sc+=gbest[1]
+        cand={"direction":direction,"signals":ds,"prescore":sc,"parent":(gbest[0] if gbest else (groups_for_t[0] if groups_for_t else None)),
+              "group_flow":(gbest[2] if gbest else None),"spot":round(spot,2)}
+        if best is None or cand["prescore"]>best["prescore"]: best=cand
+    return best
+
+
+def reversal_scan_payload(budget=250, deep=40, top=10):
+    memberships,data,rrg=_group_universe()
+    flows=group_volume_rotation(data,memberships,rrg)
+    pre=[]
+    for t,gl in memberships.items():
+        df=data.get(t)
+        if df is None: continue
+        try: c=_rev_prefilter(df,gl,flows)
+        except Exception: c=None
+        if c and c["prescore"]>=2: c["ticker"]=t; pre.append(c)
+    pre.sort(key=lambda z:-z["prescore"])
+    rows=[]; checked=0; near=[]
+    for c in pre[:deep]:
+        if len(rows)>=top: break
+        t=c["ticker"]; checked+=1
+        try:
+            vb=vp_bundle_cached(t)
+            if not vb.get("available"): continue
+            vpp=(vb.get("plans") or {}).get(c["direction"])
+            if not vpp or not vpp.get("in_zone") or float(vpp.get("rr") or 0)<1.5:
+                if vpp: near.append({"ticker":t,"direction":c["direction"],"level":vpp.get("level"),"level_name":vpp.get("level_name"),"in_zone":bool(vpp.get("in_zone")),"rr":vpp.get("rr"),"signal":c["signals"][0]["detail"]})
+                continue
+            liq=contract_liquidity_gate(t,"0-30",allow_leaps=False)
+            if liq.get("liquidity") not in ("Liquid","Tradable"):
+                near.append({"ticker":t,"direction":c["direction"],"level":vpp.get("level"),"level_name":vpp.get("level_name"),"in_zone":True,"rr":vpp.get("rr"),"signal":c["signals"][0]["detail"],"reason":"options thin"}); continue
+            st=_context_structure(t)
+            if st and st.get("available"): st["vp_plans"]=vb.get("plans")
+            ep=option_entry_plan(t,c["direction"],budget,"vp",structure=st)
+            sig=sorted(c["signals"],key=lambda x:0 if x["timeframe"]=="1W" else 1)[0]
+            rows.append({"ticker":t,"parent":c["parent"],"direction":c["direction"],"signal":sig,"signals":c["signals"],"vp_plan":vpp,
+                         "group_flow":c["group_flow"],"prescore":c["prescore"],"options_liquidity":liq.get("liquidity"),"entry_plan":ep,"vp":(vb.get("vp") or {}).get("state")})
+        except Exception:
+            continue
+        finally:
+            if NIGHTLY.get("running"):
+                try: _nightly_free_memory(("visible-","alpaca-intraday","alpaca-hour","yf-","chart-","strat-","options-scan","options-v"))
+                except Exception: pass
+    return {"available":True,"rows":rows,"near":near[:12],"prefiltered":len(pre),"checked":checked,"universe":len(memberships),
+            "as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None}
+
+
+@app.get("/api/reversal-scan")
+def api_reversal_scan():
+    try:
+        try: budget=int(float(request.args.get("budget") or 250))
+        except Exception: budget=250
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"revscan-v36:{budget}",lambda:reversal_scan_payload(budget),force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
 # v30 POSITION TRACKER
 # Trades the trader actually takes: single-leg directional calls/puts (logged
 # from a plan card, carrying its exit rules) and post-earnings strangles.
@@ -6107,7 +6205,7 @@ def nightly_run():
             for r in res.get("results") or []:
                 if r.get("ok")!=False and r.get("liquidity") in ("Liquid","Tradable"): liquid.append(r.get("ticker"))
         st["counts"]["options"]=len(opt)
-        deep=list(dict.fromkeys(finals+[t for t in hinted if t in liquid]+[t for t in ranked if t in liquid]))[:16]
+        deep=list(dict.fromkeys(finals+[t for t in hinted if t in liquid]+[t for t in ranked if t in liquid]))[:30]
         _nightly_free_memory(_NIGHTLY_HEAVY)
         st["stage"]="deep dive"; done=0
         for t in deep:
@@ -6148,6 +6246,10 @@ def nightly_run():
         try:
             gf=get("/api/group-flow"); st["counts"]["group_flow"]=len(gf.get("groups") or {})
         except Exception as e: st["errors"].append(f"group flow: {e}")
+        st["stage"]="reversal scan"
+        try:
+            rv=get(f"/api/reversal-scan?budget={budget}"); st["counts"]["reversal_scan"]=len(rv.get("rows") or [])
+        except Exception as e: st["errors"].append(f"reversal scan: {e}")
         st["stage"]="accumulation"
         try:
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
@@ -13057,6 +13159,7 @@ function v32CollectIdeas(){
      summary:`20d: ${v32Pct(m.ret20,1)} vs ${m.parent} ${v32Pct(m.group_ret20,1)} · catch-up gap ${v32Pct(m.catch_up_gap,1)} · relative line ${v32Pct(m.rs_turn_5d,1)} last 5d.`,
      chips:[m._flow.chip,`corr ${m.corr}`,`β ${m.beta}`,m.setup_forming?"Setup forming":null].filter(Boolean)});
  });
+ try{v36RevIdeas().forEach(c=>{if(!ideas.some(x=>x.ticker===c.ticker&&x.dir===c.dir))ideas.push(c)})}catch(e){}
  try{v33AccIdeas().slice(0,3).forEach(c=>{if(!ideas.some(x=>x.ticker===c.ticker&&x.dir===c.dir))ideas.push(c)})}catch(e){}
  const shownT=new Set(ideas.map(c=>c.ticker));
  return {ideas,filtered:filtered.filter(t=>!shownT.has(t))};
@@ -13366,7 +13469,7 @@ setTimeout(()=>{try{v34LoadGroupFlow()}catch(e){}},2500);
 // running its own full scan next to it (two at once ran the 512 MB server out
 // of memory on 11/11 and it restarted mid-load).
 const V349_STAGES={start:"starting",outcomes:"grading yesterday's setups",market:"loading the market",universe:"building sector universes","early reversal":"scanning for reversals",options:"checking options",
- "deep dive":"modeling entries and contracts",laggards:"finding laggards",earnings:"post-earnings movers","group flow":"group volume flow",accumulation:"accumulation / distribution bases"};
+ "deep dive":"modeling entries and contracts",laggards:"finding laggards",earnings:"post-earnings movers","group flow":"group volume flow","reversal scan":"wide VP + STRAT reversal scan",accumulation:"accumulation / distribution bases"};
 function v349Show(st){
  const msg=`Tonight's board is being built on the server — ${V349_STAGES[st?.stage]||st?.stage||"working"}… (about 15 min; this page fills in when it's done)`;
  const ts=document.getElementById("topSetupsStatus");if(ts)ts.textContent=msg;
@@ -13389,6 +13492,30 @@ const _v33LoadAccumV349=v33LoadAccum;
 v33LoadAccum=async function(force=false){await window.__v349Gate;return _v33LoadAccumV349(force)};
 const _v34LoadGroupFlowV349=v34LoadGroupFlow;
 v34LoadGroupFlow=async function(){await window.__v349Gate;return _v34LoadGroupFlowV349()};
+
+// ---- v36 wide VP + STRAT reversal scan ------------------------------------------------
+let v36RevLogSig="";
+function v36RevIdeas(){
+ const j=window.__revScan;if(!j)return [];const shortsOk=v35ShortsAllowed().ok;
+ return (j.rows||[]).filter(r=>r.entry_plan?.available&&(r.direction!=="bearish"||shortsOk)).map(r=>{const v=r.vp_plan||{},sg=r.signal||{},bear=r.direction==="bearish";
+   return {ticker:r.ticker,parent:r.parent,dir:r.direction,kind:"counter",lane:"vp_counter",laneLabel:"VP + STRAT reversal",plan:r.entry_plan,score:r.prescore,
+     summary:`${sg.detail||sg.type} · ${bear?"capped by":"holding"} the ${v.level_name} at ${v32$(v.level)}.`,
+     chips:[`${sg.timeframe} ${sg.type}`,`${v.level_name} ${v32$(v.level)}`,r.group_flow!=null?`${r.parent} ${v34Word(r.group_flow).toLowerCase()}`:null,"Wide scan"].filter(Boolean)}});
+}
+async function v36LoadRev(){
+ try{const j=await (await fetch(`/api/reversal-scan?budget=${encodeURIComponent(v26Budget())}`)).json();if(j.ok){window.__revScan=j;v36LogRev();try{v32RenderTonight()}catch(e){}}}catch(e){console.warn("reversal scan",e)}
+}
+async function v36LogRev(){
+ try{const date=v29TradeDate(),rows=[];const shortsOk=v35ShortsAllowed().ok;
+   ((window.__revScan||{}).rows||[]).forEach(r=>{const p=r.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;if(r.direction==="bearish"&&!shortsOk)return;
+     rows.push({ticker:r.ticker,trade_date:date,lane:"vp_counter",direction:r.direction,fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:r.prescore,
+       regime:v28Regime().state,parent:r.parent,source:"wide scan",contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
+   const sig=JSON.stringify(rows.map(r=>[r.ticker,r.trade_date]));
+   if(rows.length&&sig!==v36RevLogSig){v36RevLogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
+ }catch(e){console.warn("rev log",e)}
+}
+setTimeout(async()=>{try{await window.__v349Gate;v36LoadRev()}catch(e){}},3500);
+
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;
 renderTopSetups=function(){const o=_renderTopSetupsV32();try{v32RenderTonight()}catch(e){console.warn("v32 tonight",e)}return o};
