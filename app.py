@@ -5051,7 +5051,10 @@ def update_setup_outcomes(days=45):
     for r in rows:
         rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","lane","payload","outcome"),r))
         prior=json.loads(rr["outcome"]) if rr.get("outcome") else {}
-        if prior.get("status") in ("win","loss","timeout","expired"): continue
+        _pl=json.loads(rr["payload"]) if rr.get("payload") else {}
+        _trig=(_pl.get("fill") or ("limit" if rr.get("lane")=="pullback" else "stop"))=="stop"
+        # v35.1: regrade closed trigger trades once under the middle-ground rule (they lack "close_confirm")
+        if prior.get("status") in ("win","loss","timeout","expired","skipped") and not (_trig and "close_confirm" not in prior and prior.get("status")!="expired"): continue
         t=rr["ticker"]
         if t not in frames:
             try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
