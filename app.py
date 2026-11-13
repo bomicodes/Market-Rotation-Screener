@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "34.9.1"
+APP_VERSION = "34.9.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5886,8 +5886,22 @@ def _nightly_free_memory(prefixes):
     except Exception: pass
 
 
+def _nightly_keepalive():
+    """v34.9.2: Render's free plan sleeps the instance after ~15 min without
+    inbound HTTP traffic, even mid-job (11/12's watchdog-started run died that
+    way). While the nightly runs, ping our own public URL every 4 minutes."""
+    base=os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("APP_URL") or "https://market-rotation-screener.onrender.com"
+    while NIGHTLY.get("running"):
+        try: requests.get(base.rstrip("/")+"/health",timeout=20)
+        except Exception: pass
+        for _ in range(48):
+            if not NIGHTLY.get("running"): return
+            time.sleep(5)
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
+    threading.Thread(target=_nightly_keepalive,daemon=True,name="nightly-keepalive").start()
     client=app.test_client()
     with client.session_transaction() as sess: sess["authenticated"]=True
     # Drop in-memory payloads so every request below recomputes from fresh data.
