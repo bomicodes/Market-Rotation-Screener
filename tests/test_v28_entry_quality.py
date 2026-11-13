@@ -151,7 +151,7 @@ def test_outcome_win_loss_and_expiry():
     df = _daily([(100, 101, 99, 100), (100, 103, 99.5, 102.5), (102.5, 106.5, 102, 106), (106, 107, 105, 106)], "2026-10-05")
     row = {"trade_date": "2026-10-05", "lane": "breakout", "direction": "bullish", "entry": 102.0, "stop": 99.0, "target": 106.0}
     out = appmod.evaluate_setup_outcome(row, df)
-    assert out["status"] == "win" and out["r"] >= 1   # v35: fills at the confirming close (102.5), so 1.0R
+    assert out["status"] == "win" and out["r"] > 1
     row2 = dict(row, stop=101.0, target=110.0)
     df2 = _daily([(100, 101, 99, 100), (100, 103, 100.5, 102.5), (102.5, 102.8, 100.8, 101)], "2026-10-05")
     assert appmod.evaluate_setup_outcome(row2, df2)["status"] == "loss"
@@ -187,7 +187,7 @@ def test_tight_budget_falls_back_to_lower_delta():
     assert .15 <= out["single"]["delta_at_entry"] < .30
 
 
-def test_close_confirmation_grading():
+def test_middle_ground_grading_and_close_confirm_variant():
     import pandas as pd
     idx = pd.bdate_range("2026-11-02", periods=6)
     df = pd.DataFrame({"Open": [10, 10, 10, 10, 10, 10], "High": [10.2, 11.0, 10.9, 12.5, 12.6, 12.6],
@@ -195,5 +195,17 @@ def test_close_confirmation_grading():
     row = {"direction": "bullish", "entry": 10.5, "stop": 9.5, "target": 12.0, "lane": "vp_counter", "fill": "stop",
            "trade_date": "2026-11-01"}
     out = appmod.evaluate_setup_outcome(row, df)
-    # day 2 poked 11.0 but closed 10.1 -> no fill; day 3 closed 10.8 -> fill at 10.8; day 4 high 12.5 -> target
-    assert out["filled"] == "2026-11-04" and out["fill_price"] == 10.8 and out["status"] == "win"
+    # day 2 trades 11.0 (fill at 10.5) but closes 10.1 < 10.5 -> failed 2U, out at the close
+    assert out["filled"] == "2026-11-03" and out["exit"] == "failed 2U" and out["status"] == "loss" and -1 < out["r"] < 0
+    # strict variant: fills on the 10.8 close (day 3) and reaches the target
+    cc = out["close_confirm"]
+    assert cc["filled"] == "2026-11-04" and cc["fill_price"] == 10.8 and cc["status"] == "win"
+
+
+def test_gap_entry_fills_at_open():
+    import pandas as pd
+    idx = pd.bdate_range("2026-11-02", periods=3)
+    df = pd.DataFrame({"Open": [10, 11.0, 11.6], "High": [10.2, 11.8, 12.3], "Low": [9.8, 10.9, 11.4], "Close": [10, 11.6, 12.2], "Volume": 1e6}, index=idx)
+    row = {"direction": "bullish", "entry": 10.5, "stop": 9.5, "target": 12.0, "lane": "vp_counter", "fill": "stop", "trade_date": "2026-11-01"}
+    out = appmod.evaluate_setup_outcome(row, df)
+    assert out["gap_entry"] and out["fill_price"] == 11.0 and out["status"] == "win"

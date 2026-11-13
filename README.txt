@@ -1,8 +1,6 @@
-v35.0 — STRATEGY TIGHTENING (after week 1)
-- Entries on trigger plans need a DAILY CLOSE beyond the trigger (buy near the close or next open); the track record now grades them
-  that way, at the close price (limit/pullback plans unchanged). A close already past the target is "skipped".
-- Laggards need their own STRAT trigger or a volume-profile level, a group that isn't distributing, and a stop at least 1 ATR away;
-  held-back names are listed with the reason.
-- Short ideas (counter-trend shorts, distribution bases) only show and log when SPY is below its 20-day average AND credit is weakening
-  or the tape reads risk-off. Otherwise Tonight says which shorts were held back and why.
+v35.1 — MIDDLE-GROUND ENTRIES
+- Trigger plans: enter on the intraday trigger (a conditional order set in the morning), at the open on a gap; exit at the close if it
+  closes back through the trigger (failed 2U/2D) — a small loss instead of the full stop.
+- The track record grades that way and also keeps the strict daily-close-confirmation result per setup ("If you'd waited for the close")
+  so the two can be compared after a few weeks.
 
