@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "36.0"
+APP_VERSION = "36.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5798,9 +5798,14 @@ def reversal_scan_payload(budget=250, deep=40, top=10):
         except Exception: c=None
         if c and c["prescore"]>=2: c["ticker"]=t; pre.append(c)
     pre.sort(key=lambda z:-z["prescore"])
+    # v36.1: separate quotas so a wave of short signals can't crowd out longs
+    # (shorts are often hidden by the tape rule anyway).
+    bulls=[c for c in pre if c["direction"]=="bullish"][:25]; bears=[c for c in pre if c["direction"]=="bearish"][:15]
+    quota={"bullish":8,"bearish":5}; got={"bullish":0,"bearish":0}
     rows=[]; checked=0; near=[]
-    for c in pre[:deep]:
-        if len(rows)>=top: break
+    for c in sorted(bulls+bears,key=lambda z:-z["prescore"]):
+        if got[c["direction"]]>=quota[c["direction"]]: continue
+        if len(rows)>=top+3: break
         t=c["ticker"]; checked+=1
         try:
             vb=vp_bundle_cached(t)
@@ -5816,6 +5821,7 @@ def reversal_scan_payload(budget=250, deep=40, top=10):
             if st and st.get("available"): st["vp_plans"]=vb.get("plans")
             ep=option_entry_plan(t,c["direction"],budget,"vp",structure=st)
             sig=sorted(c["signals"],key=lambda x:0 if x["timeframe"]=="1W" else 1)[0]
+            got[c["direction"]]+=1
             rows.append({"ticker":t,"parent":c["parent"],"direction":c["direction"],"signal":sig,"signals":c["signals"],"vp_plan":vpp,
                          "group_flow":c["group_flow"],"prescore":c["prescore"],"options_liquidity":liq.get("liquidity"),"entry_plan":ep,"vp":(vb.get("vp") or {}).get("state")})
         except Exception:
@@ -5834,7 +5840,7 @@ def api_reversal_scan():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"revscan-v36:{budget}",lambda:reversal_scan_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"revscan-v361:{budget}",lambda:reversal_scan_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
