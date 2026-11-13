@@ -151,7 +151,7 @@ def test_outcome_win_loss_and_expiry():
     df = _daily([(100, 101, 99, 100), (100, 103, 99.5, 102.5), (102.5, 106.5, 102, 106), (106, 107, 105, 106)], "2026-10-05")
     row = {"trade_date": "2026-10-05", "lane": "breakout", "direction": "bullish", "entry": 102.0, "stop": 99.0, "target": 106.0}
     out = appmod.evaluate_setup_outcome(row, df)
-    assert out["status"] == "win" and out["r"] > 1
+    assert out["status"] == "win" and out["r"] >= 1   # v35: fills at the confirming close (102.5), so 1.0R
     row2 = dict(row, stop=101.0, target=110.0)
     df2 = _daily([(100, 101, 99, 100), (100, 103, 100.5, 102.5), (102.5, 102.8, 100.8, 101)], "2026-10-05")
     assert appmod.evaluate_setup_outcome(row2, df2)["status"] == "loss"
@@ -185,3 +185,15 @@ def test_tight_budget_falls_back_to_lower_delta():
     out = appmod.option_entry_plan("LEN", "bullish", 120, None, _structure(spot, 3.55, 82.08), rows, spot, 3.55, 0.30)
     assert out["single"] and out["single"]["cost"] <= 120
     assert .15 <= out["single"]["delta_at_entry"] < .30
+
+
+def test_close_confirmation_grading():
+    import pandas as pd
+    idx = pd.bdate_range("2026-11-02", periods=6)
+    df = pd.DataFrame({"Open": [10, 10, 10, 10, 10, 10], "High": [10.2, 11.0, 10.9, 12.5, 12.6, 12.6],
+                       "Low": [9.8, 9.9, 10.4, 10.8, 11.5, 11.5], "Close": [10, 10.1, 10.8, 12.4, 12.5, 12.5], "Volume": 1e6}, index=idx)
+    row = {"direction": "bullish", "entry": 10.5, "stop": 9.5, "target": 12.0, "lane": "vp_counter", "fill": "stop",
+           "trade_date": "2026-11-01"}
+    out = appmod.evaluate_setup_outcome(row, df)
+    # day 2 poked 11.0 but closed 10.1 -> no fill; day 3 closed 10.8 -> fill at 10.8; day 4 high 12.5 -> target
+    assert out["filled"] == "2026-11-04" and out["fill_price"] == 10.8 and out["status"] == "win"
