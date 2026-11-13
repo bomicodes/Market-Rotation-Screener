@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "35.0"
+APP_VERSION = "35.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4917,7 +4917,63 @@ def log_setups(rows):
 
 
 def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
-    """Pure function: walk daily bars after the setup date."""
+    """v35.1: trigger ("stop") plans are graded the middle-ground way -- entry on
+    the intraday trigger (a conditional order), at the open on a gap; exit at the
+    close if it closes back through the trigger (failed 2U/2D). The strict
+    daily-close-confirmation result is kept alongside under "close_confirm" so
+    the two can be compared. Limit/pullback plans are unchanged."""
+    fill=row.get("fill") or ("limit" if row.get("lane")=="pullback" else "stop")
+    if fill!="stop":
+        return _evaluate_close_confirm(row, df, max_wait, max_hold)
+    out=_evaluate_trigger_failed2u(row, df, max_wait, max_hold)
+    try:
+        alt=_evaluate_close_confirm(row, df, max_wait, max_hold)
+        out["close_confirm"]={k:alt.get(k) for k in ("status","r","filled","fill_price","closed") if alt.get(k) is not None}
+    except Exception: pass
+    return out
+
+
+def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15):
+    bull=str(row.get("direction") or "bullish")!="bearish"
+    entry,stop,target=float(row["entry"]),float(row["stop"]),float(row["target"])
+    d0=pd.Timestamp(str(row["trade_date"])[:10])
+    after=df[df.index>d0]
+    if not len(after): return {"status":"pending","sessions":0}
+    fill_i=None; px=None; gap=False
+    for i in range(min(max_wait,len(after))):
+        b=after.iloc[i]
+        if bull and float(b["High"])>=entry:
+            fill_i=i; gap=float(b["Open"])>entry; px=float(b["Open"]) if gap else entry; break
+        if (not bull) and float(b["Low"])<=entry:
+            fill_i=i; gap=float(b["Open"])<entry; px=float(b["Open"]) if gap else entry; break
+    if fill_i is None:
+        return {"status":"expired" if len(after)>=max_wait else "waiting","sessions":int(len(after))}
+    fd=str(after.index[fill_i])[:10]
+    if (bull and px>=target) or ((not bull) and px<=target):
+        return {"status":"skipped","reason":"gapped past the target","filled":fd,"sessions":int(len(after))}
+    if (bull and px<=stop) or ((not bull) and px>=stop):
+        return {"status":"skipped","reason":"gapped through the stop","filled":fd,"sessions":int(len(after))}
+    risk=abs(px-stop) or 1e-9; mfe=0.0; mae=0.0
+    base={"fill_price":round(px,2),"gap_entry":bool(gap),"filled":fd}
+    for j in range(fill_i,min(len(after),fill_i+max_hold)):
+        b=after.iloc[j]; hi,lo,cl=float(b["High"]),float(b["Low"]),float(b["Close"])
+        fav=(hi-px) if bull else (px-lo); adv=(px-lo) if bull else (hi-px)
+        mfe=max(mfe,fav/risk); mae=max(mae,adv/risk)
+        hit_stop=(lo<=stop) if bull else (hi>=stop); hit_tgt=(hi>=target) if bull else (lo<=target)
+        common={**base,"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+        if hit_stop: return {"status":"loss","r":-1.0,**common}
+        if hit_tgt: return {"status":"win","r":round(abs(target-px)/risk,2),**common}
+        if (bull and cl<entry) or ((not bull) and cl>entry):
+            r=((cl-px) if bull else (px-cl))/risk
+            return {"status":"win" if r>0 else "loss","r":round(r,2),"exit":"failed 2U" if bull else "failed 2D",**common}
+    last=after.iloc[min(len(after),fill_i+max_hold)-1]; close=float(last["Close"])
+    r=((close-px) if bull else (px-close))/risk
+    done=len(after)>=fill_i+max_hold
+    return {"status":"timeout" if done else "open","r":round(r,2),**base,"days":int(min(len(after),fill_i+max_hold)-fill_i),"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+
+
+def _evaluate_close_confirm(row, df, max_wait=10, max_hold=15):
+    """Pure function: walk daily bars after the setup date (close-confirmation variant)."""
     bull=str(row.get("direction") or "bullish")!="bearish"
     entry,stop,target=float(row["entry"]),float(row["stop"]),float(row["target"])
     lane=row.get("lane"); d0=pd.Timestamp(str(row["trade_date"])[:10])
@@ -5041,6 +5097,8 @@ def track_record_payload(days=120):
         if st=="open": g["open"]+=1
         if st=="expired": g["expired"]+=1
         if st in ("win","loss","timeout") and oc.get("r") is not None: g["r_sum"]+=float(oc["r"]); g["r_n"]+=1
+        cc=oc.get("close_confirm") or {}
+        if cc.get("status") in ("win","loss","timeout") and cc.get("r") is not None: g.setdefault("cc",[]).append(float(cc["r"]))
         if st in ("win","loss","timeout") and oc.get("option_return_pct") is not None:
             g.setdefault("opt",[]).append(float(oc["option_return_pct"]))
     lanes=[]
@@ -5048,6 +5106,7 @@ def track_record_payload(days=120):
         closed=g["wins"]+g["losses"]
         g["win_rate"]=round(100*g["wins"]/closed) if closed else None
         g["avg_r"]=round(g["r_sum"]/g["r_n"],2) if g["r_n"] else None
+        cc=g.pop("cc",[]); g["close_confirm_n"]=len(cc); g["close_confirm_avg_r"]=round(float(np.mean(cc)),2) if cc else None
         opt=g.pop("opt",[])
         g["option_n"]=len(opt); g["option_avg_pct"]=round(float(np.mean(opt)),1) if opt else None
         g["option_win_rate"]=round(100*sum(1 for x in opt if x>0)/len(opt)) if opt else None
@@ -12876,7 +12935,7 @@ function v32Status(p,mode){
  const limit=p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone);
  if(limit&&!u.in_zone)return {t:`Wait for ${v32$(u.entry)}`,c:V32_TONE.wait,edge:V32_TONE.wait};
  if(limit&&u.in_zone)return {t:"In the entry zone now",c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
- return {t:`Trigger set · daily close ${bear?"below":"above"} ${v32$(u.entry)}`,c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
+ return {t:`Trigger set · ${bear?"2D below":"2U above"} ${v32$(u.entry)}`,c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
 }
 function v32CardHTML(c){
  const p=c.plan,u=p?.underlying||{},z=v28Pick(p),st=v32Status(p,c.mode),bear=c.dir==="bearish",lp=v32LogPieces(p,c.lane);
@@ -12886,7 +12945,7 @@ function v32CardHTML(c){
  const more=[];
  if(c.extra)more.push(c.extra);
  {const lim=p&&(p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone));
-  if(u.entry!=null&&!lim)more.unshift(`<div><b>Entry rule</b> Only on a <b>daily close ${c.dir==="bearish"?"below":"above"} ${v32$(u.entry)}</b> — buy near the close (3:45–4:00 ET) or at the next open. An intraday poke that closes back ${c.dir==="bearish"?"above":"below"} doesn't count.</div>`);}
+  if(u.entry!=null&&!lim){const b=c.dir==="bearish";more.unshift(`<div><b>Entry rule</b> Set a conditional order in the morning: enter when the stock trades ${b?"below":"above"} <b>${v32$(u.entry)}</b> (most brokers can trigger an option order off the stock price). A gap ${b?"below":"above"} it at the open on volume counts. <b>If it closes back ${b?"above":"below"} ${v32$(u.entry)}</b> — that day or later — it's a failed ${b?"2D":"2U"}: exit at the close instead of waiting for the stop.</div>`);}}
  if(lp.rules)more.push(`<b>Exit plan</b><ul>${lp.rules}</ul>`);
  if(v?.available)more.push(`<div><b>VP</b> 20-session POC ${v32$(v.poc)} · VA ${v32$(v.val)}–${v32$(v.vah)}${v.prior_week?` · prior-week VA ${v32$(v.prior_week.val)}–${v32$(v.prior_week.vah)}`:""}</div>`);
  if(ft?.frames)more.push(`<div><b>STRAT</b> ${(vs.strat.frames||[]).map(f=>`${f.timeframe} ${f.scenario}`).join(" · ")} · FTFC ${ft.state}</div>`);
@@ -12996,7 +13055,7 @@ function v32RenderRecord(){
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
-  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div></div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
  const rows=document.getElementById("v32RecRows");
  if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
  const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};
