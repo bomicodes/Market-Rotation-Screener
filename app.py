@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "35.1"
+APP_VERSION = "35.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
+             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2980,6 +2980,50 @@ def _leg_summary(row):
     return {k:row.get(k) for k in ("symbol","type","expiration","dte","strike","bid","ask","mid","delta","iv","open_interest","volume","spread_pct","liquidity")}
 
 
+def _tick_down(x, tick=.05): return round(math.floor(float(x)/tick+1e-9)*tick,2)
+def _tick_up(x, tick=.05): return round(math.ceil(float(x)/tick-1e-9)*tick,2)
+
+
+def broker_order_plan(single, plan_name, vp_in_zone, days_to_entry, bars=None):
+    """v35.2: ready-to-enter orders for a broker that only accepts premium-based
+    orders (Webull). The underlying trigger is translated into the option's
+    modeled premium at that price; the contract's own daily premium chart
+    (support band, 30-day high) refines the entry and the first take-profit.
+    Prices use $0.05 increments, which every option accepts."""
+    if not single: return None
+    leg=single.get("leg") or {}; e=float(single.get("entry_premium") or 0)
+    mid=_safe_float(leg.get("mid")) or e; ask=_safe_float(leg.get("ask")) or mid
+    if e<=0: return None
+    prem=_premium_support_metrics(bars,mid) if bars else {"available":False}
+    limit_style=plan_name=="pullback" or (plan_name=="vp" and not vp_in_zone)
+    out={"premium_chart":{k:prem.get(k) for k in ("state","support_low","support_high","support_touches","floor_reliable","prior_20d_high","current_premium")} if prem.get("available") else None,"notes":[]}
+    if days_to_entry==0:
+        lim=_tick_up(min(ask,mid*1.03)); fill=lim
+        out["entry"]={"type":"Limit","limit":lim,"text":f"Buy limit ${lim:.2f} (it's at the entry now)"}
+    elif limit_style:
+        lim=_tick_up(e); why="modeled premium with the stock at the entry level"
+        if prem.get("available") and prem.get("floor_reliable") and prem["support_low"]<=e*1.15 and prem["support_high"]>=e*.85:
+            lim=_tick_up(min(e,prem["support_high"])); why=f"lines up with the premium's own support ${prem['support_low']:.2f}–{prem['support_high']:.2f} ({prem['support_touches']} touches)"
+        fill=lim
+        out["entry"]={"type":"Limit","limit":lim,"text":f"Buy limit ${lim:.2f} · GTC — {why}"}
+    else:
+        stp=_tick_down(e); lim=_tick_up(max(e*1.08,e+.08))
+        if lim<=stp: lim=round(stp+.05,2)
+        fill=e   # stop-limits usually fill near the stop; targets are based on that
+        out["entry"]={"type":"Stop limit","stop":stp,"limit":lim,"text":f"Buy stop-limit · stop ${stp:.2f} · limit ${lim:.2f} · GTC — ≈ the premium when the stock hits the trigger"}
+        if mid>=stp:
+            out["notes"].append(f"The premium (${mid:.2f}) is already at or above the stop price, so a buy stop would fill right away. Use a stock price alert at the trigger instead, or wait for it to dip.")
+    tp1=_tick_up(fill*1.5); tgt=_tick_down(single.get("premium_at_target") or fill*2)
+    sl=_tick_down(single.get("premium_at_stop") or fill*.5); sl_lim=_tick_down(max(.05,sl*.9))
+    out["exits"]=[{"text":f"Take half: sell limit ${tp1:.2f} (+50%)"},{"text":f"Rest: sell limit ${tgt:.2f} ≈ stock target"},
+                  {"text":f"Stop: sell stop-limit · stop ${sl:.2f} · limit ${sl_lim:.2f} ≈ stock stop (or exit on a close back through the trigger)"}]
+    if prem.get("available") and prem.get("prior_20d_high") and tp1<prem["prior_20d_high"]<tgt:
+        out["notes"].append(f"The premium's 30-day high is ${prem['prior_20d_high']:.2f} — first resistance on its chart, between the two targets.")
+    if prem.get("available") and prem.get("state")=="FALLING · NO BASE":
+        out["notes"].append("The premium chart is still falling with no base yet.")
+    return out
+
+
 def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, structure=None, rows=None, spot=None, atr=None, rv20=None):
     ticker=ticker.upper().strip(); direction="bearish" if str(direction).lower().startswith("bear") else "bullish"
     is_put=direction=="bearish"; budget=max(25.0,float(budget or 250))
@@ -3061,6 +3105,16 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     exit_plan=None
     if best_single:
         exit_plan=option_exit_plan(best_single,entry_used,stop,target,is_put,hold_days,days_to_entry,cat.get("next_earnings"))
+    broker_order=None
+    if best_single:
+        try:
+            bars=None
+            if live_rows and (best_single.get("leg") or {}).get("symbol"):
+                sym=best_single["leg"]["symbol"]; bars=(alpaca_option_daily_bars([sym],60) or {}).get(sym)
+            vpz=bool(((structure.get("vp_plans") or {}).get(direction) or {}).get("in_zone"))
+            broker_order=broker_order_plan(best_single,lv["plan"],vpz,days_to_entry,bars)
+        except Exception as e:
+            broker_order={"error":str(e)}
     notes=[]
     if not best_single: notes.append(f"No single {('put' if is_put else 'call')} fits the ${budget:.0f} budget (cheapest modeled entry ${min(z['cost'] for z in singles):.0f}).")
     if ivx.get("juiced"): notes.append(f"Premium is juiced: ATM IV {ivx['atm_iv']:.0f}% vs {ivx['rv_1y']:.0f}% 1-year realized vol"+(f" (IV rank {ivx['iv_rank']:.0f})" if ivx.get('iv_rank') is not None else "")+" — size down, or wait for IV to cool.")
@@ -3074,7 +3128,7 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
             "underlying":{"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":lv["underlying_rr"],"in_zone":days_to_entry==0},
             "vp_plan":(structure.get("vp_plans") or {}).get(direction) if lv["plan"]=="vp" else None,
             "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":None,"recommended":"single" if best_single else None,
-            "exit_plan":exit_plan,"next_earnings":cat.get("next_earnings"),"iv":ivx,"juiced":bool(ivx.get("juiced")),
+            "exit_plan":exit_plan,"broker_order":broker_order,"next_earnings":cat.get("next_earnings"),"iv":ivx,"juiced":bool(ivx.get("juiced")),
             "cheapest_single_cost":min(z["cost"] for z in singles),"notes":notes,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
             "method":"Black-Scholes repricing at entry/target/stop, calibrated to the live mid; hold-period theta included."}
 
@@ -4876,7 +4930,7 @@ def api_entry_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         budget=max(25.0,min(100000.0,budget))
-        key=f"entry-plan-v31:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
+        key=f"entry-plan-v352:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
         payload,stale,err=cached_refresh_safe(key,lambda:option_entry_plan(ticker,direction,budget,plan),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
@@ -7915,7 +7969,11 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height:34px;padding:0 8px;background:#0B0F14;border:1px solid #263140;border-radius:8px;color:#E6EDF3}
 .v32Filtered{background:#0E131A;border:1px dashed #263140;border-radius:12px;padding:12px 16px;color:#8B97A6;font-size:13px}.v32Filtered summary{cursor:pointer}.v32Filtered p{margin:8px 0 0}
 .v32Empty{border:1px dashed #263140;border-radius:12px;padding:16px;color:#8B97A6;font-size:13px;text-align:center}
-.v32TableWrap{overflow-x:auto}.v32Table{width:100%;border-collapse:collapse;font-size:13px}.v32Table th{font-size:11px;color:#8B97A6;text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid #1D2630}
+.v32TableWrap{overflow-x:auto}.v352Order{margin-top:6px;padding:8px 10px;border:1px solid #1D2630;border-radius:8px;background:#0E141B;font-size:12.5px;line-height:1.5}
+.v352Head{font-size:11px;font-weight:700;color:#8B97A6;text-transform:uppercase;letter-spacing:.04em}
+.v352Exits{margin-top:4px;color:#C9D3DD;font-size:12px}.v352Note{margin-top:4px;color:#F2B84B;font-size:11.5px}
+.v352Copy{font:inherit;font-family:ui-monospace,Menlo,monospace;font-weight:700;color:#E6EDF3;background:#17202A;border:1px solid #2A3644;border-radius:6px;padding:0 6px;cursor:pointer}
+.v352Copy.ok{border-color:#3DD68C;color:#3DD68C}.v32Table{width:100%;border-collapse:collapse;font-size:13px}.v32Table th{font-size:11px;color:#8B97A6;text-align:left;font-weight:500;padding:6px 8px;border-bottom:1px solid #1D2630}
 .v32Table td{padding:8px;border-bottom:1px solid #151D27}
 .v32SecRow{cursor:pointer}.v32SecRow:hover td{background:#131B24}.v32SecRow.sel td{background:#17222E}.v32SecRow.dim{opacity:.45}
 .v32SecRow:focus-visible{outline:2px solid #3b82f6;outline-offset:-2px}
@@ -12940,6 +12998,17 @@ function v32Status(p,mode){
  if(limit&&u.in_zone)return {t:"In the entry zone now",c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
  return {t:`Trigger set · ${bear?"2D below":"2U above"} ${v32$(u.entry)}`,c:bear?V32_TONE.short:V32_TONE.long,edge:bear?V32_TONE.short:V32_TONE.long};
 }
+// v35.2: ready-to-enter premium-based orders (Webull takes option orders on the premium only)
+function v352OrderHTML(p){
+ const o=p?.broker_order;if(!o||!o.entry)return "";
+ const cp=t=>`<button type="button" class="v352Copy" data-v352-copy="${v32E(t)}" title="Copy">${v32E(t)}</button>`;
+ const ent=o.entry.type==="Stop limit"?`Buy stop-limit · stop ${cp(o.entry.stop.toFixed(2))} · limit ${cp(o.entry.limit.toFixed(2))}`:`Buy limit ${cp(o.entry.limit.toFixed(2))}`;
+ return `<div class="v352Order"><div class="v352Head">Webull order (premium)</div><div>${ent} · GTC</div>
+  <div class="v32Muted" style="font-size:11.5px">${v32E(o.entry.text.split(" — ")[1]||"")}</div>
+  <div class="v352Exits">${(o.exits||[]).map(x=>`<div>${v32E(x.text)}</div>`).join("")}</div>
+  ${(o.notes||[]).map(n=>`<div class="v352Note">${v32E(n)}</div>`).join("")}</div>`;
+}
+document.addEventListener("click",ev=>{const b=ev.target?.closest?.("[data-v352-copy]");if(!b)return;ev.preventDefault();ev.stopPropagation();try{navigator.clipboard.writeText(b.dataset.v352Copy);b.classList.add("ok");setTimeout(()=>b.classList.remove("ok"),900)}catch(e){}});
 function v32CardHTML(c){
  const p=c.plan,u=p?.underlying||{},z=v28Pick(p),st=v32Status(p,c.mode),bear=c.dir==="bearish",lp=v32LogPieces(p,c.lane);
  const contract=z?`<b class="v32Num">${v32E(v28ContractLabel(z))}</b><span class="v32Num" style="color:${Number(z.cost)<=Number(p.budget)?"#8B97A6":"#FF8A78"}">≈ ${v32$(z.entry_premium)} (${v32$(z.cost,0)}) · ${v32$(z.premium_at_target)} at target</span>`
@@ -12959,7 +13028,7 @@ function v32CardHTML(c){
   <div style="min-width:0"><div class="v32Sum">${v32E(c.summary)}</div>${u.entry!=null?v32Ladder(c.dir,u.stop,u.entry,u.target,p?.spot):""}
    <div class="v32Chips">${(c.chips||[]).slice(0,3).map(x=>`<span>${v32E(x)}</span>`).join("")}</div></div>
   <div class="v32Right"><div class="v32RR"><span class="v32Muted">Reward / risk</span><b class="v32Num">${u.rr!=null?Number(u.rr).toFixed(1):"—"}</b></div>
-   <div class="v32Contract">${contract}${p?.juiced?`<span class="v32Juiced">PREMIUM JUICED${p.iv?.atm_iv!=null?` · IV ≈ ${Number(p.iv.atm_iv).toFixed(0)}%`:""}</span>`:""}</div>
+   <div class="v32Contract">${contract}${v352OrderHTML(p)}${p?.juiced?`<span class="v32Juiced">PREMIUM JUICED${p.iv?.atm_iv!=null?` · IV ≈ ${Number(p.iv.atm_iv).toFixed(0)}%`:""}</span>`:""}</div>
    <div class="v32Btns">${lp.id?`<button type="button" class="v32Btn v32Go grow" data-v32-logtoggle="${v32E(lp.id)}">Log trade</button>`:`<button type="button" class="v32Btn grow" disabled>Log trade</button>`}<button type="button" class="v32Btn" data-v32-chart="${v32E(c.ticker)}" data-parent="${v32E(c.parent||"")}">Chart</button></div>${lp.form}</div>
   ${more.length?`<details class="v32More"><summary>Plan details</summary>${more.join("")}</details>`:""}
  </article>`;

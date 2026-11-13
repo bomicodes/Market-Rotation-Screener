@@ -209,3 +209,15 @@ def test_gap_entry_fills_at_open():
     row = {"direction": "bullish", "entry": 10.5, "stop": 9.5, "target": 12.0, "lane": "vp_counter", "fill": "stop", "trade_date": "2026-11-01"}
     out = appmod.evaluate_setup_outcome(row, df)
     assert out["gap_entry"] and out["fill_price"] == 11.0 and out["status"] == "win"
+
+
+def test_broker_order_plan_stop_limit_and_limit_styles():
+    single = {"leg": {"symbol": "X", "mid": 1.0, "bid": .95, "ask": 1.05}, "entry_premium": 1.32, "premium_at_target": 3.1, "premium_at_stop": .61}
+    o = appmod.broker_order_plan(single, "rejection", False, 3)
+    assert o["entry"]["type"] == "Stop limit" and o["entry"]["stop"] == 1.3 and o["entry"]["limit"] == 1.45
+    assert "2.00" in o["exits"][0]["text"] and "0.60" in o["exits"][2]["text"]
+    bars = [{"o": 1.4, "h": 1.5, "l": l, "c": 1.4, "v": 100} for l in (1.25, 1.3, 1.22, 1.28, 1.35, 1.24, 1.3)]
+    o2 = appmod.broker_order_plan(dict(single, entry_premium=1.40), "pullback", False, 3, bars)
+    assert o2["entry"]["type"] == "Limit" and "premium's own support" in o2["entry"]["text"]
+    hot = appmod.broker_order_plan(dict(single, leg={"symbol": "X", "mid": 1.5, "ask": 1.55}), "breakout", False, 3)
+    assert any("already" in n for n in hot["notes"])
