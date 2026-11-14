@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "36.1"
+APP_VERSION = "36.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4970,7 +4970,7 @@ def log_setups(rows):
     return n
 
 
-def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
+def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
     """v35.1: trigger ("stop") plans are graded the middle-ground way -- entry on
     the intraday trigger (a conditional order), at the open on a gap; exit at the
     close if it closes back through the trigger (failed 2U/2D). The strict
@@ -4979,7 +4979,7 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
     fill=row.get("fill") or ("limit" if row.get("lane")=="pullback" else "stop")
     if fill!="stop":
         return _evaluate_close_confirm(row, df, max_wait, max_hold)
-    out=_evaluate_trigger_failed2u(row, df, max_wait, max_hold)
+    out=_evaluate_trigger_failed2u(row, df, max_wait, max_hold, intraday)
     try:
         alt=_evaluate_close_confirm(row, df, max_wait, max_hold)
         out["close_confirm"]={k:alt.get(k) for k in ("status","r","filled","fill_price","closed") if alt.get(k) is not None}
@@ -4987,7 +4987,7 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15):
     return out
 
 
-def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15):
+def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None):
     bull=str(row.get("direction") or "bullish")!="bearish"
     entry,stop,target=float(row["entry"]),float(row["stop"]),float(row["target"])
     d0=pd.Timestamp(str(row["trade_date"])[:10])
@@ -5014,6 +5014,22 @@ def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15):
         fav=(hi-px) if bull else (px-lo); adv=(px-lo) if bull else (hi-px)
         mfe=max(mfe,fav/risk); mae=max(mae,adv/risk)
         hit_stop=(lo<=stop) if bull else (hi>=stop); hit_tgt=(hi>=target) if bull else (lo<=target)
+        # v36.2: on the fill day (no gap), daily bars can't tell whether the stop
+        # was hit before or after the trigger. Use hourly bars when available:
+        # only a stop touch AFTER the fill hour counts (same hour = stop, conservative).
+        if j==fill_i and not gap and hit_stop and intraday is not None:
+            try:
+                hb=intraday(str(after.index[j])[:10]) or []
+                if hb:
+                    fh=next((k for k,x in enumerate(hb) if (x["high"]>=entry if bull else x["low"]<=entry)),None)
+                    if fh is not None:
+                        same=(hb[fh]["low"]<=stop) if bull else (hb[fh]["high"]>=stop)
+                        later=any(((x["low"]<=stop) if bull else (x["high"]>=stop)) for x in hb[fh+1:])
+                        if not same and not later:
+                            hit_stop=False; base["intraday_checked"]=True
+                            adv=(px-min(x["low"] for x in hb[fh:])) if bull else (max(x["high"] for x in hb[fh:])-px)
+                            mae=max(0.0,adv/risk)
+            except Exception: pass
         common={**base,"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
         if hit_stop: return {"status":"loss","r":-1.0,**common}
         if hit_tgt: return {"status":"win","r":round(abs(target-px)/risk,2),**common}
@@ -5108,15 +5124,21 @@ def update_setup_outcomes(days=45):
         _pl=json.loads(rr["payload"]) if rr.get("payload") else {}
         _trig=(_pl.get("fill") or ("limit" if rr.get("lane")=="pullback" else "stop"))=="stop"
         # v35.1: regrade closed trigger trades once under the middle-ground rule (they lack "close_confirm")
-        if prior.get("status") in ("win","loss","timeout","expired","skipped") and not (_trig and "close_confirm" not in prior and prior.get("status")!="expired"): continue
+        # v36.2: also regrade once any fill-day stop-out that wasn't checked against hourly bars
+        _sameday=(prior.get("status")=="loss" and prior.get("r")==-1.0 and prior.get("filled") and prior.get("filled")==prior.get("closed") and not prior.get("gap_entry") and not prior.get("intraday_checked_v362"))
+        if prior.get("status") in ("win","loss","timeout","expired","skipped") and not (_trig and "close_confirm" not in prior and prior.get("status")!="expired") and not (_trig and _sameday): continue
         t=rr["ticker"]
         if t not in frames:
             try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
             except Exception: frames[t]=None
         if frames[t] is None or not len(frames[t]): continue
         pl=json.loads(rr["payload"])
-        try: out=evaluate_setup_outcome(pl,frames[t])
+        def _intraday(day,t=t):
+            hb=_canonical_hourly_bars(t,"1m")
+            return [x for x in hb if str(x["dt"])[:10]==day]
+        try: out=evaluate_setup_outcome(pl,frames[t],intraday=_intraday)
         except Exception as e: out={"status":"error","error":str(e)}
+        out["intraday_checked_v362"]=True
         try:
             sym=((pl.get("contract") or {}).get("symbol"))
             if sym and out.get("filled"):
