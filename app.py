@@ -8069,7 +8069,7 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 .v32Panel{background:#10161D;border:1px solid #1D2630;border-radius:16px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;min-width:0}
 .v32PanelHead{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.v32PanelHead h2{margin:0;font-size:15px;font-weight:700}
 .v32Link{border:0;background:none;color:#9CC3FF;font:inherit;font-size:13px;cursor:pointer}
-.v32Cards{display:flex;flex-direction:column;gap:12px}
+.v32Cards{display:flex;flex-direction:column;gap:12px}.v363Head{font-size:11.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:#8B97A6;margin:10px 2px -4px}.v363Head:first-child{margin-top:0}.v363Head[data-tier="0"]{color:#3DD68C}.v363Badge{font-size:10px;font-weight:800;margin-top:3px}
 .v32Card{background:#10161D;border:1px solid #1D2630;border-radius:16px;padding:16px 18px 16px 20px;display:grid;grid-template-columns:minmax(140px,185px) minmax(0,1fr) minmax(180px,220px);gap:20px;align-items:start;position:relative;overflow:hidden}
 .v32Card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--edge,#3DD68C)}
 .v32Tick{font-size:21px;font-weight:600}.v32Dir{font-size:11px;font-weight:700;padding:3px 7px;border-radius:6px;margin-left:8px}
@@ -13543,6 +13543,71 @@ async function v36LogRev(){
  }catch(e){console.warn("rev log",e)}
 }
 setTimeout(async()=>{try{await window.__v349Gate;v36LoadRev()}catch(e){}},3500);
+
+// ---- v36.3: sort every list by trigger status (triggered first) ----------------------
+const V363_TIERS=["Triggered / in the entry zone","Trigger set · waiting on the break","Waiting for a pullback","Not ready · premium juiced","Not tradable right now","Loading contract prices…"];
+function v363Tier(c){
+ const p=c&&c.plan;if(!p||p._loading)return {i:5,d:99};
+ if(!p.available||!v28Pick(p))return {i:4,d:99};
+ const u=p.underlying||{},bear=(p.direction||c.dir)==="bearish",spot=Number(p.spot??u.spot),e=Number(u.entry),t=Number(u.target);
+ const ok=Number.isFinite(spot)&&spot>0&&Number.isFinite(e)&&e>0;
+ const dist=ok?(bear?(spot-e)/spot:(e-spot)/spot)*100:50; // > 0 = trigger not reached yet
+ const limit=p.plan==="pullback"||(p.plan==="vp"&&p.vp_plan&&!p.vp_plan.in_zone);
+ if(p.juiced&&!u.in_zone)return {i:3,d:Math.abs(dist)};
+ if(limit)return u.in_zone?{i:0,d:0}:{i:2,d:Math.abs(dist)};
+ if(ok&&dist<=0){const past=Number.isFinite(t)&&(bear?spot<=t:spot>=t);return past?{i:4,d:99,past:true}:{i:0,d:-dist,through:true};}
+ return {i:1,d:dist};
+}
+const _v32StatusV363=v32Status;
+v32Status=function(p,mode){
+ const s=_v32StatusV363(p,mode);
+ try{if(p&&p.available&&!p._loading&&v28Pick(p)&&/^Trigger set/.test(s.t)){const tr=v363Tier({plan:p,dir:p.direction}),bear=p.direction==="bearish",e=v32$(p.underlying?.entry);
+   if(tr.past)return {t:"Already past target · missed",c:V32_TONE.muted,edge:V32_TONE.muted};
+   if(tr.through)return {...s,t:`Triggered · trading ${bear?"below":"above"} ${e}`};
+   return {...s,t:`${s.t} · ${tr.d.toFixed(1)}% away`};}}catch(e){}
+ return s;
+};
+const _v32CollectIdeasV363=v32CollectIdeas;
+v32CollectIdeas=function(){
+ const r=_v32CollectIdeasV363();
+ r.ideas.forEach(c=>c._tier=v363Tier(c));
+ r.ideas.sort((a,b)=>a._tier.i-b._tier.i||a._tier.d-b._tier.d||(b.score||0)-(a.score||0));
+ return r;
+};
+const _v32CardHTMLV363=v32CardHTML;
+v32CardHTML=function(c){const h=_v32CardHTMLV363(c);const t=(c._tier||v363Tier(c)).i;return h.replace('<article class="v32Card"',`<article data-tier="${t}" class="v32Card"`)};
+function v363Headers(){
+ const host=document.getElementById("v32Cards");if(!host)return;
+ host.querySelectorAll(".v363Head").forEach(x=>x.remove());
+ const cards=[...host.querySelectorAll("article.v32Card[data-tier]")],counts={};
+ cards.forEach(a=>{counts[a.dataset.tier]=(counts[a.dataset.tier]||0)+1});
+ let last=null;cards.forEach(a=>{const t=a.dataset.tier;if(t!==last){const h=document.createElement("div");h.className="v363Head";h.dataset.tier=t;h.textContent=`${V363_TIERS[t]} · ${counts[t]}`;a.before(h);last=t}});
+}
+const _v32RenderTonightV363=v32RenderTonight;
+v32RenderTonight=function(){const o=_v32RenderTonightV363();try{v363Headers()}catch(e){console.warn("v363 headers",e)}return o};
+// Top Setups grid (Rotation): triggered = holding just through VAH/VAL; then not yet; then extended; then no trigger.
+function v363GridTier(x){
+ try{const e=topSetupEvaluation(x),va=e.va,opt=(optionScanMap||{})[x.ticker]||{},ctx=(typeof institutionalContextMap!=="undefined")?institutionalContextMap[x.ticker]:null,s=ctx?.structure||{};
+  const spot=Number(opt.spot??va?.close??s.spot);
+  if(!va||s.plan_valid===false||!Number.isFinite(spot)||!(va.direction==="bullish"||va.direction==="bearish"))return {i:3,d:99,t:"No trigger yet"};
+  const bull=va.direction==="bullish",lvl=Number(bull?va.vah:va.val);if(!Number.isFinite(lvl)||lvl<=0)return {i:3,d:99,t:"No trigger yet"};
+  const ext=(bull?spot-lvl:lvl-spot)/lvl*100;
+  if(ext>=0&&ext<=1)return {i:0,d:ext,t:`Triggered · holding ${bull?"above VAH":"below VAL"}`};
+  if(ext<0)return {i:1,d:-ext,t:`Not triggered · ${(-ext).toFixed(1)}% from ${bull?"VAH":"VAL"}`};
+  return {i:2,d:ext,t:`Extended ${ext.toFixed(1)}% · wait for retest`};
+ }catch(e){return {i:3,d:99,t:"No trigger yet"}}
+}
+function v363SortGrid(){
+ const g=document.getElementById("topSetupsGrid");if(!g)return;
+ const cards=[...g.querySelectorAll(".topSetupCard[data-top-setup]")];if(cards.length<1)return;
+ const col=["#3DD68C","#7AA7FF","#F2B84B","#8B97A6"];
+ const ranked=cards.map(card=>{const x=(globalTopSetupData||[]).find(z=>z.ticker===card.dataset.topSetup);return {card,t:x?v363GridTier(x):{i:3,d:99,t:"No trigger yet"}}});
+ ranked.sort((a,b)=>a.t.i-b.t.i||a.t.d-b.t.d);
+ ranked.forEach(({card,t})=>{card.querySelector(".v363Badge")?.remove();const b=document.createElement("div");b.className="v363Badge";b.style.color=col[t.i];b.textContent=t.t;
+   const head=card.querySelector(".topSetupHead > div");if(head)head.appendChild(b);g.appendChild(card)});
+}
+const _renderTopSetupsV363=renderTopSetups;
+renderTopSetups=function(){const o=_renderTopSetupsV363();try{v363SortGrid()}catch(e){console.warn("v363 grid",e)}return o};
 
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;

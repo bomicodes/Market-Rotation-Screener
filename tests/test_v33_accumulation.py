@@ -148,3 +148,11 @@ def test_reversal_prefilter_finds_failed_2d():
     out = appmod._rev_prefilter(df, ["XLK"], {"XLK": {"flow": 30}})
     assert out and out["direction"] == "bullish" and any(x["type"] == "Failed 2D" for x in out["signals"])
     assert out["prescore"] >= 4   # daily signal + near the 20d low + group flow aligned
+
+
+def test_v363_lists_sorted_by_trigger_status():
+    src = open(__import__("os").path.join(__import__("os").path.dirname(__file__), "..", "app.py")).read()
+    assert "function v363Tier" in src and "function v363SortGrid" in src
+    # the sort layer must wrap the renderers before the final wiring
+    assert src.index("function v363Tier") < src.index("const _renderTopSetupsV32=renderTopSetups")
+    assert "Triggered / in the entry zone" in src
