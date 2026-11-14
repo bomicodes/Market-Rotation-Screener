@@ -221,3 +221,15 @@ def test_broker_order_plan_stop_limit_and_limit_styles():
     assert o2["entry"]["type"] == "Limit" and "premium's own support" in o2["entry"]["text"]
     hot = appmod.broker_order_plan(dict(single, leg={"symbol": "X", "mid": 1.5, "ask": 1.55}), "breakout", False, 3)
     assert any("already" in n for n in hot["notes"])
+
+
+def test_fill_day_stop_resolved_with_hourly_bars():
+    import pandas as pd
+    idx = pd.bdate_range("2026-11-13", periods=1)
+    df = pd.DataFrame({"Open": [70.52], "High": [71.31], "Low": [68.565], "Close": [71.28], "Volume": 1e6}, index=idx)
+    row = {"direction": "bullish", "entry": 70.8, "stop": 68.63, "target": 75.94, "lane": "vp_counter", "fill": "stop", "trade_date": "2026-11-12"}
+    # without intraday data: conservative stop-out
+    assert appmod.evaluate_setup_outcome(row, df)["status"] == "loss"
+    hourly = [{"high": 70.6, "low": 69.5}, {"high": 69.9, "low": 68.565}, {"high": 70.5, "low": 69.0}, {"high": 71.0, "low": 70.2}, {"high": 71.31, "low": 70.9}]
+    out = appmod.evaluate_setup_outcome(row, df, intraday=lambda d: hourly)
+    assert out["status"] == "open" and out["r"] > 0 and out["intraday_checked"]
