@@ -6315,6 +6315,8 @@ def options_flow_snapshot(ticker, prior=None):
         if v<=0: continue
         o=_occ_parse(sym)
         if not o or abs(o["strike"]/spot-1)>.2: continue
+        # v36.4.2: skip contracts >3% in the money (dividend plays, hedges and stock replacement, not a directional bet)
+        if (o["type"]=="call" and o["strike"]<spot*.97) or (o["type"]=="put" and o["strike"]>spot*1.03): continue
         px=_safe_float(b.get("vw")) or _safe_float(b.get("c")) or 0
         hi,lo,cl=_safe_float(b.get("h")),_safe_float(b.get("l")),_safe_float(b.get("c"))
         loc=((cl-lo)/(hi-lo)) if (hi is not None and lo is not None and cl is not None and hi>lo) else .5
@@ -6389,7 +6391,7 @@ def api_plan_flow():
         if not tick: return jsonify({"ok":False,"error":"No tickers."}),400
         force=request.args.get("refresh")=="1"
         def one(t):
-            return cached_refresh_safe(f"planflow-v1:{t}",lambda t=t:plan_flow_read(t),force=force,ttl=(3600 if market_open_now() else 12*3600))[0]
+            return cached_refresh_safe(f"planflow-v2:{t}",lambda t=t:plan_flow_read(t),force=force,ttl=(3600 if market_open_now() else 12*3600))[0]
         rows={}
         with ThreadPoolExecutor(max_workers=min(4,len(tick))) as ex:
             futs={ex.submit(one,t):t for t in tick}
