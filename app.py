@@ -6210,8 +6210,19 @@ def _nightly_keepalive():
 #  - next day: did open interest grow (positions were opened and held)?
 #  - repeat: the same lean several days running (the most reliable free signal)
 # ---------------------------------------------------------------------------
+_FLOW_TABLE={"ok":False,"lock":threading.Lock()}
 def _flow_table(con, backend):
-    con.execute("CREATE TABLE IF NOT EXISTS flow_daily(ticker TEXT NOT NULL, trade_date TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(ticker,trade_date))")
+    # v36.4.1: create once per process under a lock (parallel CREATE TABLE IF NOT EXISTS races on Postgres)
+    if _FLOW_TABLE["ok"]: return
+    with _FLOW_TABLE["lock"]:
+        if _FLOW_TABLE["ok"]: return
+        try:
+            con.execute("CREATE TABLE IF NOT EXISTS flow_daily(ticker TEXT NOT NULL, trade_date TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(ticker,trade_date))")
+            con.commit()
+        except Exception:
+            try: con.rollback()
+            except Exception: pass
+        _FLOW_TABLE["ok"]=True
 
 
 def _flow_history(ticker, n=8):
@@ -6352,7 +6363,8 @@ def flow_read_from(snap, hist):
 
 def plan_flow_read(ticker):
     t=ticker.upper().strip()
-    hist=_flow_history(t,8)
+    try: hist=_flow_history(t,8)
+    except Exception: hist=[]
     snap=options_flow_snapshot(t,prior=(hist[0] if hist else None))
     if hist and hist[0].get("session")==snap["session"] and len(hist)>1 and snap.get("held_ratio") is None:
         snap=options_flow_snapshot(t,prior=hist[1])
