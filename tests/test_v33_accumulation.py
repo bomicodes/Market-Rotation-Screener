@@ -156,3 +156,56 @@ def test_v363_lists_sorted_by_trigger_status():
     # the sort layer must wrap the renderers before the final wiring
     assert src.index("function v363Tier") < src.index("const _renderTopSetupsV32=renderTopSetups")
     assert "Triggered / in the entry zone" in src
+
+
+def _flow_row(sym, typ, vol, oi, prem, loc, d="2026-11-13"):
+    return {"symbol": sym, "type": typ, "strike": 100.0, "expiration": "2026-12-18", "vol": vol, "oi": oi, "prem": prem, "loc": loc, "bar_date": d}
+
+
+def test_v364_flow_summary_and_lean():
+    import app as A
+    rows = [
+        _flow_row("X1", "call", 2000, 500, 400000, 0.9),
+        _flow_row("X2", "call", 800, 300, 150000, 0.7),
+        _flow_row("X3", "put", 300, 5000, 90000, 0.2),     # under OI: not opening-size
+        _flow_row("X4", "put", 50, 0, 60000, 0.5),          # under 100 contracts
+        _flow_row("X5", "call", 5000, 100, 900000, 0.9, d="2026-11-12"),  # stale bar: ignored
+    ]
+    s = A.flow_rows_summary(rows, "2026-11-13")
+    assert s["new_call_prem"] == 550000 and s["new_put_prem"] == 0
+    assert A.flow_lean(s)[0] == "calls"
+    assert A.flow_lean({"new_call_prem": 20000, "new_put_prem": 10000})[0] == "quiet"
+    # held: yesterday's 1000-contract print, OI grew 900 -> 90% held
+    s2 = A.flow_rows_summary(rows, "2026-11-13", prior_top=[{"symbol": "Y", "vol": 1000, "oi": 200}], oi_now={"Y": 1100})
+    assert s2["held_ratio"] == 0.9
+
+
+def test_v364_flow_read_repeat_days_raise_score():
+    import app as A
+    day = lambda d, c, p: {"ticker": "T", "session": d, "new_call_prem": c, "new_put_prem": p, "bull": c, "bear": p, "held_ratio": None, "top": []}
+    one = A.flow_read_from(day("2026-11-13", 500000, 100000), [])
+    three = A.flow_read_from(day("2026-11-13", 500000, 100000), [day("2026-11-12", 400000, 50000), day("2026-11-11", 300000, 20000)])
+    assert three["score"] > one["score"] and three["bias"] == "bullish"
+    assert "calls 3 of the last 3 days" in three["read"]
+    q = A.flow_read_from(day("2026-11-13", 1000, 1000), [])
+    assert q["lean"] == "quiet" and q["score"] is None and q["bias"] == "neutral"
+
+
+def test_v364_group_tag():
+    import app as A
+    assert A.group_tag_for("bullish", 40) == "with"
+    assert A.group_tag_for("bullish", -30) == "against"
+    assert A.group_tag_for("bearish", -30) == "with"
+    assert A.group_tag_for("bullish", 5) == "neutral"
+    assert A.group_tag_for("bullish", None) == "unknown"
+
+
+def test_v364_day1_grace_variant():
+    import app as A, pandas as pd
+    idx = pd.to_datetime(["2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"])
+    # day 1 trades through 100 then closes 99.5 (failed 2U), day 2 rips to target
+    df = pd.DataFrame({"Open": [98, 99, 99.6, 101], "High": [99, 100.5, 104, 106], "Low": [97, 98.8, 99.2, 100.5], "Close": [98.5, 99.5, 103, 105]}, index=idx)
+    row = {"trade_date": "2026-11-10", "direction": "bullish", "entry": 100, "stop": 98, "target": 104, "fill": "stop", "lane": "vp_counter"}
+    out = A.evaluate_setup_outcome(row, df)
+    assert out.get("exit") == "failed 2U" and out["r"] < 0
+    assert out["grace"]["status"] == "win" and out["grace"]["r"] == 2.0

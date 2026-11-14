@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-")
+             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -4984,10 +4984,14 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
         alt=_evaluate_close_confirm(row, df, max_wait, max_hold)
         out["close_confirm"]={k:alt.get(k) for k in ("status","r","filled","fill_price","closed") if alt.get(k) is not None}
     except Exception: pass
+    try:
+        g=_evaluate_trigger_failed2u(row, df, max_wait, max_hold, intraday, grace=True)
+        out["grace"]={k:g.get(k) for k in ("status","r","filled","fill_price","closed","exit") if g.get(k) is not None}
+    except Exception: pass
     return out
 
 
-def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None):
+def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None, grace=False):
     bull=str(row.get("direction") or "bullish")!="bearish"
     entry,stop,target=float(row["entry"]),float(row["stop"]),float(row["target"])
     d0=pd.Timestamp(str(row["trade_date"])[:10])
@@ -5033,7 +5037,8 @@ def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None)
         common={**base,"closed":str(after.index[j])[:10],"days":j-fill_i+1,"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
         if hit_stop: return {"status":"loss","r":-1.0,**common}
         if hit_tgt: return {"status":"win","r":round(abs(target-px)/risk,2),**common}
-        if (bull and cl<entry) or ((not bull) and cl>entry):
+        # v36.4 grace variant: the failed-2U/2D close exit only counts from day 2
+        if ((bull and cl<entry) or ((not bull) and cl>entry)) and not (grace and j==fill_i):
             r=((cl-px) if bull else (px-cl))/risk
             return {"status":"win" if r>0 else "loss","r":round(r,2),"exit":"failed 2U" if bull else "failed 2D",**common}
     last=after.iloc[min(len(after),fill_i+max_hold)-1]; close=float(last["Close"])
@@ -5126,7 +5131,9 @@ def update_setup_outcomes(days=45):
         # v35.1: regrade closed trigger trades once under the middle-ground rule (they lack "close_confirm")
         # v36.2: also regrade once any fill-day stop-out that wasn't checked against hourly bars
         _sameday=(prior.get("status")=="loss" and prior.get("r")==-1.0 and prior.get("filled") and prior.get("filled")==prior.get("closed") and not prior.get("gap_entry") and not prior.get("intraday_checked_v362"))
-        if prior.get("status") in ("win","loss","timeout","expired","skipped") and not (_trig and "close_confirm" not in prior and prior.get("status")!="expired") and not (_trig and _sameday): continue
+        _final=prior.get("status") in ("win","loss","timeout","expired","skipped")
+        _need_grace=_final and _trig and prior.get("status") in ("win","loss","timeout") and "grace" not in prior and "close_confirm" in prior and not _sameday
+        if _final and not _need_grace and not (_trig and "close_confirm" not in prior and prior.get("status")!="expired") and not (_trig and _sameday): continue
         t=rr["ticker"]
         if t not in frames:
             try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
@@ -5136,13 +5143,23 @@ def update_setup_outcomes(days=45):
         def _intraday(day,t=t):
             hb=_canonical_hourly_bars(t,"1m")
             return [x for x in hb if str(x["dt"])[:10]==day]
-        try: out=evaluate_setup_outcome(pl,frames[t],intraday=_intraday)
-        except Exception as e: out={"status":"error","error":str(e)}
+        if _need_grace:
+            # v36.4: keep the graded primary result; only add the day-1-grace variant
+            out=dict(prior)
+            try:
+                g=_evaluate_trigger_failed2u(pl,frames[t],intraday=_intraday,grace=True)
+                out["grace"]={k:g.get(k) for k in ("status","r","filled","fill_price","closed","exit") if g.get(k) is not None}
+            except Exception as e: out["grace"]={"status":"error","error":str(e)}
+        else:
+          try: out=evaluate_setup_outcome(pl,frames[t],intraday=_intraday)
+          except Exception as e: out={"status":"error","error":str(e)}
         out["intraday_checked_v362"]=True
         try:
+            if _need_grace: raise StopIteration
             sym=((pl.get("contract") or {}).get("symbol"))
             if sym and out.get("filled"):
                 out.update(option_outcome(sym,out))
+        except StopIteration: pass
         except Exception as e:
             out["option_error"]=str(e)
         now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
@@ -5166,7 +5183,7 @@ def track_record_payload(days=120):
     for r in rows:
         rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","lane","direction","payload","outcome"),r))
         pl=json.loads(rr["payload"]); oc=json.loads(rr["outcome"]) if rr.get("outcome") else {"status":"pending"}
-        items.append({"trade_date":rr["trade_date"],"ticker":rr["ticker"],"lane":rr["lane"],"direction":rr["direction"],"entry":pl.get("entry"),"stop":pl.get("stop"),"target":pl.get("target"),"score":pl.get("score"),"regime":pl.get("regime"),"contract":pl.get("contract"),"outcome":oc})
+        items.append({"group_tag":pl.get("group_tag"),"trade_date":rr["trade_date"],"ticker":rr["ticker"],"lane":rr["lane"],"direction":rr["direction"],"entry":pl.get("entry"),"stop":pl.get("stop"),"target":pl.get("target"),"score":pl.get("score"),"regime":pl.get("regime"),"contract":pl.get("contract"),"outcome":oc})
         g=by.setdefault(rr["lane"],{"lane":rr["lane"],"logged":0,"filled":0,"wins":0,"losses":0,"timeouts":0,"open":0,"expired":0,"r_sum":0.0,"r_n":0})
         g["logged"]+=1; st=oc.get("status")
         if st in ("win","loss","timeout","open"): g["filled"]+=1
@@ -5178,6 +5195,10 @@ def track_record_payload(days=120):
         if st in ("win","loss","timeout") and oc.get("r") is not None: g["r_sum"]+=float(oc["r"]); g["r_n"]+=1
         cc=oc.get("close_confirm") or {}
         if cc.get("status") in ("win","loss","timeout") and cc.get("r") is not None: g.setdefault("cc",[]).append(float(cc["r"]))
+        gr=oc.get("grace") or {}
+        if gr.get("status") in ("win","loss","timeout") and gr.get("r") is not None: g.setdefault("gr",[]).append(float(gr["r"]))
+        tag=pl.get("group_tag")
+        if tag in ("with","against","neutral") and st in ("win","loss","timeout") and oc.get("r") is not None: g.setdefault("tag_"+tag,[]).append(float(oc["r"]))
         if st in ("win","loss","timeout") and oc.get("option_return_pct") is not None:
             g.setdefault("opt",[]).append(float(oc["option_return_pct"]))
     lanes=[]
@@ -5186,6 +5207,10 @@ def track_record_payload(days=120):
         g["win_rate"]=round(100*g["wins"]/closed) if closed else None
         g["avg_r"]=round(g["r_sum"]/g["r_n"],2) if g["r_n"] else None
         cc=g.pop("cc",[]); g["close_confirm_n"]=len(cc); g["close_confirm_avg_r"]=round(float(np.mean(cc)),2) if cc else None
+        gr=g.pop("gr",[]); g["grace_n"]=len(gr); g["grace_avg_r"]=round(float(np.mean(gr)),2) if gr else None
+        for tg in ("with","against","neutral"):
+            v=g.pop("tag_"+tg,[]); g[tg+"_n"]=len(v); g[tg+"_avg_r"]=round(float(np.mean(v)),2) if v else None
+            g[tg+"_wins"]=sum(1 for x in v if x>0)
         opt=g.pop("opt",[])
         g["option_n"]=len(opt); g["option_avg_pct"]=round(float(np.mean(opt)),1) if opt else None
         g["option_win_rate"]=round(100*sum(1 for x in opt if x>0)/len(opt)) if opt else None
@@ -6175,6 +6200,245 @@ def _nightly_keepalive():
             time.sleep(5)
 
 
+# ---------------------------------------------------------------------------
+# v36.4 FREE INSTITUTIONAL FLOW READ (Alpaca option snapshots, end of day)
+# The free feed can't say whether a print was a buy or a sell. What it can say:
+#  - where the day's option dollars went (calls vs puts, 3-75 DTE, strikes +-20%)
+#  - "opening-size" activity: volume >= open interest (>=100 contracts, >=$25k),
+#    i.e. likely new positions rather than closing trades
+#  - whether that contract finished near its high for the day (buyers pressing)
+#  - next day: did open interest grow (positions were opened and held)?
+#  - repeat: the same lean several days running (the most reliable free signal)
+# ---------------------------------------------------------------------------
+def _flow_table(con, backend):
+    con.execute("CREATE TABLE IF NOT EXISTS flow_daily(ticker TEXT NOT NULL, trade_date TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(ticker,trade_date))")
+
+
+def _flow_history(ticker, n=8):
+    backend=_setup_storage_backend()
+    with _setup_db() as con:
+        _flow_table(con,backend); con.commit()
+        q=("SELECT trade_date,payload FROM flow_daily WHERE ticker=%s ORDER BY trade_date DESC LIMIT %s" if backend=="postgresql"
+           else "SELECT trade_date,payload FROM flow_daily WHERE ticker=? ORDER BY trade_date DESC LIMIT ?")
+        rows=con.execute(q,(ticker,n)).fetchall()
+    out=[]
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","payload"),r))
+        try: out.append(json.loads(rr["payload"]))
+        except Exception: pass
+    return out
+
+
+def _flow_save(snap):
+    backend=_setup_storage_backend()
+    with _setup_db() as con:
+        _flow_table(con,backend)
+        vals=(snap["ticker"],snap["session"],json.dumps(snap,default=str))
+        if backend=="postgresql":
+            con.execute("INSERT INTO flow_daily(ticker,trade_date,payload) VALUES(%s,%s,%s) ON CONFLICT(ticker,trade_date) DO UPDATE SET payload=EXCLUDED.payload",vals)
+        else:
+            con.execute("INSERT OR REPLACE INTO flow_daily(ticker,trade_date,payload) VALUES(?,?,?)",vals)
+        con.commit()
+
+
+def _occ_parse(sym):
+    import re
+    m=re.match(r"^([A-Z.]+)(\d{6})([CP])(\d{8})$",str(sym or ""))
+    if not m: return None
+    y,mo,d=m.group(2)[:2],m.group(2)[2:4],m.group(2)[4:]
+    return {"type":"call" if m.group(3)=="C" else "put","expiration":f"20{y}-{mo}-{d}","strike":int(m.group(4))/1000.0}
+
+
+def flow_rows_summary(rows, session, prior_top=None, oi_now=None):
+    """Pure: aggregate one session's contract rows into the flow snapshot."""
+    rows=[r for r in rows if r.get("bar_date")==session and r.get("vol",0)>0 and r.get("prem",0)>0]
+    call=sum(r["prem"] for r in rows if r["type"]=="call"); put=sum(r["prem"] for r in rows if r["type"]=="put")
+    new=[r for r in rows if r["vol"]>=max(100,r.get("oi") or 0) and r["prem"]>=25000]
+    w=lambda r:1.0 if r.get("loc",.5)>=.6 else (.6 if r.get("loc",.5)>.4 else .35)
+    ncall=sum(r["prem"] for r in new if r["type"]=="call"); nput=sum(r["prem"] for r in new if r["type"]=="put")
+    bull=sum(r["prem"]*w(r) for r in new if r["type"]=="call"); bear=sum(r["prem"]*w(r) for r in new if r["type"]=="put")
+    top=sorted(new,key=lambda r:-r["prem"])[:8]
+    held=None
+    if prior_top and oi_now is not None:
+        grew=tot=0.0
+        for p in prior_top:
+            o=oi_now.get(p["symbol"])
+            if o is None: continue
+            tot+=p["vol"]; grew+=max(0.0,min(p["vol"],o-(p.get("oi") or 0)))
+        held=round(grew/tot,2) if tot>0 else None
+    return {"session":session,"call_prem":round(call),"put_prem":round(put),"new_call_prem":round(ncall),"new_put_prem":round(nput),
+            "bull":round(bull),"bear":round(bear),"held_ratio":held,
+            "top":[{k:(round(v) if k=="prem" else (round(v,2) if isinstance(v,float) else v)) for k,v in r.items() if k in ("symbol","type","strike","expiration","vol","oi","prem","loc")} for r in top]}
+
+
+def flow_lean(s):
+    if not s or (s.get("new_call_prem",0)+s.get("new_put_prem",0))<100000: return "quiet",None
+    b,r=float(s.get("bull") or 0),float(s.get("bear") or 0); tot=b+r
+    if tot<=0: return "quiet",None
+    x=b/tot
+    return ("calls" if x>=.68 else "lean_calls" if x>=.56 else "puts" if x<=.32 else "lean_puts" if x<=.44 else "mixed"),round(x,2)
+
+
+def options_flow_snapshot(ticker, prior=None):
+    t=ticker.upper().strip()
+    _rv,spot=realized_vol_20d(t)
+    if not spot: raise RuntimeError(f"No price for {t}")
+    today=pd.Timestamp.now().normalize()
+    start=(today+pd.Timedelta(days=3)).strftime("%Y-%m-%d"); end=(today+pd.Timedelta(days=75)).strftime("%Y-%m-%d")
+    url=f"{ALPACA_TRADING_BASE_URL}/v2/options/contracts"
+    params={"underlying_symbols":t,"expiration_date_gte":start,"expiration_date_lte":end,"status":"active","limit":1000,
+            "strike_price_gte":round(max(.01,spot*.8),2),"strike_price_lte":round(spot*1.2,2)}
+    meta={}; token=None
+    for _ in range(5):
+        if token: params["page_token"]=token
+        r=alpaca_get(url,params=params,timeout=25); r.raise_for_status(); j=r.json() or {}
+        for c in j.get("option_contracts") or []:
+            if c.get("symbol"): meta[c["symbol"]]=c
+        token=j.get("next_page_token") or j.get("page_token")
+        if not token: break
+    snaps=alpaca_option_chain(t,start,end,spot)
+    rows=[]; session=None
+    for sym,snap in snaps.items():
+        b=(snap or {}).get("dailyBar") or (snap or {}).get("daily_bar") or {}
+        v=_safe_float(b.get("v",b.get("volume"))) or 0
+        if v<=0: continue
+        o=_occ_parse(sym)
+        if not o or abs(o["strike"]/spot-1)>.2: continue
+        px=_safe_float(b.get("vw")) or _safe_float(b.get("c")) or 0
+        hi,lo,cl=_safe_float(b.get("h")),_safe_float(b.get("l")),_safe_float(b.get("c"))
+        loc=((cl-lo)/(hi-lo)) if (hi is not None and lo is not None and cl is not None and hi>lo) else .5
+        d=str(b.get("t") or "")[:10]
+        if d and (session is None or d>session): session=d
+        m=meta.get(sym) or {}
+        rows.append({"symbol":sym,**o,"vol":int(v),"oi":int(_safe_float(m.get("open_interest")) or 0),"prem":v*px*100.0,"loc":round(loc,2),"bar_date":d})
+    if not session: session=today.strftime("%Y-%m-%d")
+    p=prior if (prior and prior.get("session")!=session) else None
+    oi_now={s:int(_safe_float(c.get("open_interest")) or 0) for s,c in meta.items()} if p else None
+    out=flow_rows_summary(rows,session,(p or {}).get("top"),oi_now)
+    out.update({"ticker":t,"spot":round(float(spot),2),"contracts":len(rows)})
+    return out
+
+
+_FLOW_WORDS={"calls":"Big new call positions","lean_calls":"Leaning toward calls","puts":"Big new put positions",
+             "lean_puts":"Leaning toward puts","mixed":"Calls and puts both active","quiet":"Quiet · nothing unusual"}
+
+
+def flow_read_from(snap, hist):
+    """Pure: today's snapshot + earlier snapshots (newest first) -> plain-language read and a 0-100 score."""
+    days=[snap]+[h for h in hist if h.get("session")!=snap.get("session")][:4]
+    leans=[flow_lean(d)[0] for d in days]
+    lean,x=flow_lean(snap)
+    bullish=lambda l:l in ("calls","lean_calls"); bearish=lambda l:l in ("puts","lean_puts")
+    nb=sum(1 for l in leans if bullish(l)); nr=sum(1 for l in leans if bearish(l))
+    parts=[_FLOW_WORDS[lean]]
+    if nb>=2: parts.append(f"calls {nb} of the last {len(days)} days")
+    elif nr>=2: parts.append(f"puts {nr} of the last {len(days)} days")
+    h=snap.get("held_ratio")
+    if h is not None:
+        if h>=.5: parts.append("yesterday's new positions were held")
+        elif h<.2: parts.append("yesterday's big trades didn't stick")
+    score=None
+    if x is not None or nb>=2 or nr>=2:
+        base=50+((x if x is not None else .5)-.5)*70
+        base+=min(16,max(0,nb-1)*8)-min(16,max(0,nr-1)*8)
+        if h is not None and h>=.5 and lean!="quiet": base+=6 if (x or .5)>=.5 else -6
+        score=int(max(5,min(95,round(base))))
+    bias="bullish" if score is not None and score>=60 else ("bearish" if score is not None and score<=40 else "neutral")
+    top=[f"{('$%g'%c['strike'])}{'C' if c['type']=='call' else 'P'} {c['expiration'][5:]} · {c['vol']:,} vs {c['oi']:,} open" for c in (snap.get("top") or [])[:3]]
+    return {"ticker":snap.get("ticker"),"session":snap.get("session"),"lean":lean,"call_share":x,"read":" · ".join(parts),"score":score,"bias":bias,
+            "days_calls":nb,"days_puts":nr,"days":len(days),"held_ratio":h,"top":top,
+            "call_prem":snap.get("call_prem"),"put_prem":snap.get("put_prem"),"new_call_prem":snap.get("new_call_prem"),"new_put_prem":snap.get("new_put_prem")}
+
+
+def plan_flow_read(ticker):
+    t=ticker.upper().strip()
+    hist=_flow_history(t,8)
+    snap=options_flow_snapshot(t,prior=(hist[0] if hist else None))
+    if hist and hist[0].get("session")==snap["session"] and len(hist)>1 and snap.get("held_ratio") is None:
+        snap=options_flow_snapshot(t,prior=hist[1])
+    try: _flow_save(snap)
+    except Exception: pass
+    out=flow_read_from(snap,hist)
+    try:
+        cat=cached_refresh_safe(f"earn-next-v364:{t}",lambda:_context_earnings_catalyst(t),ttl=12*3600)[0] or {}
+        out["next_earnings"]=cat.get("next_earnings"); out["days_to_earnings"]=cat.get("days_to_earnings")
+    except Exception: out["next_earnings"]=None; out["days_to_earnings"]=None
+    return out
+
+
+@app.get("/api/plan-flow")
+def api_plan_flow():
+    try:
+        tick=[]
+        for x in str(request.args.get("tickers") or "").split(","):
+            x=x.upper().strip()
+            if x and len(x)<=10 and x not in tick: tick.append(x)
+        tick=tick[:30]
+        if not tick: return jsonify({"ok":False,"error":"No tickers."}),400
+        force=request.args.get("refresh")=="1"
+        def one(t):
+            return cached_refresh_safe(f"planflow-v1:{t}",lambda t=t:plan_flow_read(t),force=force,ttl=(3600 if market_open_now() else 12*3600))[0]
+        rows={}
+        with ThreadPoolExecutor(max_workers=min(4,len(tick))) as ex:
+            futs={ex.submit(one,t):t for t in tick}
+            for f in as_completed(futs):
+                t=futs[f]
+                try: rows[t]=f.result()
+                except Exception as e: rows[t]={"ticker":t,"error":str(e)}
+        return jsonify({"ok":True,"rows":rows,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
+                        "note":"End-of-day option volume vs open interest. Free data can't tell buys from sells; repeat days and held positions are the stronger signs."})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)}),500
+
+
+# v36.4: tag each logged setup with its group's volume flow ON THE DAY IT WAS LOGGED
+# (computed from bars up to that date, so older trades get tagged too).
+def group_tag_for(direction, flow):
+    if flow is None: return "unknown"
+    bull=str(direction or "bullish")!="bearish"
+    if (bull and flow>=15) or ((not bull) and flow<=-15): return "with"
+    if (bull and flow<=-15) or ((not bull) and flow>=15): return "against"
+    return "neutral"
+
+
+def tag_setup_groups(days=60):
+    backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    with _setup_db() as con:
+        _setup_log_table(con,backend); con.commit()
+        q="SELECT trade_date,ticker,lane,direction,payload FROM setup_log WHERE trade_date>=%s" if backend=="postgresql" else "SELECT trade_date,ticker,lane,direction,payload FROM setup_log WHERE trade_date>=?"
+        rows=con.execute(q,(cutoff,)).fetchall()
+    todo=[]
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","lane","direction","payload"),r))
+        pl=json.loads(rr["payload"])
+        if pl.get("group_tag") or not pl.get("parent"): continue
+        todo.append((rr,pl))
+    if not todo: return 0
+    memberships,data,_rrg=_group_universe()
+    need={pl["parent"] for _,pl in todo}
+    mem={t:[g for g in gs if g in need] for t,gs in memberships.items()}
+    mem={t:gs for t,gs in mem.items() if gs and t in data}
+    flows={}
+    n=0
+    for rr,pl in todo:
+        d=str(rr["trade_date"])[:10]
+        if d not in flows:
+            ts=pd.Timestamp(d)
+            cut={t:data[t][data[t].index<=ts] for t in mem}
+            try: flows[d]={g:v.get("flow") for g,v in group_volume_rotation(cut,mem,{}).items()}
+            except Exception: flows[d]={}
+        f=flows[d].get(pl["parent"])
+        pl["group_flow"]=f; pl["group_tag"]=group_tag_for(rr.get("direction") or pl.get("direction"),f)
+        with _setup_db() as con:
+            if backend=="postgresql":
+                con.execute("UPDATE setup_log SET payload=%s WHERE trade_date=%s AND ticker=%s AND lane=%s",(json.dumps(pl,default=str),rr["trade_date"],rr["ticker"],rr["lane"]))
+            else:
+                con.execute("UPDATE setup_log SET payload=? WHERE trade_date=? AND ticker=? AND lane=?",(json.dumps(pl,default=str),rr["trade_date"],rr["ticker"],rr["lane"]))
+            con.commit()
+        n+=1
+    return n
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     threading.Thread(target=_nightly_keepalive,daemon=True,name="nightly-keepalive").start()
@@ -6282,7 +6546,22 @@ def nightly_run():
         try:
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
         except Exception as e: st["errors"].append(f"accumulation: {e}")
+        # v36.4: group-flow tags on logged setups (as of each log date), then the free flow read
+        st["stage"]="group tags"
+        try: st["counts"]["group_tags"]=tag_setup_groups()
+        except Exception as e: st["errors"].append(f"group tags: {e}")
         _nightly_free_memory(("ohlcv-bulk:","accum-","group-flow","holdings:"))
+        st["stage"]="options flow"
+        try:
+            _L=locals(); ft=list(deep)
+            for _nm in ("lg","rv","ac"):
+                ft+=[r.get("ticker") for r in ((_L.get(_nm) or {}).get("rows") or []) if r.get("ticker")]
+            ft=list(dict.fromkeys(ft))[:45]
+            nf=0
+            for i in range(0,len(ft),15):
+                res=get("/api/plan-flow?refresh=1&tickers="+",".join(ft[i:i+15])); nf+=sum(1 for v in (res.get("rows") or {}).values() if not v.get("error"))
+            st["counts"]["options_flow"]=nf
+        except Exception as e: st["errors"].append(f"options flow: {e}")
         st["stage"]="done"
     except Exception as e:
         st["errors"].append(str(e)); st["stage"]="failed"
@@ -8069,7 +8348,7 @@ body.v32.v32-classic .wrap>.view.active{display:block!important;max-width:1440px
 .v32Panel{background:#10161D;border:1px solid #1D2630;border-radius:16px;padding:16px 18px;display:flex;flex-direction:column;gap:10px;min-width:0}
 .v32PanelHead{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.v32PanelHead h2{margin:0;font-size:15px;font-weight:700}
 .v32Link{border:0;background:none;color:#9CC3FF;font:inherit;font-size:13px;cursor:pointer}
-.v32Cards{display:flex;flex-direction:column;gap:12px}.v363Head{font-size:11.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:#8B97A6;margin:10px 2px -4px}.v363Head:first-child{margin-top:0}.v363Head[data-tier="0"]{color:#3DD68C}.v363Badge{font-size:10px;font-weight:800;margin-top:3px}
+.v32Cards{display:flex;flex-direction:column;gap:12px}.v363Head{font-size:11.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:#8B97A6;margin:10px 2px -4px}.v363Head:first-child{margin-top:0}.v363Head[data-tier="0"]{color:#3DD68C}.v363Badge{font-size:10px;font-weight:800;margin-top:3px}.v364Flow{font-size:12px;margin-top:6px}.v364Earn{font-size:12px;margin-top:4px;color:#F2B84B}
 .v32Card{background:#10161D;border:1px solid #1D2630;border-radius:16px;padding:16px 18px 16px 20px;display:grid;grid-template-columns:minmax(140px,185px) minmax(0,1fr) minmax(180px,220px);gap:20px;align-items:start;position:relative;overflow:hidden}
 .v32Card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--edge,#3DD68C)}
 .v32Tick{font-size:21px;font-weight:600}.v32Dir{font-size:11px;font-weight:700;padding:3px 7px;border-radius:6px;margin-left:8px}
@@ -13258,7 +13537,7 @@ function v32RenderRecord(){
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
-  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
  const rows=document.getElementById("v32RecRows");
  if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
  const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};
@@ -13608,6 +13887,46 @@ function v363SortGrid(){
 }
 const _renderTopSetupsV363=renderTopSetups;
 renderTopSetups=function(){const o=_renderTopSetupsV363();try{v363SortGrid()}catch(e){console.warn("v363 grid",e)}return o};
+
+// ---- v36.4: free options-flow read + earnings-risk group --------------------------------
+window.__planFlow=window.__planFlow||{};const v364Pending=new Set();let v364Timer=null;
+function v364Earn(t){const f=window.__planFlow[t];let d=f?.days_to_earnings,n=f?.next_earnings;
+ if(d==null){try{const c=institutionalContextMap?.[t]?.catalyst;if(c&&c.days_to_earnings!=null){d=c.days_to_earnings;n=c.next_earnings}}catch(e){}}
+ return d==null?null:{d:Number(d),date:n};}
+V363_TIERS.splice(4,0,"Earnings inside the trade window");
+const _v363TierBaseV364=v363Tier;
+v363Tier=function(c){const r=_v363TierBaseV364(c);const shifted=r.i>=4?{...r,i:r.i+1}:r;
+ if(c&&c.ticker&&r.i<=3){const e=v364Earn(c.ticker);if(e&&e.d>=0&&e.d<=14)return {i:4,d:e.d,earn:true}}
+ return shifted;};
+function v364FlowLine(t,dir){const f=window.__planFlow[t];if(!f)return v364Pending.has(t)?`<div class="v364Flow v32Muted">Options flow · loading…</div>`:"";if(f.error)return "";
+ const bear=dir==="bearish",agree=f.bias==="neutral"?0:((f.bias==="bullish")!==bear?1:-1);
+ const col=agree>0?"#3DD68C":agree<0?"#FF8A78":"#8B97A6",tag=agree>0?"supports this trade":agree<0?"leans the other way":"";
+ return `<div class="v364Flow" style="color:${col}" title="${v32E((f.top||[]).join(" | "))}">Options flow · ${v32E(f.read)}${tag?` · <b>${tag}</b>`:""}</div>`;}
+const _v32CardHTMLV364=v32CardHTML;
+v32CardHTML=function(c){let h=_v32CardHTMLV364(c);
+ const e=v364Earn(c.ticker),earn=e&&e.d>=0&&e.d<=14?`<div class="v364Earn">Earnings ${v32E(e.date||"")} (${e.d} day${e.d===1?"":"s"}) · inside the trade window · the exit plan says out the session before, so it's a short window</div>`:"";
+ return h.replace('<div class="v32Chips">',v364FlowLine(c.ticker,c.dir)+earn+'<div class="v32Chips">');};
+async function v364LoadFlow(tickers){
+ const need=[...new Set(tickers)].filter(t=>t&&!window.__planFlow[t]&&!v364Pending.has(t)).slice(0,30);if(!need.length)return;
+ need.forEach(t=>v364Pending.add(t));
+ try{const j=await (await fetch(`/api/plan-flow?tickers=${encodeURIComponent(need.join(","))}`)).json();
+   if(j.ok)Object.entries(j.rows||{}).forEach(([t,v])=>{window.__planFlow[t]=v});}
+ catch(e){console.warn("plan flow",e)}
+ finally{need.forEach(t=>{v364Pending.delete(t);if(!window.__planFlow[t])window.__planFlow[t]={error:"unavailable"}});try{v32RenderTonight()}catch(e){}try{if((globalTopSetupData||[]).length)renderTopSetups()}catch(e){}}
+}
+function v364Queue(){clearTimeout(v364Timer);v364Timer=setTimeout(async()=>{try{await window.__v349Gate}catch(e){}
+ let t=[];try{t=v32CollectIdeas().ideas.map(c=>c.ticker)}catch(e){}
+ try{t=t.concat((globalTopSetupData||[]).slice(0,12).map(x=>x.ticker))}catch(e){}
+ v364LoadFlow(t)},1500);}
+const _v32RenderTonightV364=v32RenderTonight;
+v32RenderTonight=function(){const o=_v32RenderTonightV364();try{v364Queue()}catch(e){}return o};
+const _flowEvidenceForV364=flowEvidenceFor;
+flowEvidenceFor=function(t){const f=window.__planFlow[t];if(f&&f.score!=null)return {label:f.read,score:f.score,detail:`end-of-day options flow · ${f.read}`};return _flowEvidenceForV364(t)};
+const _v363SortGridV364=v363SortGrid;
+v363SortGrid=function(){_v363SortGridV364();const g=document.getElementById("topSetupsGrid");if(!g)return;
+ g.querySelectorAll(".topSetupCard[data-top-setup]").forEach(card=>{const t=card.dataset.topSetup,b=card.querySelector(".v363Badge");if(!b)return;
+  const e=v364Earn(t);if(e&&e.d>=0&&e.d<=14)b.textContent+=` · earnings in ${e.d}d`;
+  const f=window.__planFlow[t];if(f&&!f.error)b.insertAdjacentHTML("afterend",`<div class="v364Flow" style="font-size:10px;color:${f.bias==="bullish"?"#3DD68C":f.bias==="bearish"?"#FF8A78":"#8B97A6"}">Flow · ${v32E(f.read)}</div>`)});};
 
 // ---- wiring --------------------------------------------------------------------------
 const _renderTopSetupsV32=renderTopSetups;
