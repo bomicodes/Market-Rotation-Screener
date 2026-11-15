@@ -209,3 +209,22 @@ def test_v364_day1_grace_variant():
     out = A.evaluate_setup_outcome(row, df)
     assert out.get("exit") == "failed 2U" and out["r"] < 0
     assert out["grace"]["status"] == "win" and out["grace"]["r"] == 2.0
+
+
+def test_v365_support_dip_variant():
+    import app as A, pandas as pd
+    idx = pd.to_datetime(["2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13"])
+    row = {"trade_date": "2026-11-10", "direction": "bullish", "entry": 100, "stop": 98, "target": 104, "fill": "stop", "lane": "vp_counter"}
+    # dips to 99 (halfway to the stop) on day 1, then runs to the target on day 2
+    df = pd.DataFrame({"Open": [99.5, 99.6, 100, 103], "High": [100, 99.9, 104.5, 105], "Low": [99, 98.9, 99.8, 102], "Close": [99.7, 99.5, 104, 104.5]}, index=idx)
+    d = A._evaluate_support_dip(row, df)
+    assert d["dip_price"] == 99.0 and d["fill_price"] == 99.0
+    assert d["status"] == "win" and d["r"] == 2.5          # (104-99)/2 in the original 1R units
+    # straight breakout, never dips: not filled once the wait window passes
+    df2 = pd.DataFrame({"Open": [99.5, 100.2, 101, 102], "High": [100, 101, 103, 105], "Low": [99.5, 100, 100.8, 101.5], "Close": [99.9, 100.8, 102.8, 104.6]}, index=idx)
+    assert A._evaluate_support_dip(row, df2, max_wait=3)["status"] == "not filled"
+    # logged VP level used when it sits meaningfully below the trigger
+    d3 = A._evaluate_support_dip({**row, "level": 99.4}, df)
+    assert d3["dip_price"] == 99.4
+    # and evaluate_setup_outcome carries it for trigger plans
+    assert "dip" in A.evaluate_setup_outcome(row, df)

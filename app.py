@@ -4988,6 +4988,8 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
         g=_evaluate_trigger_failed2u(row, df, max_wait, max_hold, intraday, grace=True)
         out["grace"]={k:g.get(k) for k in ("status","r","filled","fill_price","closed","exit") if g.get(k) is not None}
     except Exception: pass
+    try: out["dip"]=_evaluate_support_dip(row, df, max_wait, max_hold)
+    except Exception: pass
     return out
 
 
@@ -5045,6 +5047,43 @@ def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None,
     r=((close-px) if bull else (px-close))/risk
     done=len(after)>=fill_i+max_hold
     return {"status":"timeout" if done else "open","r":round(r,2),**base,"days":int(min(len(after),fill_i+max_hold)-fill_i),"mfe_r":round(mfe,2),"mae_r":round(mae,2)}
+
+
+def _evaluate_support_dip(row, df, max_wait=10, max_hold=15):
+    """v36.5 "buy the dip" variant for trigger plans: a resting buy limit halfway
+    between the trigger and the stop (or at the logged VP level if it sits
+    meaningfully below the trigger). Exits: stop, target, or time; no failed-2U rule.
+    R is in the ORIGINAL plan's risk units (same position size as the breakout
+    order), so it compares directly with the breakout result.
+    Conservative: on the fill day only the stop counts (daily bars can't order a dip and a rally)."""
+    bull=str(row.get("direction") or "bullish")!="bearish"
+    entry,stop,target=float(row["entry"]),float(row["stop"]),float(row["target"])
+    risk0=abs(entry-stop) or 1e-9
+    dip=entry-.5*risk0 if bull else entry+.5*risk0
+    lvl=_safe_float(row.get("level"))
+    if lvl and ((stop<lvl<entry) if bull else (entry<lvl<stop)) and abs(entry-lvl)>=.25*risk0: dip=lvl
+    d0=pd.Timestamp(str(row["trade_date"])[:10]); after=df[df.index>d0]
+    base={"dip_price":round(dip,2)}
+    if not len(after): return {"status":"waiting",**base}
+    fi=None; px=None
+    for i in range(min(max_wait,len(after))):
+        b=after.iloc[i]; o=float(b["Open"])
+        if (bull and float(b["Low"])<=dip) or ((not bull) and float(b["High"])>=dip):
+            fi=i; px=min(o,dip) if bull else max(o,dip); break
+    if fi is None:
+        return {"status":"not filled" if len(after)>=max_wait else "waiting",**base}
+    fd=str(after.index[fi])[:10]
+    if (bull and px<=stop) or ((not bull) and px>=stop):
+        return {"status":"skipped","reason":"gapped through the stop","filled":fd,**base}
+    for j in range(fi,min(len(after),fi+max_hold)):
+        b=after.iloc[j]; hi,lo=float(b["High"]),float(b["Low"])
+        if (lo<=stop) if bull else (hi>=stop):
+            return {"status":"loss","r":round(-abs(px-stop)/risk0,2),"filled":fd,"fill_price":round(px,2),"closed":str(after.index[j])[:10],**base}
+        if j>fi and ((hi>=target) if bull else (lo<=target)):
+            return {"status":"win","r":round(abs(target-px)/risk0,2),"filled":fd,"fill_price":round(px,2),"closed":str(after.index[j])[:10],**base}
+    last=after.iloc[min(len(after),fi+max_hold)-1]; cl=float(last["Close"])
+    r=((cl-px) if bull else (px-cl))/risk0
+    return {"status":"timeout" if len(after)>=fi+max_hold else "open","r":round(r,2),"filled":fd,"fill_price":round(px,2),**base}
 
 
 def _evaluate_close_confirm(row, df, max_wait=10, max_hold=15):
@@ -5133,7 +5172,11 @@ def update_setup_outcomes(days=45):
         _sameday=(prior.get("status")=="loss" and prior.get("r")==-1.0 and prior.get("filled") and prior.get("filled")==prior.get("closed") and not prior.get("gap_entry") and not prior.get("intraday_checked_v362"))
         _final=prior.get("status") in ("win","loss","timeout","expired","skipped")
         _need_grace=_final and _trig and prior.get("status") in ("win","loss","timeout") and "grace" not in prior and "close_confirm" in prior and not _sameday
-        if _final and not _need_grace and not (_trig and "close_confirm" not in prior and prior.get("status")!="expired") and not (_trig and _sameday): continue
+        # v36.5: the buy-the-dip variant is added to every trigger trade (expired ones too -- the dip can fill
+        # when the breakout never did) and kept updating while it is open
+        _need_dip=_final and _trig and (("dip" not in prior) or (prior.get("dip") or {}).get("status") in ("waiting","open","pending"))
+        _full=(not _final) or (_trig and "close_confirm" not in prior and prior.get("status")!="expired") or (_trig and _sameday)
+        if not _full and not _need_grace and not _need_dip: continue
         t=rr["ticker"]
         if t not in frames:
             try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
@@ -5143,19 +5186,23 @@ def update_setup_outcomes(days=45):
         def _intraday(day,t=t):
             hb=_canonical_hourly_bars(t,"1m")
             return [x for x in hb if str(x["dt"])[:10]==day]
-        if _need_grace:
-            # v36.4: keep the graded primary result; only add the day-1-grace variant
+        if not _full:
+            # v36.4/36.5: keep the graded primary result; only add the missing comparison variants
             out=dict(prior)
-            try:
-                g=_evaluate_trigger_failed2u(pl,frames[t],intraday=_intraday,grace=True)
-                out["grace"]={k:g.get(k) for k in ("status","r","filled","fill_price","closed","exit") if g.get(k) is not None}
-            except Exception as e: out["grace"]={"status":"error","error":str(e)}
+            if _need_grace:
+                try:
+                    g=_evaluate_trigger_failed2u(pl,frames[t],intraday=_intraday,grace=True)
+                    out["grace"]={k:g.get(k) for k in ("status","r","filled","fill_price","closed","exit") if g.get(k) is not None}
+                except Exception as e: out["grace"]={"status":"error","error":str(e)}
+            if _need_dip:
+                try: out["dip"]=_evaluate_support_dip(pl,frames[t])
+                except Exception as e: out["dip"]={"status":"error","error":str(e)}
         else:
           try: out=evaluate_setup_outcome(pl,frames[t],intraday=_intraday)
           except Exception as e: out={"status":"error","error":str(e)}
         out["intraday_checked_v362"]=True
         try:
-            if _need_grace: raise StopIteration
+            if not _full: raise StopIteration
             sym=((pl.get("contract") or {}).get("symbol"))
             if sym and out.get("filled"):
                 out.update(option_outcome(sym,out))
@@ -5171,6 +5218,10 @@ def update_setup_outcomes(days=45):
             con.commit()
         updated+=1
     return updated
+
+
+def _trig_row(rr, pl):
+    return (pl.get("fill") or ("limit" if rr.get("lane")=="pullback" else "stop"))=="stop"
 
 
 def track_record_payload(days=120):
@@ -5195,6 +5246,9 @@ def track_record_payload(days=120):
         if st in ("win","loss","timeout") and oc.get("r") is not None: g["r_sum"]+=float(oc["r"]); g["r_n"]+=1
         cc=oc.get("close_confirm") or {}
         if cc.get("status") in ("win","loss","timeout") and cc.get("r") is not None: g.setdefault("cc",[]).append(float(cc["r"]))
+        dp=oc.get("dip") or {}
+        if _trig_row(rr,pl) and dp.get("status"):
+            g.setdefault("dip_all",[]).append((dp.get("status"),dp.get("r"),st,oc.get("r")))
         gr=oc.get("grace") or {}
         if gr.get("status") in ("win","loss","timeout") and gr.get("r") is not None: g.setdefault("gr",[]).append(float(gr["r"]))
         tag=pl.get("group_tag")
@@ -5207,6 +5261,13 @@ def track_record_payload(days=120):
         g["win_rate"]=round(100*g["wins"]/closed) if closed else None
         g["avg_r"]=round(g["r_sum"]/g["r_n"],2) if g["r_n"] else None
         cc=g.pop("cc",[]); g["close_confirm_n"]=len(cc); g["close_confirm_avg_r"]=round(float(np.mean(cc)),2) if cc else None
+        da=g.pop("dip_all",[])
+        dc=[r for s_,r,_,_ in da if s_ in ("win","loss","timeout") and r is not None]
+        g["dip_n"]=len(dc); g["dip_avg_r"]=round(float(np.mean(dc)),2) if dc else None
+        g["dip_wins"]=sum(1 for r in dc if r>0)
+        g["dip_filled"]=sum(1 for s_,_,_,_ in da if s_ in ("win","loss","timeout","open"))
+        g["dip_decided"]=sum(1 for s_,_,_,_ in da if s_ in ("win","loss","timeout","open","not filled"))
+        g["dip_missed_winners"]=sum(1 for s_,_,ps,pr in da if s_=="not filled" and ps=="win")
         gr=g.pop("gr",[]); g["grace_n"]=len(gr); g["grace_avg_r"]=round(float(np.mean(gr)),2) if gr else None
         for tg in ("with","against","neutral"):
             v=g.pop("tag_"+tg,[]); g[tg+"_n"]=len(v); g[tg+"_avg_r"]=round(float(np.mean(v)),2) if v else None
@@ -13551,7 +13612,7 @@ function v32RenderRecord(){
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
-  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
  const rows=document.getElementById("v32RecRows");
  if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
  const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};
@@ -13829,7 +13890,7 @@ async function v36LoadRev(){
 async function v36LogRev(){
  try{const date=v29TradeDate(),rows=[];const shortsOk=v35ShortsAllowed().ok;
    ((window.__revScan||{}).rows||[]).forEach(r=>{const p=r.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;if(r.direction==="bearish"&&!shortsOk)return;
-     rows.push({ticker:r.ticker,trade_date:date,lane:"vp_counter",direction:r.direction,fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:r.prescore,
+     rows.push({ticker:r.ticker,trade_date:date,lane:"vp_counter",direction:r.direction,fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:r.prescore,level:(r.vp_plan||{}).level??null,
        regime:v28Regime().state,parent:r.parent,source:"wide scan",contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
    const sig=JSON.stringify(rows.map(r=>[r.ticker,r.trade_date]));
    if(rows.length&&sig!==v36RevLogSig){v36RevLogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
