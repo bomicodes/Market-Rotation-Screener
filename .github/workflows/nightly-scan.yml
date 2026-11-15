@@ -11,7 +11,12 @@ on:
     - cron: "25 22 * * 1-5"
     - cron: "40 23 * * 1-5"
     - cron: "15 1 * * 2-6"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rerun even if it already ran since the latest close"
+        type: boolean
+        default: false
 
 jobs:
   scan:
@@ -23,7 +28,7 @@ jobs:
       - name: Wake the service and start the nightly run
         run: |
           for i in 1 2 3 4 5 6; do
-            code=$(curl -s -o /tmp/start.json -w "%{http_code}" -X POST "$APP_URL/api/nightly/run" || true)
+            code=$(curl -s -o /tmp/start.json -w "%{http_code}" -X POST "$APP_URL/api/nightly/run${{ inputs.force && '?force=1' || '' }}" || true)
             echo "attempt $i -> HTTP $code: $(cat /tmp/start.json 2>/dev/null)"
             if [ "$code" = "200" ]; then exit 0; fi
             sleep 30
