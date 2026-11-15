@@ -1,3 +1,6 @@
+v36.5 — track record adds a "bought the dip instead" variant for trigger plans: a resting limit halfway to the stop (or the logged VP
+level), stop/target/time exits, R in the original plan's units; shows fill rate and winners it would have missed. Back-filled.
+
 v36.4 — free options-flow read on every plan name (end-of-day volume vs open interest, repeat days, held positions), feeds the
 Flow factor; earnings inside the trade window get their own group; track record adds a day-1-grace variant and with/against-group tags
 (group flow computed as of each log date, so past trades are tagged too). Nightly stages: group tags, options flow.
