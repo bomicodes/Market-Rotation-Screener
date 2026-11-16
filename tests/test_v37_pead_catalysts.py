@@ -87,3 +87,25 @@ def test_news_catalysts_filters_window_and_watchlist():
     ]
     out = appmod.news_catalysts(arts, ["ACME", "BETA"], today="2026-11-15", within_days=14)
     assert len(out) == 1 and out[0]["ticker"] == "ACME" and out[0]["date"] == "2026-11-18" and out[0]["days_away"] == 3
+
+
+def test_past_event_recaps_are_dropped():
+    # v37.1: NOW's 11/4 event showed up after it had passed
+    arts = [
+        {"headline": "ServiceNow Investor Day: 5 Takeaways", "created_at": "2026-11-10T12:00:00Z", "symbols": ["NOW"]},
+        {"headline": "ServiceNow at Investor Day: CEO Sees AI Agents Driving Growth", "created_at": "2026-11-11T12:00:00Z", "symbols": ["NOW"]},
+        {"headline": "ServiceNow Investor Day Highlights Margin Targets", "created_at": "2026-11-12T12:00:00Z", "symbols": ["NOW"]},
+        {"headline": "ServiceNow to Host Investor Day on 11/4", "created_at": "2026-11-12T12:00:00Z", "symbols": ["NOW"]},
+        {"headline": "ServiceNow Investor Day Draws Analyst Praise", "created_at": "2026-11-12T12:00:00Z", "symbols": ["NOW"]},
+        {"headline": "ServiceNow to Present at the UBS Technology Conference", "created_at": "2026-11-13T12:00:00Z", "symbols": ["NOW"]},
+    ]
+    out = appmod.news_catalysts(arts, ["NOW"], today="2026-11-15", within_days=14)
+    assert [o["headline"] for o in out] == ["ServiceNow to Present at the UBS Technology Conference"]
+    assert out[0]["date"] is None
+
+
+def test_numeric_and_past_dates():
+    assert str(appmod._extract_event_date("event on 11/4", "2026-11-14T00:00:00Z").date()) == "2026-11-04"
+    assert str(appmod._extract_event_date("webcast 12/2/2026", "2026-11-14T00:00:00Z").date()) == "2026-12-02"
+    assert str(appmod._extract_event_date("Investor Day on Jan. 14", "2026-11-20T00:00:00Z").date()) == "2027-01-14"
+    assert appmod._extract_event_date("up 3.5% to $1/share", "2026-11-14T00:00:00Z") is None
