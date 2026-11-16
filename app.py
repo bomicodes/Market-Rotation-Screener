@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "37.0"
+APP_VERSION = "37.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -6167,16 +6167,32 @@ def _catalyst_kind(headline):
     return None
 
 
+_NUM_DATE_RX=re.compile(r"(?<![\d/.$])(1[0-2]|0?[1-9])/(3[01]|[12]\d|0?[1-9])(?:/(20\d\d|\d\d))?(?![\d/%])")
+# v37.1: recaps of an event that already happened ("ServiceNow Investor Day: 5 takeaways")
+_CAT_RECAP=re.compile(r"\b(presented|highlights?|takeaways?|recap|transcript|replay|says|said|told|hosted|held (its|an?|the)|key quotes|q&a|reiterates?|reaffirms?|recently)\b|\bat .{0,60}(conference|investor day|analyst day)\s*[:,\-–]",re.I)
+# an undated item has to read as a future event
+_CAT_FORWARD=re.compile(r"\b(to|will) (present|participate|host|hold|speak|webcast|showcase|unveil|report)\b|\bupcoming\b|\bschedules?\b|\bannounces? .{0,40}(investor|analyst|capital markets) day",re.I)
+
+
 def _extract_event_date(text, published):
-    """First month-day date in the text; the year is inferred from the article date."""
-    pub=pd.Timestamp(published).tz_localize(None).normalize() if pd.Timestamp(published).tzinfo else pd.Timestamp(published).normalize()
-    for m in _DATE_RX.finditer(str(text or "")):
-        mon=_MONTHS[m.group(1)[:3].lower()]; day=int(m.group(2))
-        years=[int(m.group(3))] if m.group(3) else [pub.year,pub.year+1]
-        for y in years:
-            try: d=pd.Timestamp(year=y,month=mon,day=day)
+    """First date in the text (Nov 18 / November 18, 2026 / 11/18). With no year,
+    a date up to 60 days before the article is this year's (already past);
+    anything earlier is next year's."""
+    pub=pd.Timestamp(published); pub=(pub.tz_convert(None) if pub.tzinfo else pub).normalize()
+    text=str(text or ""); hits=[]
+    for m in _DATE_RX.finditer(text): hits.append((m.start(),_MONTHS[m.group(1)[:3].lower()],int(m.group(2)),m.group(3)))
+    for m in _NUM_DATE_RX.finditer(text): hits.append((m.start(),int(m.group(1)),int(m.group(2)),m.group(3)))
+    for _,mon,day,yr in sorted(hits):
+        if yr:
+            y=int(yr); y=y+2000 if y<100 else y
+            try: return pd.Timestamp(year=y,month=mon,day=day)
             except Exception: continue
-            if m.group(3) or d>=pub-pd.Timedelta(days=7): return d
+        try: d=pd.Timestamp(year=pub.year,month=mon,day=day)
+        except Exception: continue
+        if d<pub-pd.Timedelta(days=60):
+            try: d=pd.Timestamp(year=pub.year+1,month=mon,day=day)
+            except Exception: continue
+        return d
     return None
 
 
@@ -6203,14 +6219,14 @@ def news_catalysts(articles, watch, today=None, within_days=21):
     watch=set(watch); seen=set(); out=[]
     for a in articles or []:
         hl=str(a.get("headline") or ""); k=_catalyst_kind(hl)
-        if not k: continue
+        if not k or _CAT_RECAP.search(hl): continue
         pub=a.get("created_at") or a.get("updated_at")
         if not pub: continue
         d=_extract_event_date(hl+" "+str(a.get("summary") or ""),pub)
         p=pd.Timestamp(pub); p=(p.tz_convert(None) if p.tzinfo else p).normalize()
         if d is None:
-            if (today-p).days>7: continue
-        elif not (today<=d<=end): continue
+            if (today-p).days>7 or not _CAT_FORWARD.search(hl): continue
+        elif not (today<=d<=end) or d<p: continue
         for s in a.get("symbols") or []:
             s=str(s).upper()
             if s not in watch: continue
@@ -6276,7 +6292,7 @@ def api_catalysts():
     try:
         days=max(3,min(30,int(request.args.get("days") or 14)))
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"catalysts-v37:{days}",lambda:catalyst_calendar_payload(days),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"catalysts-v37:2:{days}",lambda:catalyst_calendar_payload(days),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
