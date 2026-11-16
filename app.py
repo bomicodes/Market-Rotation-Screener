@@ -1,7 +1,7 @@
 
 from flask import Flask, jsonify, request, Response, session, redirect
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import io, math, time, traceback, os, sqlite3, json, hmac, threading
+import io, math, re, time, traceback, os, sqlite3, json, hmac, threading
 from collections import deque
 from urllib.parse import quote
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "36.2"
+APP_VERSION = "37.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-")
+             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-","pead-v37:","catalysts-v37:")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2946,6 +2946,9 @@ def _entry_levels_for(structure, direction, plan=None):
     bp=(s.get("base_plans") or {}).get(direction)
     if bp:
         options.append(("base",bp["entry"],bp["stop"],bp["target"],bp.get("rr"),False))
+    pp=(s.get("pead_plans") or {}).get(direction)
+    if pp:
+        options.append(("pead",pp["entry"],pp["stop"],pp["target"],pp.get("rr"),False))
     vpp=(s.get("vp_plans") or {}).get(direction)
     if vpp:
         options.append(("vp",vpp["entry"],vpp["stop"],vpp["target"],vpp.get("rr"),bool(vpp.get("in_zone")) and abs(vpp["entry"]-float(s.get("spot") or vpp["entry"]))<1e-9))
@@ -5954,6 +5957,331 @@ def api_reversal_scan():
 
 
 # ---------------------------------------------------------------------------
+# v37 POST-EARNINGS DRIFT (PEAD) LANE
+# A stock that gaps on earnings with heavy volume, closes strong, and then
+# holds most of the move in a tight flag tends to keep drifting the same way
+# for days to weeks. The lane looks for that pattern 2-10 sessions after the
+# report and sets a STRAT-style trigger (break of the inside bar, else the
+# post-earnings high). Contracts come from option_entry_plan, unchanged.
+# ---------------------------------------------------------------------------
+PEAD_MIN_REACTION_PCT=4.0
+PEAD_MIN_VOL_RATIO=2.0
+PEAD_MAX_STOP_ATR=2.5
+
+
+def _earnings_after_close(raw_time):
+    t=str(raw_time or "").strip().lower()
+    if "after" in t or t in ("amc","postmarket","post-market"): return True
+    try: return float(t.split(":",1)[0])>=16
+    except Exception: return False
+
+
+def _pead_day1_pos(index, event_date, event_time=None):
+    """Position of the first regular session that priced the report."""
+    norm=pd.DatetimeIndex(index).normalize(); d=pd.Timestamp(event_date).normalize()
+    mask=(norm>d) if _earnings_after_close(event_time) else (norm>=d)
+    pos=np.flatnonzero(mask)
+    return int(pos[0]) if len(pos) else None
+
+
+def _pead_eval(df, event_date, event_time=None):
+    """Score one reporter for post-earnings drift. Returns (setup or None, reason)."""
+    if df is None or len(df)<40: return None,"not enough history"
+    df=df.dropna(subset=["Open","High","Low","Close"])
+    o,h,l,c=(df[k].astype(float).values for k in ("Open","High","Low","Close"))
+    v=df["Volume"].astype(float).fillna(0).values if "Volume" in df else np.zeros(len(df))
+    i1=_pead_day1_pos(df.index,event_date,event_time)
+    if i1 is None: return None,"report not priced yet"
+    if i1<21: return None,"not enough history before the report"
+    after=len(df)-1-i1
+    if after<1: return None,"day 1 just printed · wait for a flag"
+    if after>9: return None,"more than 10 sessions since the report"
+    base=c[i1-1]; c1=c[i1]; h1=h[i1]; l1=l[i1]
+    reaction=(c1/base-1)*100
+    if abs(reaction)<PEAD_MIN_REACTION_PCT: return None,f"reaction {reaction:+.1f}% under {PEAD_MIN_REACTION_PCT:.0f}%"
+    bull=reaction>0
+    avgv=float(np.mean(v[i1-20:i1])) if np.any(v[i1-20:i1]) else 0.0
+    vol_ratio=(v[i1]/avgv) if avgv>0 else None
+    if vol_ratio is not None and vol_ratio<PEAD_MIN_VOL_RATIO: return None,f"day-1 volume {vol_ratio:.1f}× average (needs {PEAD_MIN_VOL_RATIO:.0f}×)"
+    rng=max(h1-l1,1e-9); cl=(c1-l1)/rng
+    if (bull and cl<.5) or ((not bull) and cl>.5): return None,"day 1 closed weak in its range"
+    prev=np.concatenate([[c[0]],c[:-1]])
+    tr=np.maximum.reduce([h-l,np.abs(h-prev),np.abs(l-prev)])
+    atr=float(np.mean(tr[-14:]))
+    if atr<=0: return None,"no ATR"
+    spot=c[-1]; mid1=(h1+l1)/2
+    retention=(spot/base-1)/(c1/base-1)
+    if retention<.5: return None,f"gave back {100-retention*100:.0f}% of the reaction"
+    if (bull and spot<mid1) or ((not bull) and spot>mid1): return None,"lost the day-1 midpoint"
+    ext=((spot-c1) if bull else (c1-spot))/atr
+    if ext>2: return None,f"already {ext:.1f} ATR past the day-1 close"
+    fh,fl=h[i1+1:],l[i1+1:]
+    inside=after>=1 and h[-1]<=h[-2] and l[-1]>=l[-2]
+    post_hi=float(np.max(h[i1:])); post_lo=float(np.min(l[i1:]))
+    if bull:
+        far=(post_hi-spot)>1.5*atr
+        trigger=float(h[-1]) if (inside or far) else post_hi
+        stop=float(np.min(fl))-.1*atr
+        stop=min(stop,trigger-atr)
+        risk=trigger-stop
+    else:
+        far=(spot-post_lo)>1.5*atr
+        trigger=float(l[-1]) if (inside or far) else post_lo
+        stop=float(np.max(fh))+.1*atr
+        stop=max(stop,trigger+atr)
+        risk=stop-trigger
+    if risk>PEAD_MAX_STOP_ATR*atr: return None,f"flag too loose (stop {risk/atr:.1f} ATR)"
+    target=trigger+2*risk if bull else trigger-2*risk
+    flag_atr=(float(np.max(fh))-float(np.min(fl)))/atr
+    score=40+min(20,abs(reaction)*1.5)+(min(15,(vol_ratio-2)*5) if vol_ratio else 0)
+    score+=10*((cl-.5)*2 if bull else (.5-cl)*2)+min(10,max(0,(retention-.5)*20))
+    score+=5 if flag_atr<=1.5 else 0
+    score-=max(0,ext-1)*5
+    return {"direction":"bullish" if bull else "bearish","event_date":str(pd.Timestamp(df.index[i1]).date()),
+            "reaction_pct":round(reaction,2),"volume_ratio":round(vol_ratio,1) if vol_ratio else None,
+            "close_location":round(cl,2),"retention_pct":round(retention*100),"sessions_since":after+1,
+            "inside_bar":bool(inside),"flag_atr":round(flag_atr,2),"atr14":round(atr,2),"spot":round(float(spot),2),
+            "trigger_kind":"inside-bar break" if (inside or far) else "post-earnings high",
+            "plan":{"entry":round(trigger,2),"stop":round(stop,2),"target":round(target,2),"rr":2.0},
+            "score":round(max(0,min(100,score)),1)},"ok"
+
+
+def _mcap_value(raw):
+    if isinstance(raw,(int,float)): return float(raw)
+    text=str(raw or "").replace("$","").replace(",","").strip().upper(); mult=1.0
+    for suf,m in (("T",1e12),("B",1e9),("M",1e6)):
+        if text.endswith(suf): mult=m; text=text[:-1]; break
+    try: return float(text)*mult
+    except Exception: return 0.0
+
+
+def _holdings_parent_map(top=25):
+    parent={}
+    for etf in RRG_UNIVERSE:
+        try:
+            (holdings,_src),_,_=cached_refresh_safe(f"holdings:{etf}",lambda etf=etf:get_fund_holdings(etf),ttl=3600)
+            for hd in apply_sector_supplements(etf,holdings)[:top]:
+                t=str(hd.get("ticker") or "").upper()
+                if t and t not in RRG_UNIVERSE: parent.setdefault(t,etf)
+        except Exception: continue
+    return parent
+
+
+def pead_scan_payload(budget=250, quota=None):
+    quota=quota or {"bullish":8,"bearish":4}
+    recent,diag=discover_recent_earnings(None,12)
+    active=_active_alpaca_us_equity_symbols()
+    parent=_holdings_parent_map()
+    syms=[s for s in recent if active is None or s in active]
+    syms.sort(key=lambda s:(s in parent,_mcap_value((recent.get(s) or {}).get("market_cap"))),reverse=True)
+    syms=syms[:110]
+    data=dl_ohlcv_bulk(syms,"6mo") if syms else {}
+    try:
+        hit=CACHE.get("group-flow-v34-4") or l2_get("group-flow-v34-4")
+        gflow=((hit[1] if hit else {}) or {}).get("groups") or {}
+    except Exception: gflow={}
+    cands=[]; rejected=[]
+    for s in syms:
+        df=data.get(s); meta=recent.get(s) or {}
+        if df is None: continue
+        try:
+            c=df["Close"].astype(float); dv=float((c*df["Volume"].astype(float)).tail(20).mean())
+            if float(c.iloc[-1])<10 or dv<20e6: continue
+        except Exception: continue
+        try: z,why=_pead_eval(df,meta.get("date"),meta.get("time"))
+        except Exception as e: z,why=None,str(e)
+        if not z:
+            if why not in ("not enough history","report not priced yet"): rejected.append({"ticker":s,"reason":why})
+            continue
+        z.update(ticker=s,parent=parent.get(s) or "Broad market",name=meta.get("name"),earnings_time=meta.get("time"))
+        est=_safe_float(meta.get("eps_estimate")); act=_safe_float(meta.get("eps_actual"))
+        z["eps_surprise_pct"]=round((act-est)/abs(est)*100,1) if est not in (None,0) and act is not None else None
+        gf=(gflow.get(z["parent"]) or {}).get("flow")
+        z["group_flow"]=gf
+        if gf is not None:
+            if (z["direction"]=="bullish" and gf<=-15) or (z["direction"]=="bearish" and gf>=15):
+                rejected.append({"ticker":s,"reason":f"{z['parent']} money flow is against it"}); continue
+            if (z["direction"]=="bullish" and gf>=15) or (z["direction"]=="bearish" and gf<=-15): z["score"]=round(min(100,z["score"]+5),1)
+        cands.append(z)
+    cands.sort(key=lambda z:-z["score"])
+    rows=[]; got={"bullish":0,"bearish":0}
+    for z in cands[:24]:
+        d=z["direction"]
+        if got[d]>=quota.get(d,0): continue
+        t=z["ticker"]
+        try:
+            liq=contract_liquidity_gate(t,"0-30",allow_leaps=False)
+            if liq.get("liquidity") not in ("Liquid","Tradable"):
+                rejected.append({"ticker":t,"reason":"options thin"}); continue
+            st=_context_structure(t)
+            if not st or not st.get("available"): continue
+            st["pead_plans"]={d:z["plan"]}
+            z["entry_plan"]=option_entry_plan(t,d,budget,"pead",structure=st)
+            z["options_liquidity"]=liq.get("liquidity")
+            got[d]+=1; rows.append(z)
+        except Exception as e:
+            rejected.append({"ticker":t,"reason":str(e)[:80]})
+        finally:
+            if NIGHTLY.get("running"):
+                try: _nightly_free_memory(("visible-","alpaca-intraday","alpaca-hour","yf-","chart-","strat-","options-scan","options-v"))
+                except Exception: pass
+    return {"available":True,"rows":rows,"candidates":len(cands),"reporters":len(syms),"rejected":rejected[:15],"diagnostics":diag,
+            "rules":f"Gap ≥ {PEAD_MIN_REACTION_PCT:.0f}% on ≥ {PEAD_MIN_VOL_RATIO:.0f}× volume, day 1 closes in the strong half, holds ≥ 50% of the move and the day-1 midpoint, 2–10 sessions in, stop ≥ 1 ATR and ≤ {PEAD_MAX_STOP_ATR} ATR, target 2R."}
+
+
+@app.get("/api/pead-scan")
+def api_pead_scan():
+    try:
+        try: budget=int(float(request.args.get("budget") or 250))
+        except Exception: budget=250
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"pead-v37:{budget}",lambda:pead_scan_payload(budget),force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
+# v37 CATALYST CALENDAR
+# What is coming up for the names on the board: earnings (Finnhub / Nasdaq
+# calendars across the ~350-stock group universe), macro releases, and company
+# events announced in the news -- investor/analyst days, conference
+# presentations, monthly sales/deliveries, FDA dates, product events.
+# ---------------------------------------------------------------------------
+_CAT_KINDS=(
+    ("investor_day","Investor / analyst day",re.compile(r"investor day|analyst day|capital markets day|investor meeting|strategy day|investor update",re.I)),
+    ("fda","FDA / data readout",re.compile(r"pdufa|advisory committee|fda (decision|approval date)|topline (data|results)",re.I)),
+    ("sales","Sales / deliveries report",re.compile(r"monthly sales|same[- ]store sales|comparable (store )?sales|\bdeliveries\b|traffic results|sales results for",re.I)),
+    ("product","Product event",re.compile(r"keynote|launch event|developer conference|product event|unveil",re.I)),
+    ("conference","Conference presentation",re.compile(r"to present at|will present at|to participate in|participate in .*conference|fireside chat|to speak at|to host .*(call|webcast)",re.I)),
+)
+_CAT_SKIP=re.compile(r"(first|second|third|fourth|q[1-4]).{0,20}(results|earnings)|earnings (call|release)|conference call to discuss",re.I)
+_MONTHS={"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,"jul":7,"aug":8,"sep":9,"oct":10,"nov":11,"dec":12}
+_DATE_RX=re.compile(r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:\s*[-–]\s*\d{1,2})?(?:,?\s+(20\d\d))?",re.I)
+
+
+def _catalyst_kind(headline):
+    h=str(headline or "")
+    if _CAT_SKIP.search(h): return None
+    for k,label,rx in _CAT_KINDS:
+        if rx.search(h): return k,label
+    return None
+
+
+def _extract_event_date(text, published):
+    """First month-day date in the text; the year is inferred from the article date."""
+    pub=pd.Timestamp(published).tz_localize(None).normalize() if pd.Timestamp(published).tzinfo else pd.Timestamp(published).normalize()
+    for m in _DATE_RX.finditer(str(text or "")):
+        mon=_MONTHS[m.group(1)[:3].lower()]; day=int(m.group(2))
+        years=[int(m.group(3))] if m.group(3) else [pub.year,pub.year+1]
+        for y in years:
+            try: d=pd.Timestamp(year=y,month=mon,day=day)
+            except Exception: continue
+            if m.group(3) or d>=pub-pd.Timedelta(days=7): return d
+    return None
+
+
+def alpaca_company_news(symbols, days=30, max_pages=8):
+    symbols=[s for s in dict.fromkeys(symbols or []) if s]
+    if not symbols or not (ALPACA_API_KEY and ALPACA_API_SECRET): return []
+    start=(datetime.utcnow()-timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"); out=[]
+    for off in range(0,len(symbols),40):
+        params={"symbols":",".join(symbols[off:off+40]),"start":start,"limit":50,"sort":"desc","include_content":"false"}
+        token=None
+        for _ in range(max_pages):
+            if token: params["page_token"]=token
+            try: r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/news",params=params,timeout=20)
+            except Exception: break
+            if r.status_code!=200: break
+            j=r.json() or {}; out+=j.get("news") or []
+            token=j.get("next_page_token")
+            if not token: break
+    return out
+
+
+def news_catalysts(articles, watch, today=None, within_days=21):
+    today=pd.Timestamp(today or pd.Timestamp.now()).normalize(); end=today+pd.Timedelta(days=within_days)
+    watch=set(watch); seen=set(); out=[]
+    for a in articles or []:
+        hl=str(a.get("headline") or ""); k=_catalyst_kind(hl)
+        if not k: continue
+        pub=a.get("created_at") or a.get("updated_at")
+        if not pub: continue
+        d=_extract_event_date(hl+" "+str(a.get("summary") or ""),pub)
+        p=pd.Timestamp(pub); p=(p.tz_convert(None) if p.tzinfo else p).normalize()
+        if d is None:
+            if (today-p).days>7: continue
+        elif not (today<=d<=end): continue
+        for s in a.get("symbols") or []:
+            s=str(s).upper()
+            if s not in watch: continue
+            key=(s,k[0],str(d.date()) if d is not None else hl[:40])
+            if key in seen: continue
+            seen.add(key)
+            out.append({"ticker":s,"kind":k[0],"label":k[1],"date":str(d.date()) if d is not None else None,
+                        "days_away":int((d-today).days) if d is not None else None,"announced":str(p.date()),
+                        "headline":hl[:220],"url":a.get("url"),"source":a.get("source")})
+    return out
+
+
+def _catalyst_board_tickers():
+    t=list(_kv_get("catalyst-board",[]) or [])
+    hints=_kv_get("nightly-hints",{}) or {}
+    t+=list(hints.get("finalists") or [])+list(hints.get("candidates") or [])[:30]
+    for key in list(CACHE.keys()):
+        k=str(key)
+        if k.startswith(("pead-v37:","revscan-","laggards-v35:","accum-v3")):
+            try: t+=[r.get("ticker") for r in ((CACHE[key][1] or {}).get("rows") or [])]
+            except Exception: pass
+    try: t+=[p.get("ticker") for p in list_positions("open")]
+    except Exception: pass
+    return [str(x).upper() for x in dict.fromkeys(t) if x][:70]
+
+
+def catalyst_calendar_payload(within_days=14):
+    today=pd.Timestamp.now().normalize(); end=today+pd.Timedelta(days=within_days)
+    parent=_holdings_parent_map(15); board=_catalyst_board_tickers()
+    universe=set(parent)|set(board)
+    earn={}
+    if FINNHUB_API_KEY:
+        try: earn.update({t:m for t,m in cached(f"finnhub-calendar:{today.date()}:{end.date()}",lambda:finnhub_earnings_calendar(today,end),ttl=6*3600).items() if t in universe})
+        except Exception: pass
+    for d in pd.bdate_range(today,end):
+        try:
+            for t,m in cached(f"nasdaq-calendar:{d.date()}",lambda d=d:nasdaq_calendar_for_day(d),ttl=6*3600).items():
+                if t in universe: earn[t]={**m,**earn.get(t,{})}
+        except Exception: continue
+    events=[]
+    for t,m in earn.items():
+        try: d=pd.Timestamp(m.get("date")).normalize()
+        except Exception: continue
+        if not (today<=d<=end): continue
+        events.append({"ticker":t,"kind":"earnings","label":"Earnings","date":str(d.date()),"days_away":int((d-today).days),
+                       "time":m.get("time"),"on_board":t in board,"parent":parent.get(t),"name":m.get("name"),"eps_estimate":m.get("eps_estimate")})
+    try:
+        for e in news_catalysts(alpaca_company_news(board),board,today,within_days):
+            e.update(on_board=True,parent=parent.get(e["ticker"])); events.append(e)
+    except Exception: pass
+    macro=[{"kind":"macro","label":e.get("label") or e.get("type") or "Macro","date":e["date"],"days_away":e["days_away"],"time":e.get("time"),"importance":e.get("importance")} for e in upcoming_macro_events(within_days)]
+    events.sort(key=lambda e:(e.get("date") or "9999",not e.get("on_board"),e["ticker"]))
+    by_ticker={}
+    for e in events:
+        if e.get("date"): by_ticker.setdefault(e["ticker"],[]).append({k:e.get(k) for k in ("kind","label","date","days_away","time")})
+    return {"available":True,"events":events,"macro":macro,"by_ticker":by_ticker,"board":board,"universe":len(universe),
+            "window_days":within_days,"as_of":str(today.date()),
+            "sources":"Earnings: Finnhub + Nasdaq calendars · company events: Alpaca/Benzinga news headlines (last 30 days) · macro: built-in calendar"}
+
+
+@app.get("/api/catalysts")
+def api_catalysts():
+    try:
+        days=max(3,min(30,int(request.args.get("days") or 14)))
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"catalysts-v37:{days}",lambda:catalyst_calendar_payload(days),force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
 # v30 POSITION TRACKER
 # Trades the trader actually takes: single-leg directional calls/puts (logged
 # from a plan card, carrying its exit rules) and post-earnings strangles.
@@ -6609,6 +6937,11 @@ def nightly_run():
             pe=get("/api/postearnings-opportunities?days=5"); st["counts"]["earnings_rows"]=len(pe.get("results") or [])
         except Exception as e: st["errors"].append(f"earnings: {e}")
         _nightly_free_memory(("earnings-profile","earn-dates","postearnings","options-v","strangle-"))
+        st["stage"]="earnings drift"
+        try:
+            pd_=get(f"/api/pead-scan?refresh=1&budget={budget}"); st["counts"]["pead"]=len(pd_.get("rows") or [])
+        except Exception as e: st["errors"].append(f"earnings drift: {e}")
+        _nightly_free_memory(("options-v","strangle-","entry-plan"))
         st["stage"]="group flow"
         try:
             gf=get("/api/group-flow"); st["counts"]["group_flow"]=len(gf.get("groups") or {})
@@ -6622,6 +6955,14 @@ def nightly_run():
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
         except Exception as e: st["errors"].append(f"accumulation: {e}")
         # v36.4: group-flow tags on logged setups (as of each log date), then the free flow read
+        st["stage"]="catalysts"
+        try:
+            _L=locals(); bt=list(deep)
+            for _nm in ("pd_","lg","rv","ac"):
+                bt+=[r.get("ticker") for r in ((_L.get(_nm) or {}).get("rows") or []) if r.get("ticker")]
+            _kv_put("catalyst-board",list(dict.fromkeys(bt))[:70])
+            cc=get("/api/catalysts?refresh=1"); st["counts"]["catalysts"]=len(cc.get("events") or [])
+        except Exception as e: st["errors"].append(f"catalysts: {e}")
         st["stage"]="group tags"
         try: st["counts"]["group_tags"]=tag_setup_groups()
         except Exception as e: st["errors"].append(f"group tags: {e}")
@@ -6629,7 +6970,7 @@ def nightly_run():
         st["stage"]="options flow"
         try:
             _L=locals(); ft=list(deep)
-            for _nm in ("lg","rv","ac"):
+            for _nm in ("lg","rv","ac","pd_"):
                 ft+=[r.get("ticker") for r in ((_L.get(_nm) or {}).get("rows") or []) if r.get("ticker")]
             ft=list(dict.fromkeys(ft))[:45]
             nf=0
@@ -8477,8 +8818,8 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
  .v32Card{grid-template-columns:1fr;gap:12px}.v32Tape{grid-template-columns:repeat(2,minmax(0,1fr))}
  .v32Nav,.v32Budget,#v32DataDate{display:none}.v32HeaderIn{padding:10px 16px}.v32Main{padding:16px 14px 90px}
  .v32Seg{margin-left:0;width:100%}.v32Seg button{flex:1;min-height:44px}
- .v32Bottom{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));position:fixed;left:0;right:0;bottom:0;z-index:60;background:#0D1218;border-top:1px solid #1D2630}
- .v32Bottom button{min-height:58px;border:0;background:transparent;color:#8B97A6;font:inherit;font-size:12px}.v32Bottom button.on{color:#E6EDF3;font-weight:700}
+ .v32Bottom{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));position:fixed;left:0;right:0;bottom:0;z-index:60;background:#0D1218;border-top:1px solid #1D2630}
+ .v32Bottom button{min-height:58px;border:0;background:transparent;color:#8B97A6;font:inherit;font-size:11px;padding:0 2px}.v32Bottom button.on{color:#E6EDF3;font-weight:700}
 }
 </style>
 <div class="wrap">
@@ -8492,6 +8833,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
    <button type="button" data-v32-nav="bases">Accum / Dist</button>
    <button type="button" data-v32-nav="positions">Positions</button>
    <button type="button" data-v32-nav="earnings">Earnings</button>
+   <button type="button" data-v32-nav="catalysts">Catalysts</button>
    <button type="button" data-v32-nav="record">Track record</button>
    <details class="v32Tools"><summary>Tools</summary><div class="v32ToolsMenu">
     <button type="button" data-v32-tool="rotation">Sector stocks &amp; charts</button>
@@ -8518,7 +8860,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
    <section class="v32Plan">
     <div class="v32Title"><h1>Tonight's plan</h1><span id="v32PlanSub" class="v32Muted"></span>
      <div class="v32Seg" role="group" aria-label="Filter ideas">
-      <button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button><button type="button" data-v32-filter="base">Bases</button>
+      <button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button><button type="button" data-v32-filter="base">Bases</button><button type="button" data-v32-filter="pead">Earnings drift</button>
      </div>
     </div>
     <div id="v32Cards" class="v32Cards"></div>
@@ -8527,6 +8869,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
    <aside class="v32Side">
     <section class="v32Panel"><div class="v32PanelHead"><h2>My positions</h2><button type="button" class="v32Link" data-v32-nav="positions">Open</button></div><div id="v32PosMini"></div></section>
     <section class="v32Panel"><div class="v32PanelHead"><h2>Track record</h2><button type="button" class="v32Link" data-v32-nav="record">Open</button></div><div id="v32RecMini" class="v32Muted">Loading…</div></section>
+    <section class="v32Panel"><div class="v32PanelHead"><h2>Coming up · 7 days</h2><button type="button" class="v32Link" data-v32-nav="catalysts">Open</button></div><div id="v37CatMini" class="v32Muted">Loading…</div></section>
     <section class="v32Panel"><div class="v32PanelHead"><h2>Post-earnings strangles</h2><button type="button" class="v32Link" data-v32-nav="earnings">Open</button></div><div class="v32Muted">Exit the leg that's up 150–200%.</div></section>
    </aside>
   </div>
@@ -8569,10 +8912,21 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
 
 <section class="v32View" data-v32="earnings" hidden>
  <div class="v32Main"><div class="v32Title"><h1>Post-earnings movers</h1><span class="v32Muted">Scan reporters, then plan a strangle</span></div>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>Post-earnings drift setups</h2><span class="v32Muted" id="v37PeadSub">Gap on heavy volume, holding the move in a tight flag · graded in the track record as "pead"</span></div><div id="v37PeadCards" class="v32Cards"><div class="v32Empty">Loading…</div></div></section>
   <div class="v32Split"><section class="v32EarnHost" id="v32EarnHost"></section>
    <aside class="v32Side"><section class="v32Panel v32Strangle"><div class="v32PanelHead"><h2>Strangle planner</h2></div>
     <form id="v32StrangleForm" class="v32Row"><label class="v32Label">Ticker <input id="v32StrangleTicker" class="v32Num" placeholder="NVDA" autocomplete="off"></label><button type="submit" class="v32Btn v32Go">Plan</button></form>
     <div id="v32StrangleOut" class="v32Muted">Pick a reporter's “Plan strangle”, or type a ticker.</div></section></aside></div></div>
+</section>
+
+<section class="v32View" data-v32="catalysts" hidden>
+ <div class="v32Main"><div class="v32Title"><h1>Catalysts</h1><span class="v32Muted" id="v37CatSub">Earnings, investor days, conferences, sales reports and macro releases</span>
+   <div class="v32Seg" role="group" aria-label="Filter catalysts"><button type="button" data-v37-cat="board" class="on">My board</button><button type="button" data-v37-cat="earnings">Earnings</button><button type="button" data-v37-cat="company">Company events</button><button type="button" data-v37-cat="macro">Macro</button><button type="button" data-v37-cat="all">All</button></div>
+   <button type="button" class="v32Ghost" onclick="v37LoadCatalysts(true)" aria-label="Refresh catalysts">↻</button></div>
+  <div id="v37CatList" style="display:grid;gap:12px"><div class="v32Empty">Loading…</div></div>
+  <section class="v32Panel"><div class="v32PanelHead"><h2>How to use it</h2></div><div class="v32Muted" style="font-size:13px;line-height:1.55">
+   Sunday prep: open <b>My board</b> and note every name with an event inside its trade window. Earnings inside the window: the exit plan already says out the session before. Company events come from news headlines, so a date can be missing or off. Check the company's investor-relations page before you size up. Monthly sales and conference schedules not in the news won't show here.</div></section>
+ </div>
 </section>
 
 <section class="v32View" data-v32="record" hidden>
@@ -8582,7 +8936,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
 </section>
 
 <nav class="v32Bottom" aria-label="Main">
- <button type="button" data-v32-nav="tonight">Tonight</button><button type="button" data-v32-nav="rotation">Rotation</button><button type="button" data-v32-nav="bases">Bases</button><button type="button" data-v32-nav="positions">Positions</button><button type="button" data-v32-nav="earnings">Earnings</button><button type="button" data-v32-nav="record">Record</button>
+ <button type="button" data-v32-nav="tonight">Tonight</button><button type="button" data-v32-nav="rotation">Rotation</button><button type="button" data-v32-nav="bases">Bases</button><button type="button" data-v32-nav="positions">Positions</button><button type="button" data-v32-nav="earnings">Earnings</button><button type="button" data-v32-nav="catalysts">Catalysts</button><button type="button" data-v32-nav="record">Record</button>
 </nav>
 </div>
 
@@ -13550,7 +13904,7 @@ function v32RenderTonight(){
  try{v32RenderMeta();v32RenderTape();}catch(e){}
  const host=document.getElementById("v32Cards");if(!host)return;
  const {ideas,filtered}=v32CollectIdeas();
- const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard")||(v32Filter==="base"&&c.kind==="base"));
+ const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard")||(v32Filter==="base"&&c.kind==="base")||(v32Filter==="pead"&&c.kind==="pead"));
  const st=document.getElementById("topSetupsStatus")?.textContent||"";
  const sub=document.getElementById("v32PlanSub");
  const held=[...(window.__v35HeldShorts||[])];
@@ -13608,7 +13962,7 @@ function v32RenderRecMini(){
 }
 function v32RenderRecord(){
  const tr=window.__trackRecord;if(!tr)return;
- const colors={pullback:"#F2B84B",vp:"#7AA7FF",vp_counter:"#7AA7FF",rejection:"#FF8A78",laggard:"#3DD68C",breakout:"#3DD68C"};
+ const colors={pead:"#C792EA",pullback:"#F2B84B",vp:"#7AA7FF",vp_counter:"#7AA7FF",rejection:"#FF8A78",laggard:"#3DD68C",breakout:"#3DD68C"};
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
@@ -13851,7 +14205,7 @@ setTimeout(()=>{try{v34LoadGroupFlow()}catch(e){}},2500);
 // running its own full scan next to it (two at once ran the 512 MB server out
 // of memory on 11/11 and it restarted mid-load).
 const V349_STAGES={start:"starting",outcomes:"grading yesterday's setups",market:"loading the market",universe:"building sector universes","early reversal":"scanning for reversals",options:"checking options",
- "deep dive":"modeling entries and contracts",laggards:"finding laggards",earnings:"post-earnings movers","group flow":"group volume flow","reversal scan":"wide VP + STRAT reversal scan",accumulation:"accumulation / distribution bases"};
+ "deep dive":"modeling entries and contracts",laggards:"finding laggards",earnings:"post-earnings movers","earnings drift":"post-earnings drift setups",catalysts:"catalyst calendar","group flow":"group volume flow","reversal scan":"wide VP + STRAT reversal scan",accumulation:"accumulation / distribution bases"};
 function v349Show(st){
  const msg=`Tonight's board is being built on the server — ${V349_STAGES[st?.stage]||st?.stage||"working"}… (about 15 min; this page fills in when it's done)`;
  const ts=document.getElementById("topSetupsStatus");if(ts)ts.textContent=msg;
@@ -14008,8 +14362,97 @@ const _renderTopSetupsV32=renderTopSetups;
 renderTopSetups=function(){const o=_renderTopSetupsV32();try{v32RenderTonight()}catch(e){console.warn("v32 tonight",e)}return o};
 const _v29LoadNightlyStatusV32=v29LoadNightlyStatus;
 v29LoadNightlyStatus=async function(){const o=await _v29LoadNightlyStatusV32();try{v32RenderMeta()}catch(e){}return o};
-(function(){let start="tonight";try{start=localStorage.getItem("v32View")||"tonight"}catch(e){}if(!["tonight","rotation","bases","positions","earnings","record"].includes(start))start="tonight";v32Show(start);})();
+(function(){let start="tonight";try{start=localStorage.getItem("v32View")||"tonight"}catch(e){}if(!["tonight","rotation","bases","positions","earnings","catalysts","record"].includes(start))start="tonight";v32Show(start);})();
 
+
+// ---- v37 post-earnings drift lane --------------------------------------------------------
+let v37PeadLogSig="";
+function v37PeadIdeas(){
+ const j=window.__pead;if(!j)return [];const shortsOk=v35ShortsAllowed().ok;
+ return (j.rows||[]).filter(r=>r.entry_plan?.available&&(r.direction!=="bearish"||shortsOk)).map(r=>({ticker:r.ticker,parent:r.parent,dir:r.direction,kind:"pead",lane:"pead",laneLabel:"Post-earnings drift",plan:r.entry_plan,score:r.score,
+   summary:`Reported ${r.event_date}: ${v32Pct(r.reaction_pct,1)} on ${r.volume_ratio?r.volume_ratio+"×":"heavy"} volume, still holding ${r.retention_pct}% of it on day ${r.sessions_since} · trigger is the ${r.trigger_kind}.`,
+   chips:[`Day ${r.sessions_since} after earnings`,r.eps_surprise_pct!=null?`EPS ${r.eps_surprise_pct>0?"+":""}${r.eps_surprise_pct}% vs est.`:null,r.inside_bar?"Inside bar":null,r.group_flow!=null?`${r.parent} ${v34Word(r.group_flow).toLowerCase()}`:null].filter(Boolean)}));
+}
+async function v37LogPead(){
+ try{const date=v29TradeDate(),rows=[];const shortsOk=v35ShortsAllowed().ok;
+   ((window.__pead||{}).rows||[]).forEach(r=>{const p=r.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;if(r.direction==="bearish"&&!shortsOk)return;
+     rows.push({ticker:r.ticker,trade_date:date,lane:"pead",direction:r.direction,fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:r.score,
+       regime:v28Regime().state,parent:r.parent,source:"earnings drift",event_date:r.event_date,reaction_pct:r.reaction_pct,
+       contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
+   const sig=JSON.stringify(rows.map(r=>[r.ticker,r.trade_date]));
+   if(rows.length&&sig!==v37PeadLogSig){v37PeadLogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
+ }catch(e){console.warn("pead log",e)}
+}
+function v37RenderPead(){
+ const host=document.getElementById("v37PeadCards"),sub=document.getElementById("v37PeadSub");if(!host)return;
+ const j=window.__pead;if(!j){host.innerHTML=`<div class="v32Empty">Loading…</div>`;return}
+ const ideas=v37PeadIdeas();
+ if(sub)sub.textContent=`${ideas.length} setup${ideas.length===1?"":"s"} from ${j.reporters||0} recent reporters · ${j.rules||""}`;
+ host.innerHTML=ideas.length?ideas.map(v32CardHTML).join(""):`<div class="v32Empty">No drift setups right now. ${(j.rejected||[]).slice(0,6).map(r=>`${v32E(r.ticker)}: ${v32E(r.reason)}`).join(" · ")}</div>`;
+}
+async function v37LoadPead(){
+ try{const j=await (await fetch(`/api/pead-scan?budget=${encodeURIComponent(v26Budget())}`)).json();if(j.ok){window.__pead=j;v37LogPead();try{v32RenderTonight()}catch(e){}try{v37RenderPead()}catch(e){}}}catch(e){console.warn("pead scan",e)}
+}
+const _v32CollectIdeasV37=v32CollectIdeas;
+v32CollectIdeas=function(){const r=_v32CollectIdeasV37();
+ try{v37PeadIdeas().forEach(c=>{if(!r.ideas.some(x=>x.ticker===c.ticker&&x.dir===c.dir))r.ideas.push(c)})}catch(e){}
+ r.ideas.forEach(c=>c._tier=v363Tier(c));
+ r.ideas.sort((a,b)=>a._tier.i-b._tier.i||a._tier.d-b._tier.d||(b.score||0)-(a.score||0));
+ return r;};
+setTimeout(async()=>{try{await window.__v349Gate;v37LoadPead()}catch(e){}},4000);
+
+// ---- v37 catalyst calendar ---------------------------------------------------------------
+let v37CatFilter="board";
+const V37_CAT_COL={earnings:"#F2B84B",investor_day:"#3DD68C",conference:"#7AA7FF",sales:"#C792EA",fda:"#FF8A78",product:"#5EEAD4",macro:"#8B97A6"};
+function v37Day(d){try{return new Date(d+"T12:00:00").toLocaleDateString(undefined,{weekday:"short",month:"short",day:"numeric"})}catch(e){return d}}
+function v37CatFor(t){const xs=((window.__catalysts||{}).by_ticker||{})[t]||[];return xs.filter(x=>x.kind!=="earnings"&&x.days_away!=null&&x.days_away>=0&&x.days_away<=14)}
+function v37CatRows(){
+ const j=window.__catalysts;if(!j)return [];
+ let ev=(j.events||[]).slice();
+ if(v37CatFilter==="board")ev=ev.filter(e=>e.on_board);
+ else if(v37CatFilter==="earnings")ev=ev.filter(e=>e.kind==="earnings");
+ else if(v37CatFilter==="company")ev=ev.filter(e=>e.kind!=="earnings");
+ if(v37CatFilter==="all"||v37CatFilter==="macro"||v37CatFilter==="board")ev=ev.concat((j.macro||[]).filter(m=>v37CatFilter!=="board"||m.importance==="HIGH").map(m=>({...m,ticker:""})));
+ if(v37CatFilter==="macro")ev=ev.filter(e=>e.kind==="macro");
+ return ev.sort((a,b)=>String(a.date||"9999").localeCompare(String(b.date||"9999"))||(a.kind==="macro"?-1:0));
+}
+function v37EventHTML(e){
+ const col=V37_CAT_COL[e.kind]||"#8B97A6";
+ const when=e.kind==="earnings"?(e.time==="premarket"?"before the open":e.time==="afterhours"?"after the close":"time not set"):(e.time||"");
+ const head=e.kind==="macro"?`<b>${v32E(e.label)}</b>`:`<b class="v32Num">${v32E(e.ticker)}</b> <span style="color:${col};font-weight:600">${v32E(e.label)}</span>`;
+ const info=e.kind==="earnings"?[when,e.parent,e.eps_estimate!=null?`EPS est. ${e.eps_estimate}`:null].filter(Boolean).join(" · "):e.kind==="macro"?[when,e.importance].filter(Boolean).join(" · "):"";
+ const news=e.headline?`<div class="v32Muted" style="font-size:12px">${e.url?`<a href="${v32E(e.url)}" target="_blank" rel="noopener" style="color:inherit">${v32E(e.headline)}</a>`:v32E(e.headline)} · announced ${v32E(e.announced||"")}</div>`:"";
+ const board=e.on_board&&e.kind!=="macro"?`<span class="v32Pill" style="color:#3DD68C">on your board</span>`:"";
+ return `<div style="border-left:3px solid ${col};padding:6px 10px;display:grid;gap:2px"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">${head}${board}</div>${info?`<div class="v32Muted" style="font-size:12px">${v32E(info)}</div>`:""}${news}</div>`;
+}
+function v37RenderCatalysts(){
+ const host=document.getElementById("v37CatList"),sub=document.getElementById("v37CatSub");
+ const j=window.__catalysts;
+ if(host){
+  if(!j)host.innerHTML=`<div class="v32Empty">Loading…</div>`;
+  else{const ev=v37CatRows(),dated=ev.filter(e=>e.date),undated=ev.filter(e=>!e.date);const by={};dated.forEach(e=>(by[e.date]=by[e.date]||[]).push(e));
+   host.innerHTML=(Object.keys(by).length?Object.entries(by).map(([d,xs])=>`<section class="v32Panel"><div class="v32PanelHead"><h2>${v32E(v37Day(d))}</h2><span class="v32Muted">${xs.length}</span></div><div style="display:grid;gap:8px">${xs.map(v37EventHTML).join("")}</div></section>`).join(""):`<div class="v32Empty">Nothing in this filter for the next ${j.window_days} days.</div>`)
+    +(undated.length?`<section class="v32Panel"><div class="v32PanelHead"><h2>Announced this week · date not in the headline</h2></div><div style="display:grid;gap:8px">${undated.map(v37EventHTML).join("")}</div></section>`:"");}
+ }
+ if(sub&&j)sub.textContent=`Next ${j.window_days} days · ${j.board?.length||0} board names + ${j.universe||0}-stock group universe for earnings · ${j.sources||""}`;
+ const mini=document.getElementById("v37CatMini");
+ if(mini){if(!j){mini.textContent="Loading…"}else{const ev=(j.events||[]).filter(e=>e.on_board&&e.date&&e.days_away<=7).concat((j.macro||[]).filter(m=>m.importance==="HIGH"&&m.days_away<=7).map(m=>({...m,ticker:""}))).sort((a,b)=>a.date.localeCompare(b.date)).slice(0,6);
+   mini.innerHTML=ev.length?ev.map(e=>`<div style="display:flex;justify-content:space-between;gap:8px;font-size:13px"><span>${e.ticker?`<b class="v32Num">${v32E(e.ticker)}</b> `:""}${v32E(e.label)}</span><span class="v32Muted v32Num">${v32E(v37Day(e.date))}</span></div>`).join(""):`<div class="v32Muted">Nothing on your board in the next 7 days.</div>`}}
+}
+async function v37LoadCatalysts(force=false){
+ try{const j=await (await fetch(`/api/catalysts?days=14${force?"&refresh=1":""}`)).json();if(j.ok){window.__catalysts=j;v37RenderCatalysts();try{v32RenderTonight()}catch(e){}}}catch(e){console.warn("catalysts",e)}
+}
+const _v32CardHTMLV37=v32CardHTML;
+v32CardHTML=function(c){let h=_v32CardHTMLV37(c);
+ const xs=v37CatFor(c.ticker);if(!xs.length)return h;
+ const line=`<div class="v364Earn" style="color:#7AA7FF">Catalyst · ${xs.map(x=>`${v32E(x.label)} ${v32E(v37Day(x.date))} (${x.days_away} day${x.days_away===1?"":"s"})`).join(" · ")}</div>`;
+ return h.replace('<div class="v32Chips">',line+'<div class="v32Chips">');};
+document.addEventListener("click",ev=>{const b=ev.target&&ev.target.closest&&ev.target.closest("[data-v37-cat]");if(!b)return;
+ v37CatFilter=b.dataset.v37Cat;document.querySelectorAll("[data-v37-cat]").forEach(x=>x.classList.toggle("on",x===b));v37RenderCatalysts();});
+const _v32ShowV37=v32Show;
+v32Show=function(name,tool){const o=_v32ShowV37(name,tool);
+ try{if(name==="catalysts"){v37RenderCatalysts();if(!window.__catalysts)v37LoadCatalysts()}if(name==="earnings")v37RenderPead()}catch(e){}return o};
+setTimeout(async()=>{try{await window.__v349Gate;v37LoadCatalysts()}catch(e){}},4500);
 </script>
 """
 @app.errorhandler(500)
