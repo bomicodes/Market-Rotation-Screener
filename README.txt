@@ -1,3 +1,10 @@
+v37.0 — post-earnings drift lane ("pead"): reporters 2–10 sessions after a ≥ 4% gap on ≥ 2× volume that closed strong and still hold
+≥ 50% of the move; trigger = inside-bar break, else the post-earnings high; stop ≥ 1 ATR (≤ 2.5 ATR); target 2R. Contracts come from the
+existing option_entry_plan (unchanged). Shows on Tonight's plan ("Earnings drift" filter) and the Earnings tab, logged and graded like
+every lane. New Catalysts tab: 14-day earnings (Finnhub + Nasdaq, group universe + board), company events from Alpaca news headlines
+(investor/analyst days, conference presentations, sales/deliveries, FDA, product events) and macro; catalyst line on plan cards.
+Nightly stages: earnings drift, catalysts.
+
 v36.5 — track record adds a "bought the dip instead" variant for trigger plans: a resting limit halfway to the stop (or the logged VP
 level), stop/target/time exits, R in the original plan's units; shows fill rate and winners it would have missed. Back-filled.
 
