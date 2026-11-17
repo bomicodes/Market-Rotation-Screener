@@ -7040,34 +7040,52 @@ def api_nightly_run():
     return jsonify({"ok":True,"started":True})
 
 
+WATCHDOG={"alive_since":None,"pid":None,"last_check":None,"last_decision":None,"last_start":None,"last_error":None}
+
+
 def _nightly_watchdog():
     """v34.7 backup: if the scheduled GitHub trigger is late (it has been hours
     late twice), start the nightly scan from inside the app once it is 45 min
     past the close and no run has started since. The app only runs while awake,
     so the extra GitHub cron times are what wake it up."""
+    # v36.6: heartbeat + logging (11/16 it never fired and left no trace); first check after 90 s
+    WATCHDOG.update(alive_since=time.time(),pid=os.getpid())
+    print(f"[watchdog] started pid={os.getpid()}",flush=True)
+    first=True
     while True:
-        time.sleep(600)
+        time.sleep(90 if first else 300); first=False
+        WATCHDOG["last_check"]=time.time()
         try:
             close=float(last_market_close_ts()); now=time.time()
-            if not (2700<=now-close<=12*3600): continue
+            if not (2700<=now-close<=12*3600):
+                WATCHDOG["last_decision"]="outside window"; continue
             with NIGHTLY["lock"]:
-                if NIGHTLY["running"]: continue
+                if NIGHTLY["running"]:
+                    WATCHDOG["last_decision"]="already running"; continue
                 saved=_kv_get("nightly-status",{}) or {}
                 last=NIGHTLY.get("started") or (saved.get("started") if saved.get("finished") else None)
-                if last and float(last)>=close: continue
+                if last and float(last)>=close:
+                    WATCHDOG["last_decision"]="already ran"; continue
                 NIGHTLY["running"]=True
+                WATCHDOG["last_decision"]="started run"; WATCHDOG["last_start"]=now
+                print("[watchdog] starting nightly run",flush=True)
                 threading.Thread(target=nightly_run,daemon=True,name="nightly-watchdog").start()
-        except Exception:
-            pass
+        except Exception as e:
+            WATCHDOG["last_error"]=f"{type(e).__name__}: {e}"
+            print(f"[watchdog] error {e!r}",flush=True)
 
 
-if os.environ.get("NIGHTLY_WATCHDOG","1")=="1" and "pytest" not in __import__("sys").modules:
+_WD_ENABLED=os.environ.get("NIGHTLY_WATCHDOG","1")=="1" and "pytest" not in __import__("sys").modules
+print(f"[watchdog] enabled={_WD_ENABLED} env={os.environ.get('NIGHTLY_WATCHDOG')!r}",flush=True)
+if _WD_ENABLED:
     threading.Thread(target=_nightly_watchdog,daemon=True,name="nightly-watchdog-loop").start()
 
 
 @app.get("/api/nightly/status")
 def api_nightly_status():
-    return jsonify({"ok":True,**_nightly_public_status()})
+    fmt=lambda t:datetime.fromtimestamp(t).astimezone(_et_now().tzinfo).isoformat(timespec="minutes") if t else None
+    wd={k:(fmt(v) if k in ("alive_since","last_check","last_start") else v) for k,v in WATCHDOG.items()}
+    return jsonify({"ok":True,**_nightly_public_status(),"watchdog":wd})
 
 
 @app.post("/api/nightly/hints")
