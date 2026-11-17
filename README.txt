@@ -1,3 +1,6 @@
+v36.6 — nightly watchdog heartbeat: first check 90 s after boot, then every 5 min, logs each start/decision, and /api/nightly/status shows
+its state (it failed to start the 11/16 run and left no trace).
+
 v37.1 — catalysts: past-event recaps (takeaways, highlights, "at X investor day:") are dropped, undated items must read as a future
 event ("to present", "will host", "upcoming"), numeric dates (11/4) are parsed, and a no-year date shortly before the article is
 treated as already past. Cache key catalysts-v37:2.
