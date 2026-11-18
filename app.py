@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-","putside-","pead-v37:","catalysts-v37:")
+             "entry-plan-v31:","entry-plan-v373:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-","putside-","pead-v37:","catalysts-v37:")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -3048,7 +3048,15 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     wrong=(is_put and not (stop>entry>target)) or ((not is_put) and not (stop<entry<target))
     if wrong: return {"ticker":ticker,"direction":direction,"available":False,"reason":"Entry, stop and target are not in a valid order."}
     # Pullback entries need price to come back to the zone; breakouts/rejections need a trigger.
-    days_to_entry=0 if (lv["in_zone"] or abs(entry-spot)<.1*max(atr,.01)) else 3
+    # v37.3: a trigger plan (breakout, rejection, base, pead, put-side...) is never
+    # "at the entry now" until price has actually crossed the trigger -- a close a
+    # few cents short of it used to turn the Webull order into "buy limit now".
+    near=abs(entry-spot)<.1*max(atr,.01)
+    trigger_plan=lv["plan"]!="pullback" and lv["plan"]!="vp"
+    crossed=(spot<=entry) if is_put else (spot>=entry)
+    if lv["in_zone"]: days_to_entry=0
+    elif trigger_plan and not crossed: days_to_entry=1 if near else 3
+    else: days_to_entry=0 if near else 3
     entry_used=spot if days_to_entry==0 else entry
     hold_days=int(min(15,max(4,round(abs(target-entry_used)/max(atr*.6,.01)))))
     # v37.2: puts pay on fast moves -- a shorter assumed hold (and so a shorter time stop)
@@ -4945,7 +4953,7 @@ def api_entry_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         budget=max(25.0,min(100000.0,budget))
-        key=f"entry-plan-v352:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
+        key=f"entry-plan-v373:{ticker.upper()}:{direction}:{plan or 'auto'}:{int(budget)}"
         payload,stale,err=cached_refresh_safe(key,lambda:option_entry_plan(ticker,direction,budget,plan),ttl=900)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
@@ -7014,7 +7022,7 @@ def api_put_side():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"putside-v1:{budget}",lambda:put_side_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"putside-v2:{budget}",lambda:put_side_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
