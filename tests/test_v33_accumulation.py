@@ -272,3 +272,18 @@ def test_v372_catch_down_candidate():
     assert "catch_down" in lanes
     cd = next(c for c in cands if c["lane"] == "catch_down")
     lv = cd["levels"]; assert lv["stop"] > lv["entry"] > lv["target"] and lv["rr"] >= 1.5
+
+
+def test_v373_trigger_plan_close_to_trigger_is_not_buy_now():
+    import app as A
+    st = {"available": True, "spot": 43.05, "atr14": 1.0,
+          "put_plans": {"bearish": {"name": "failed_bounce", "entry": 43.01, "stop": 44.78, "target": 39.57, "rr": 1.95}}}
+    rows = []
+    for k in (40, 41, 42, 42.5, 43, 44):
+        rows.append({"symbol": f"BSX261218P000{int(k*1000):05d}", "type": "put", "strike": float(k), "expiration": "2026-12-18", "dte": 31,
+                     "bid": 1.0, "ask": 1.1, "mid": 1.05 + (k - 40) * 0.25, "spread_pct": 8, "open_interest": 500, "volume": 100,
+                     "iv": 35.0, "delta": -0.4, "moneyness_pct": (k / 43.05 - 1) * 100, "liquidity": "Liquid"})
+    p = A.option_entry_plan("BSX", "bearish", 250, "failed_bounce", structure=st, rows=rows, rv20=0.3)
+    assert p["available"], p.get("reason")
+    assert p["underlying"]["in_zone"] is False
+    assert p["broker_order"]["entry"]["type"] == "Stop limit"

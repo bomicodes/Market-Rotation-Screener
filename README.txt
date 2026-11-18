@@ -1,3 +1,6 @@
+v37.3 — a trigger plan is never "buy now" until price has crossed the trigger (a close a few cents short of it turned the Webull order
+into an immediate buy limit, e.g. BSX/VST put-side setups 11/17). Entry-plan and put-side caches bumped.
+
 v37.2 — put side: rotation-out leaders breaking down, catch-down laggards in falling groups, failed bounces into the falling 20-day
 (/api/put-side, nightly stage "put side", shown when the market read allows shorts). Puts in an inflated market use a near-the-money
 strike and a 10-session max hold. Track record splits calls vs puts per lane. Entry plans that fail to load retry and show a short message.
