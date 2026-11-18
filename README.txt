@@ -1,3 +1,7 @@
+v37.2 — put side: rotation-out leaders breaking down, catch-down laggards in falling groups, failed bounces into the falling 20-day
+(/api/put-side, nightly stage "put side", shown when the market read allows shorts). Puts in an inflated market use a near-the-money
+strike and a 10-session max hold. Track record splits calls vs puts per lane. Entry plans that fail to load retry and show a short message.
+
 v36.7 — the watchdog thread was running in the gunicorn master (the module is loaded before the fork), invisible to the status page;
 it now starts in the worker on the first request. KV reads expire after 30 s so status written by another process shows up.
 

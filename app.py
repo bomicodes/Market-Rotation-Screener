@@ -389,7 +389,7 @@ def cached(key, fn, ttl=CACHE_TTL):
 # market hours nothing is read from L2 and behaviour is unchanged.
 # ---------------------------------------------------------------------------
 L2_PREFIXES=("market","top-setup-universe-","options-scan-v27-21:","options-scan-v34-7:","visible-v25-1:","strat-v25-1:","institutional-v25-1:",
-             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-","pead-v37:","catalysts-v37:")
+             "entry-plan-v31:","entry-plan-v352:","premium-support-v26-1:","earn-next-v30:","laggards-v31:","laggards-v35:","rv1y-v31:","options-selected-v27-23:","early-rev-v29:","vp-bundle-v29:","accum-v3","group-flow-v3","earn-dates-v1:","earnings-profile-v19:","earnings-profile-v20:","postearnings-opportunities-v6:","revscan-","planflow-","putside-","pead-v37:","catalysts-v37:")
 L2_MEMORY={}; L2_INDEX={}; L2_STATE={"loaded_for":None,"lock":threading.Lock(),"queue":deque(),"writer":None,"errors":0}
 
 
@@ -2946,6 +2946,9 @@ def _entry_levels_for(structure, direction, plan=None):
     bp=(s.get("base_plans") or {}).get(direction)
     if bp:
         options.append(("base",bp["entry"],bp["stop"],bp["target"],bp.get("rr"),False))
+    xp=(s.get("put_plans") or {}).get(direction)
+    if xp:
+        options.append((xp.get("name","putside"),xp["entry"],xp["stop"],xp["target"],xp.get("rr"),False))
     pp=(s.get("pead_plans") or {}).get(direction)
     if pp:
         options.append(("pead",pp["entry"],pp["stop"],pp["target"],pp.get("rr"),False))
@@ -3048,6 +3051,8 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     days_to_entry=0 if (lv["in_zone"] or abs(entry-spot)<.1*max(atr,.01)) else 3
     entry_used=spot if days_to_entry==0 else entry
     hold_days=int(min(15,max(4,round(abs(target-entry_used)/max(atr*.6,.01)))))
+    # v37.2: puts pay on fast moves -- a shorter assumed hold (and so a shorter time stop)
+    if is_put: hold_days=min(hold_days,10)
     if rows is None:
         today=pd.Timestamp.now().normalize()
         # v31: weeklies included (7+ DTE); the hold-length filter below keeps
@@ -3095,6 +3100,12 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     iv_rv=round(iv_med/rv20,2) if rv20 else None
     ivx=iv_context(ticker,rows,spot,record=live_rows)
     best_single=affordable[0] if affordable else None
+    # v37.2: when puts are inflated (juiced IV or IV well above realized), take a
+    # near-the-money strike (delta 0.35-0.65 at entry) over a cheap far-OTM one.
+    puts_inflated=bool(is_put and (ivx.get("juiced") or (iv_rv is not None and iv_rv>=1.35)))
+    if puts_inflated and affordable:
+        near=[z for z in affordable if .35<=(z.get("delta_at_entry") or 0)<=.65]
+        if near: best_single=near[0]
     # v31: weeklies are a budget tool. If a 21+ DTE contract fits and models at
     # least 70% as well as the best weekly, take the longer-dated one.
     if best_single and best_single.get("weekly"):
@@ -3122,6 +3133,7 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
     if not best_single: notes.append(f"No single {('put' if is_put else 'call')} fits the ${budget:.0f} budget (cheapest modeled entry ${min(z['cost'] for z in singles):.0f}).")
     if ivx.get("juiced"): notes.append(f"Premium is juiced: ATM IV {ivx['atm_iv']:.0f}% vs {ivx['rv_1y']:.0f}% 1-year realized vol"+(f" (IV rank {ivx['iv_rank']:.0f})" if ivx.get('iv_rank') is not None else "")+" — size down, or wait for IV to cool.")
     elif iv_rv and iv_rv>=1.35: notes.append(f"IV is {iv_rv:.2f}× 20-day realized volatility — premium is rich: size down, or wait for IV to cool before entering.")
+    if puts_inflated: notes.append("Puts are inflated: a near-the-money strike is used, and a quick bounce can hurt twice (stock up and option prices deflating) -- respect the failed-2D exit.")
     if best_single and best_single.get("weekly"): notes.append("Weekly contract: cheaper, but time decay is fast — exits are tighter (out 2 days before expiry).")
     if days_to_entry: notes.append(f"Entry requires the stock to reach ${entry:.2f} first; premiums shown are modeled at that price.")
     if exit_plan and exit_plan.get("earnings_before_expiry"): notes.append(f"Earnings {exit_plan['earnings_date']} falls before expiry — plan exits the day before.")
@@ -3131,7 +3143,7 @@ def option_entry_plan(ticker, direction="bullish", budget=250.0, plan=None, stru
             "underlying":{"entry":round(entry,2),"stop":round(stop,2),"target":round(target,2),"rr":lv["underlying_rr"],"in_zone":days_to_entry==0},
             "vp_plan":(structure.get("vp_plans") or {}).get(direction) if lv["plan"]=="vp" else None,
             "hold_days_assumed":hold_days,"iv_rv":iv_rv,"single":best_single,"spread":None,"recommended":"single" if best_single else None,
-            "exit_plan":exit_plan,"broker_order":broker_order,"next_earnings":cat.get("next_earnings"),"iv":ivx,"juiced":bool(ivx.get("juiced")),
+            "exit_plan":exit_plan,"broker_order":broker_order,"next_earnings":cat.get("next_earnings"),"iv":ivx,"juiced":bool(ivx.get("juiced")),"puts_inflated":puts_inflated,
             "cheapest_single_cost":min(z["cost"] for z in singles),"notes":notes,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}",
             "method":"Black-Scholes repricing at entry/target/stop, calibrated to the live mid; hold-period theta included."}
 
@@ -5252,6 +5264,8 @@ def track_record_payload(days=120):
         dp=oc.get("dip") or {}
         if _trig_row(rr,pl) and dp.get("status"):
             g.setdefault("dip_all",[]).append((dp.get("status"),dp.get("r"),st,oc.get("r")))
+        if st in ("win","loss","timeout") and oc.get("r") is not None:
+            g.setdefault("dir_"+("short" if str(rr.get("direction"))=="bearish" else "long"),[]).append(float(oc["r"]))
         gr=oc.get("grace") or {}
         if gr.get("status") in ("win","loss","timeout") and gr.get("r") is not None: g.setdefault("gr",[]).append(float(gr["r"]))
         tag=pl.get("group_tag")
@@ -5271,6 +5285,8 @@ def track_record_payload(days=120):
         g["dip_filled"]=sum(1 for s_,_,_,_ in da if s_ in ("win","loss","timeout","open"))
         g["dip_decided"]=sum(1 for s_,_,_,_ in da if s_ in ("win","loss","timeout","open","not filled"))
         g["dip_missed_winners"]=sum(1 for s_,_,ps,pr in da if s_=="not filled" and ps=="win")
+        for dk in ("long","short"):
+            v=g.pop("dir_"+dk,[]); g[dk+"_n"]=len(v); g[dk+"_avg_r"]=round(float(np.mean(v)),2) if v else None; g[dk+"_wins"]=sum(1 for x in v if x>0)
         gr=g.pop("gr",[]); g["grace_n"]=len(gr); g["grace_avg_r"]=round(float(np.mean(gr)),2) if gr else None
         for tg in ("with","against","neutral"):
             v=g.pop("tag_"+tg,[]); g[tg+"_n"]=len(v); g[tg+"_avg_r"]=round(float(np.mean(v)),2) if v else None
@@ -6858,6 +6874,151 @@ def tag_setup_groups(days=60):
     return n
 
 
+# ---------------------------------------------------------------------------
+# v37.2 PUT SIDE -- the mirror of rotation + laggards, for down markets
+#  - rotation_out : weakest names in groups where money is leaving, breaking down
+#  - catch_down   : names still holding up inside a falling group, starting to crack
+#                   (the short version of the laggard play: the put is cheap
+#                   before the stock catches down)
+#  - failed_bounce: in a downtrend, a bounce into the falling 20-day that fails
+# Every plan is a trigger: break below the signal bar's low (2D), stop above the
+# high (at least 1 ATR), target at the next support. The board only shows these
+# when the market read allows shorts (v35ShortsAllowed).
+# ---------------------------------------------------------------------------
+PUTSIDE_LANES={"rotation_out":"Rotating out · leader down","catch_down":"Catch-down laggard","failed_bounce":"Failed bounce"}
+
+
+def _bear_bar(df):
+    """Bearish STRAT/candle read on the last completed daily bar."""
+    d=df.dropna(subset=["Open","High","Low","Close"])
+    if len(d)<3: return None
+    o,h,l,c=(float(d[k].iloc[-1]) for k in ("Open","High","Low","Close"))
+    ph,pl=float(d["High"].iloc[-2]),float(d["Low"].iloc[-2])
+    rng=max(h-l,1e-9); body=abs(c-o)
+    if h>ph and c<ph and c<o: return "Failed 2U"
+    if (h-max(o,c))>=2*max(body,rng*.05) and (c-l)/rng<=.35: return "Shooter"
+    if l<pl and h<=ph and c<o and (c-l)/rng<=.35: return "2D continuation"
+    return None
+
+
+def _ps_stats(df):
+    d=df.dropna(subset=["High","Low","Close"])
+    if len(d)<70: return None
+    c=d["Close"].astype(float); h=d["High"].astype(float); l=d["Low"].astype(float); v=d["Volume"].fillna(0).astype(float)
+    tr=pd.concat([h-l,(h-c.shift()).abs(),(l-c.shift()).abs()],axis=1).max(axis=1)
+    return {"c":float(c.iloc[-1]),"o":float(d["Open"].iloc[-1]),"h":float(h.iloc[-1]),"l":float(l.iloc[-1]),
+            "sma10":float(c.tail(10).mean()),"sma20":float(c.tail(20).mean()),"sma20_5":float(c.iloc[-25:-5].mean()),"sma50":float(c.tail(50).mean()),
+            "atr":float(tr.tail(14).mean()),"ret20":float((c.iloc[-1]/c.iloc[-21]-1)*100),
+            "low10":float(l.tail(10).min()),"low20":float(l.tail(20).min()),"low60":float(l.tail(60).min()),
+            "high3":float(h.tail(3).max()),"high5":float(h.tail(5).max()),"high20":float(h.tail(20).max()),"low3":float(l.tail(3).min()),
+            "dv20":float((c*v).tail(20).mean()),"vol":float(v.iloc[-1]),"vol20":float(v.tail(21).iloc[:-1].mean() or 1),"rets":c.pct_change().tail(60)}
+
+
+def _ps_levels(entry, stop, supports, atr, min_rr=1.5):
+    """Short levels: stop at least 1 ATR above the entry; target = the first support
+    at least min_rr away, else 2R if nothing is in the way."""
+    stop=max(stop,entry+atr)
+    risk=stop-entry
+    if risk<=0: return None
+    below=sorted([s for s in supports if s and s<entry],reverse=True)
+    tgt=next((s for s in below if entry-s>=min_rr*risk),None)
+    if tgt is None:
+        blocking=[s for s in below if entry-s<min_rr*risk]
+        if blocking: return None          # support sits between the entry and a 1.5R target
+        tgt=entry-2*risk
+    return {"entry":round(entry,2),"stop":round(stop,2),"target":round(tgt,2),"rr":round((entry-tgt)/risk,2)}
+
+
+def put_side_candidates(data, memberships, flows):
+    """Pure: find the three kinds of put setups. Returns candidate dicts (no options)."""
+    out=[]
+    out_groups={g:f for g,f in flows.items() if (f.get("flow") is not None and f["flow"]<=-15 and f.get("quadrant") in ("Lagging","Weakening","Improving","Leading")
+                and "climax" not in str(f.get("signal") or "").lower())}
+    gstats={g:_ps_stats(data[g]) for g in out_groups if g in data}
+    for t,groups in memberships.items():
+        df=data.get(t)
+        if df is None: continue
+        s=_ps_stats(df)
+        if not s or s["c"]<10 or s["dv20"]<20e6: continue
+        bar=_bear_bar(df)
+        # 1) rotation out + 2) catch-down: only inside groups money is leaving
+        for g in groups:
+            if g not in out_groups or not gstats.get(g): continue
+            G=gstats[g]; f=out_groups[g]
+            try: corr=float(s["rets"].corr(G["rets"]))
+            except Exception: corr=None
+            if s["c"]<s["sma20"]<s["sma50"] and s["ret20"]<=G["ret20"]-2 and (bar or s["c"]<=s["low20"]+.5*s["atr"]):
+                lv=_ps_levels(s["l"]-.01,s["h"]+.1*s["atr"],[s["low60"],s["low20"] if s["low20"]<s["l"]-.01 else None],s["atr"])
+                if lv:
+                    vol_conf=s["vol"]>=1.2*s["vol20"]
+                    out.append({"ticker":t,"parent":g,"lane":"rotation_out","signal":bar or "At the 20-day low","levels":lv,"ret20":round(s["ret20"],1),"group_ret20":round(G["ret20"],1),
+                                "group_flow":f.get("flow"),"group_signal":f.get("signal"),"volume_confirms":vol_conf,"corr":round(corr,2) if corr==corr and corr is not None else None,
+                                "score":round(2*min(3,(G["ret20"]-s["ret20"])/3)+(2 if bar else 0)+(1.5 if vol_conf else 0)+min(2,-f["flow"]/25)+lv["rr"]/2,2)})
+            gap=s["ret20"]-G["ret20"]
+            if G["ret20"]<=-2 and gap>=3 and corr is not None and corr>=.5 and (bar or s["c"]<s["sma10"]):
+                lv=_ps_levels(s["low3"]-.01,s["high5"]+.1*s["atr"],[s["sma50"] if s["sma50"]<s["low3"] else None,s["low20"],s["low60"]],s["atr"])
+                if lv:
+                    out.append({"ticker":t,"parent":g,"lane":"catch_down","signal":bar or "Closed below the 10-day","levels":lv,"ret20":round(s["ret20"],1),"group_ret20":round(G["ret20"],1),
+                                "catch_down_gap":round(gap,1),"group_flow":f.get("flow"),"group_signal":f.get("signal"),"corr":round(corr,2),
+                                "score":round(min(4,gap/3)+2*corr+(2 if bar else 0)+min(2,-f["flow"]/25)+lv["rr"]/2,2)})
+        # 3) failed bounce: downtrend, bounce of >= 1 ATR into the falling 20-day, rejected
+        if s["c"]<s["sma50"] and s["sma20"]<s["sma20_5"] and s["high3"]-s["low10"]>=s["atr"] and s["h"]>=s["sma20"]-.25*s["atr"] and s["c"]<s["sma20"] and bar in ("Failed 2U","Shooter"):
+            lv=_ps_levels(s["l"]-.01,s["h"]+.1*s["atr"],[s["low10"],s["low20"],s["low60"]],s["atr"])
+            if lv:
+                g0=next((g for g in groups if g in flows),groups[0] if groups else None); f=flows.get(g0) or {}
+                out.append({"ticker":t,"parent":g0,"lane":"failed_bounce","signal":bar,"levels":lv,"ret20":round(s["ret20"],1),"group_flow":f.get("flow"),"group_signal":f.get("signal"),
+                            "score":round(2+(2 if bar=="Failed 2U" else 1)+(1 if (f.get("flow") or 0)<=-15 else (-2 if (f.get("flow") or 0)>=15 else 0))+lv["rr"]/2,2)})
+    best={}
+    for z in out:   # one plan per ticker+lane, best score
+        k=(z["ticker"],z["lane"])
+        if k not in best or z["score"]>best[k]["score"]: best[k]=z
+    return sorted(best.values(),key=lambda z:-z["score"]),sorted(out_groups)
+
+
+def put_side_payload(budget=250, quota=None):
+    quota=quota or {"rotation_out":4,"catch_down":4,"failed_bounce":4}
+    memberships,data,rrg=_group_universe()
+    flows=group_volume_rotation(data,memberships,rrg)
+    cands,out_groups=put_side_candidates(data,memberships,flows)
+    rows=[]; rejected=[]; got={k:0 for k in quota}
+    for z in cands[:30]:
+        ln=z["lane"]
+        if got.get(ln,0)>=quota.get(ln,0): continue
+        if any(r["ticker"]==z["ticker"] for r in rows): continue
+        t=z["ticker"]
+        try:
+            liq=contract_liquidity_gate(t,"0-30",allow_leaps=False)
+            if liq.get("liquidity") not in ("Liquid","Tradable"):
+                rejected.append({"ticker":t,"lane":ln,"reason":"options thin"}); continue
+            st=_context_structure(t)
+            if not st or not st.get("available"): continue
+            lv=z["levels"]; st["put_plans"]={"bearish":{"name":ln,**lv}}
+            z["entry_plan"]=option_entry_plan(t,"bearish",budget,ln,structure=st)
+            z["options_liquidity"]=liq.get("liquidity"); z["lane_label"]=PUTSIDE_LANES[ln]
+            got[ln]+=1; rows.append(z)
+        except Exception as e:
+            rejected.append({"ticker":t,"lane":ln,"reason":str(e)[:80]})
+        finally:
+            if NIGHTLY.get("running"):
+                try: _nightly_free_memory(("visible-","alpaca-intraday","alpaca-hour","yf-","chart-","strat-","options-scan","options-v"))
+                except Exception: pass
+    return {"available":True,"rows":rows,"candidates":len(cands),"rotating_out":[{"group":g,"flow":flows[g].get("flow"),"signal":flows[g].get("signal")} for g in out_groups],
+            "rejected":rejected[:15],"rules":"Groups with volume flow ≤ −15 (no selling climax). Leader down: below a falling 20/50-day, ≥ 2 pts weaker than the group, bearish bar or at the 20-day low. "
+            "Catch-down: group down ≥ 2% over 20 days, stock ≥ 3 pts stronger, correlation ≥ 0.5, starting to crack. Failed bounce: downtrend, ≥ 1 ATR bounce into the falling 20-day, failed 2U or shooter. "
+            "All: break of the signal bar's low, stop ≥ 1 ATR above, target the next support ≥ 1.5R away."}
+
+
+@app.get("/api/put-side")
+def api_put_side():
+    try:
+        try: budget=int(float(request.args.get("budget") or 250))
+        except Exception: budget=250
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"putside-v1:{budget}",lambda:put_side_payload(budget),force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     threading.Thread(target=_nightly_keepalive,daemon=True,name="nightly-keepalive").start()
@@ -6970,11 +7131,16 @@ def nightly_run():
         try:
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
         except Exception as e: st["errors"].append(f"accumulation: {e}")
+        st["stage"]="put side"
+        try:
+            ps=get(f"/api/put-side?refresh=1&budget={budget}"); st["counts"]["put_side"]=len(ps.get("rows") or [])
+        except Exception as e: st["errors"].append(f"put side: {e}")
+        _nightly_free_memory(("putside-",))
         # v36.4: group-flow tags on logged setups (as of each log date), then the free flow read
         st["stage"]="catalysts"
         try:
             _L=locals(); bt=list(deep)
-            for _nm in ("pd_","lg","rv","ac"):
+            for _nm in ("pd_","lg","rv","ac","ps"):
                 bt+=[r.get("ticker") for r in ((_L.get(_nm) or {}).get("rows") or []) if r.get("ticker")]
             _kv_put("catalyst-board",list(dict.fromkeys(bt))[:70])
             cc=get("/api/catalysts?refresh=1"); st["counts"]["catalysts"]=len(cc.get("events") or [])
@@ -6986,7 +7152,7 @@ def nightly_run():
         st["stage"]="options flow"
         try:
             _L=locals(); ft=list(deep)
-            for _nm in ("lg","rv","ac","pd_"):
+            for _nm in ("lg","rv","ac","pd_","ps"):
                 ft+=[r.get("ticker") for r in ((_L.get(_nm) or {}).get("rows") or []) if r.get("ticker")]
             ft=list(dict.fromkeys(ft))[:45]
             nf=0
@@ -13345,12 +13511,12 @@ function v28PlanKey(t,d,p){return `${t}|${d}|${p||"auto"}|${v26Budget()}`}
 function v28PlanFor(t,d,p){return window.entryPlanMap[v28PlanKey(t,d,p)]}
 async function v28LoadEntryPlan(ticker,direction,plan){
  const key=v28PlanKey(ticker,direction,plan);
- const have=window.entryPlanMap[key];if(have&&!have._loading)return have;
+ const have=window.entryPlanMap[key];if(have&&!have._loading&&!(have._retryAt&&Date.now()>have._retryAt))return have;
  window.entryPlanMap[key]={_loading:true};
  try{
    const j=await safeTickerFetchJson("/api/entry-plan",ticker,{direction,plan:plan||"",budget:v26Budget()},{ttl:600000,timeoutMs:60000,attempts:1});
    window.entryPlanMap[key]=j||{ok:false,available:false,reason:"Empty response"};
- }catch(err){window.entryPlanMap[key]={ok:false,available:false,reason:`Entry plan unavailable · ${err?.message||err}`};}
+ }catch(err){const m=String(err?.message||err);window.entryPlanMap[key]={ok:false,available:false,_retryAt:Date.now()+60000,reason:/<|@font-face/.test(m)||m.length>70?"Entry plan didn't load (server busy) · retrying":`Entry plan unavailable · ${m}`};window.__v372Retry=window.__v372Retry||{};if((window.__v372Retry[key]=(window.__v372Retry[key]||0)+1)<=2)setTimeout(()=>{try{v28LoadEntryPlan(ticker,direction,plan).then(()=>{try{v32RenderTonight()}catch(e){}})}catch(e){}},61000);}
  return window.entryPlanMap[key];
 }
 function v28PlanJobs(){
@@ -14015,7 +14181,7 @@ function v32RenderRecord(){
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
-  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.short_n?`<div style="grid-column:1/-1"><div class="k">Calls vs puts</div><div class="v32Num">${l.long_n?`calls: ${(l.long_avg_r>0?"+":"")+l.long_avg_r}R · ${l.long_wins}/${l.long_n} won`:"calls: —"} · puts: ${(l.short_avg_r>0?"+":"")+l.short_avg_r}R · ${l.short_wins}/${l.short_n} won</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
  const rows=document.getElementById("v32RecRows");
  if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
  const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};
@@ -14449,6 +14615,45 @@ v32CollectIdeas=function(){const r=_v32CollectIdeasV37();
  r.ideas.sort((a,b)=>a._tier.i-b._tier.i||a._tier.d-b._tier.d||(b.score||0)-(a.score||0));
  return r;};
 setTimeout(async()=>{try{await window.__v349Gate;v37LoadPead()}catch(e){}},4000);
+
+// ---- v37.2 put side: rotation out, catch-down laggards, failed bounces -------------------
+let v372LogSig="";
+function v372Ideas(){
+ const j=window.__putSide;if(!j)return [];const ok=v35ShortsAllowed().ok;
+ const rows=(j.rows||[]).filter(r=>r.entry_plan?.available);
+ if(!ok){rows.forEach(r=>{window.__v35HeldShorts=window.__v35HeldShorts||new Set();window.__v35HeldShorts.add(r.ticker)});return [];}
+ return rows.map(r=>{const gw=r.group_flow!=null?`${r.parent} ${v34Word(r.group_flow).toLowerCase()}`:null;
+   const sum=r.lane==="catch_down"?`Still ${v32Pct(r.ret20,1)} over 20 days while ${r.parent} is ${v32Pct(r.group_ret20,1)}: ${r.catch_down_gap} pts of catching down to do. ${r.signal}; breaks below ${v32$(r.levels.entry)}.`
+     :r.lane==="rotation_out"?`Money is leaving ${r.parent} and this is one of its weakest: ${v32Pct(r.ret20,1)} vs the group's ${v32Pct(r.group_ret20,1)} over 20 days. ${r.signal}${r.volume_confirms?" on heavy volume":""}; breaks below ${v32$(r.levels.entry)}.`
+     :`Downtrend bounce ran into the falling 20-day and failed (${r.signal}); breaks below ${v32$(r.levels.entry)}, target the bounce low ${v32$(r.levels.target)}.`;
+   return {ticker:r.ticker,parent:r.parent,dir:"bearish",kind:"putside",lane:r.lane,laneLabel:r.lane_label,plan:r.entry_plan,score:r.score,summary:sum,
+     chips:[r.signal,gw,r.entry_plan?.puts_inflated?"Puts inflated · near-the-money strike":null,r.corr!=null&&r.lane==="catch_down"?`corr ${r.corr}`:null].filter(Boolean)};});
+}
+async function v372Log(){
+ try{if(!v35ShortsAllowed().ok)return;const date=v29TradeDate(),rows=[];
+   ((window.__putSide||{}).rows||[]).forEach(r=>{const p=r.entry_plan,z=p?.single,u=p?.underlying;if(!p?.available||!u)return;
+     rows.push({ticker:r.ticker,trade_date:date,lane:r.lane,direction:"bearish",fill:"stop",entry:u.entry,stop:u.stop,target:u.target,rr:u.rr,score:r.score,
+       regime:v28Regime().state,parent:r.parent,source:"put side",signal:r.signal,
+       contract:z?{label:v28ContractLabel(z),cost:z.cost,entry_premium:z.entry_premium,symbol:(z.leg||{}).symbol||null}:null});});
+   const sig=JSON.stringify(rows.map(r=>[r.ticker,r.trade_date]));
+   if(rows.length&&sig!==v372LogSig){v372LogSig=sig;await fetch("/api/setup-log",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({rows})});}
+ }catch(e){console.warn("put side log",e)}
+}
+async function v372Load(){
+ try{const j=await (await fetch(`/api/put-side?budget=${encodeURIComponent(v26Budget())}`)).json();if(j.ok){window.__putSide=j;v372Log();try{v32RenderTonight()}catch(e){}}}catch(e){console.warn("put side",e)}
+}
+const _v32CollectIdeasV372=v32CollectIdeas;
+v32CollectIdeas=function(){const r=_v32CollectIdeasV372();
+ try{v372Ideas().forEach(c=>{if(!r.ideas.some(x=>x.ticker===c.ticker&&x.dir===c.dir))r.ideas.push(c)})}catch(e){}
+ r.ideas.forEach(c=>c._tier=v363Tier(c));
+ r.ideas.sort((a,b)=>a._tier.i-b._tier.i||a._tier.d-b._tier.d||(b.score||0)-(a.score||0));
+ return r;};
+// cleaner failure text (a Render 502 page was being shown as the status)
+const _v32StatusV372=v32Status;
+v32Status=function(p,mode){const s=_v32StatusV372(p,mode);
+ if(s&&typeof s.t==="string"&&(/@font-face|<html|<!doctype/i.test(s.t)||(/^Entry plan unavailable/.test(s.t)&&s.t.length>70)))return {...s,t:"Entry plan didn't load (server busy) · retrying"};
+ return s;};
+setTimeout(async()=>{try{await window.__v349Gate;v372Load()}catch(e){}},4500);
 
 // ---- v37 catalyst calendar ---------------------------------------------------------------
 let v37CatFilter="board";
