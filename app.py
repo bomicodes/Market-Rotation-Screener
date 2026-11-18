@@ -6540,7 +6540,7 @@ NIGHTLY={"running":False,"started":None,"finished":None,"stage":None,"counts":{}
 
 def _kv_get(key, default=None):
     hit=CACHE.get(f"kv:{key}")
-    if hit: return hit[1]
+    if hit and time.time()-hit[0]<30: return hit[1]
     try:
         backend=_setup_storage_backend()
         with _setup_db() as con:
@@ -7075,10 +7075,25 @@ def _nightly_watchdog():
             print(f"[watchdog] error {e!r}",flush=True)
 
 
+# v36.7: gunicorn loads this module in the master and forks the worker, so a thread
+# started at import runs in the MASTER (where the status endpoint can't see it).
+# Start it lazily from the first request instead -- only the worker serves requests.
 _WD_ENABLED=os.environ.get("NIGHTLY_WATCHDOG","1")=="1" and "pytest" not in __import__("sys").modules
-print(f"[watchdog] enabled={_WD_ENABLED} env={os.environ.get('NIGHTLY_WATCHDOG')!r}",flush=True)
-if _WD_ENABLED:
-    threading.Thread(target=_nightly_watchdog,daemon=True,name="nightly-watchdog-loop").start()
+_WD_PID={"pid":None,"lock":threading.Lock()}
+
+
+def _ensure_watchdog():
+    if not _WD_ENABLED or _WD_PID["pid"]==os.getpid(): return
+    with _WD_PID["lock"]:
+        if _WD_PID["pid"]==os.getpid(): return
+        _WD_PID["pid"]=os.getpid()
+        threading.Thread(target=_nightly_watchdog,daemon=True,name="nightly-watchdog-loop").start()
+
+
+@app.before_request
+def _start_watchdog_in_worker():
+    try: _ensure_watchdog()
+    except Exception: pass
 
 
 @app.get("/api/nightly/status")

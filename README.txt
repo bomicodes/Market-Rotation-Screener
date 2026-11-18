@@ -1,3 +1,6 @@
+v36.7 — the watchdog thread was running in the gunicorn master (the module is loaded before the fork), invisible to the status page;
+it now starts in the worker on the first request. KV reads expire after 30 s so status written by another process shows up.
+
 v36.6 — nightly watchdog heartbeat: first check 90 s after boot, then every 5 min, logs each start/decision, and /api/nightly/status shows
 its state (it failed to start the 11/16 run and left no trace).
 
