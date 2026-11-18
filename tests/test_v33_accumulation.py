@@ -228,3 +228,47 @@ def test_v365_support_dip_variant():
     assert d3["dip_price"] == 99.4
     # and evaluate_setup_outcome carries it for trigger plans
     assert "dip" in A.evaluate_setup_outcome(row, df)
+
+
+def _bars(closes, highs=None, lows=None, opens=None, vol=2_000_000):
+    import pandas as pd, numpy as np
+    n = len(closes); idx = pd.bdate_range("2026-06-01", periods=n)
+    c = np.array(closes, float)
+    h = np.array(highs, float) if highs is not None else c * 1.01
+    l = np.array(lows, float) if lows is not None else c * 0.99
+    o = np.array(opens, float) if opens is not None else np.r_[c[0], c[:-1]]
+    return pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": np.full(n, vol, float)}, index=idx)
+
+
+def test_v372_bear_bar_and_levels():
+    import app as A
+    # failed 2U: takes out yesterday's high, closes back below it, red
+    df = _bars([99, 100, 101], highs=[100, 102, 103], lows=[98, 99, 99.5], opens=[99, 100, 102.5])
+    df.iloc[-1, df.columns.get_loc("Close")] = 101.0
+    assert A._bear_bar(df) == "Failed 2U"
+    # levels: stop forced to >= 1 ATR, target the first support >= 1.5R away
+    lv = A._ps_levels(100, 100.5, [97.5, 99.6], 1.0)
+    assert lv["stop"] == 101 and lv["target"] == 97.5 and lv["rr"] == 2.5
+    # a support in the way of a 1.5R target -> no plan
+    assert A._ps_levels(100, 101, [99.2], 1.0) is None
+    # no support below -> 2R
+    assert A._ps_levels(100, 101, [], 1.0)["target"] == 98
+
+
+def test_v372_catch_down_candidate():
+    import app as A, numpy as np
+    n = 120
+    g = list(np.linspace(100, 100, n - 20)) + list(np.linspace(100, 92, 20))           # group falls 8%
+    t = list(np.linspace(50, 50, n - 20)) + list(np.linspace(50, 51, 19)) + [50.2]      # stock holds up, then cracks
+    # make the stock track the group day-to-day (correlation) with a small offset
+    rg = np.diff(np.log(g)); t = [50.0]
+    for i, r in enumerate(rg):
+        t.append(t[-1] * np.exp(r * 0.4 + (0.004 if i < n - 3 else -0.012)))
+    data = {"GRP": _bars(g), "AAA": _bars(t, vol=1_000_000)}
+    flows = {"GRP": {"flow": -40, "quadrant": "Lagging", "signal": "Rotating out · volume confirms"}}
+    cands, outg = A.put_side_candidates(data, {"AAA": ["GRP"]}, flows)
+    assert outg == ["GRP"]
+    lanes = {c["lane"] for c in cands if c["ticker"] == "AAA"}
+    assert "catch_down" in lanes
+    cd = next(c for c in cands if c["lane"] == "catch_down")
+    lv = cd["levels"]; assert lv["stop"] > lv["entry"] > lv["target"] and lv["rr"] >= 1.5
