@@ -287,3 +287,21 @@ def test_v373_trigger_plan_close_to_trigger_is_not_buy_now():
     assert p["available"], p.get("reason")
     assert p["underlying"]["in_zone"] is False
     assert p["broker_order"]["entry"]["type"] == "Stop limit"
+
+
+def test_v374_board_log_rows_and_short_gate():
+    import app as A
+    plan = lambda d: {"available": True, "plan": "breakout", "underlying": {"entry": 10, "stop": 9 if d == "bullish" else 11, "target": 12 if d == "bullish" else 8, "rr": 2},
+                      "single": {"cost": 120, "entry_premium": 1.2, "leg": {"symbol": "X", "expiration": "2026-12-18", "strike": 10, "type": "call" if d == "bullish" else "put"}}}
+    payloads = {"reversal": {"rows": [{"ticker": "AAA", "direction": "bullish", "parent": "XLK", "prescore": 5, "entry_plan": plan("bullish"), "vp_plan": {"level": 9.8}}]},
+                "put_side": {"rows": [{"ticker": "BBB", "lane": "failed_bounce", "parent": "XLV", "score": 4, "signal": "Shooter", "entry_plan": plan("bearish")}]},
+                "pead": {"rows": [{"ticker": "CCC", "direction": "bullish", "score": 70, "entry_plan": {"available": False}}]}}
+    risk_off = {"asof": "2026-11-19", "risk_appetite": "Risk-Off", "internals": {"SPY": {"above20": False, "d1": -1.5, "d5": -3}, "VIX": {"value": 26}, "CREDIT": {"d5": 0.3}}}
+    risk_on = {"asof": "2026-11-19", "risk_appetite": "Risk-On", "internals": {"SPY": {"above20": True, "d1": 0.5}, "CREDIT": {"d5": 0.3}}}
+    assert A.server_shorts_ok(risk_off) and not A.server_shorts_ok(risk_on)
+    rows = A.board_log_rows("2026-11-19", risk_off, payloads)
+    assert {(r["ticker"], r["lane"]) for r in rows} == {("AAA", "vp_counter"), ("BBB", "failed_bounce")}
+    b = next(r for r in rows if r["ticker"] == "BBB")
+    assert b["direction"] == "bearish" and b["contract"]["label"] == "2026-12-18 $10P" and b["regime"] == "Risk-Off"
+    # shorts not allowed -> the put is not logged
+    assert [r["ticker"] for r in A.board_log_rows("2026-11-19", risk_on, payloads)] == ["AAA"]
