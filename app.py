@@ -7027,6 +7027,76 @@ def api_put_side():
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
 
+# ---------------------------------------------------------------------------
+# v37.4 SERVER-SIDE BOARD LOGGING
+# The board used to be logged only by the page (when someone opened the site), so
+# nights nobody visited -- 11/18 and 11/19 -- and the whole put side were missing
+# from the track record. The nightly now logs every server-computed lane itself,
+# with the same rules the page uses (shorts only when the tape allows them).
+# Top Setups / counter lanes are still evaluated in the page and logged there.
+# ---------------------------------------------------------------------------
+def server_regime(m):
+    """Mirror of the page's v28Regime: Risk-Off / Caution / Supportive."""
+    if not m: return "Unknown"
+    i=m.get("internals") or {}; spy=i.get("SPY") or {}; vix=i.get("VIX") or {}; cr=i.get("CREDIT") or {}
+    f=lambda d,k:_safe_float(d.get(k))
+    stress=0; d1=f(spy,"d1"); d5=f(spy,"d5"); vv=f(vix,"value"); vd5=f(vix,"d5"); c5=f(cr,"d5"); c20=f(cr,"d20")
+    if d1 is not None and d1<=-2: stress+=2
+    elif d1 is not None and d1<=-1: stress+=1
+    if d5 is not None and d5<=-2: stress+=1
+    if vv is not None and vv>=25: stress+=1
+    if vd5 is not None and vd5>=30: stress+=1
+    if c5 is not None and c5<=-.5: stress+=1
+    if c20 is not None and c20<=-1: stress+=1
+    if m.get("risk_appetite")=="Risk-Off": stress+=2
+    elif m.get("risk_appetite")=="Risk-On": stress-=1
+    return "Risk-Off" if stress>=3 else ("Caution" if stress>=1 else "Supportive")
+
+
+def server_shorts_ok(m):
+    """Mirror of the page's v35ShortsAllowed."""
+    i=(m or {}).get("internals") or {}; spy=i.get("SPY") or {}; cr=i.get("CREDIT") or {}
+    a20=spy.get("above20"); d20=_safe_float(spy.get("d20"))
+    below=(a20 is False) or (a20 is None and d20 is not None and d20<0)
+    c5=_safe_float(cr.get("d5"))
+    weak=(c5 is not None and c5<=0) or server_regime(m)=="Risk-Off"
+    return bool(below and weak)
+
+
+def _contract_label(z):
+    if not z: return None
+    L=z.get("leg") or {}
+    try: return f"{L.get('expiration')} ${float(L.get('strike')):.0f}{'P' if str(L.get('type') or '').lower().startswith('p') else 'C'}"+(" (weekly)" if z.get("weekly") else "")
+    except Exception: return None
+
+
+def board_log_rows(date, m, payloads):
+    """Pure: the lane rows the page would log, from the nightly's lane payloads.
+    payloads: {"reversal":..., "laggards":..., "accumulation":..., "pead":..., "put_side":...}"""
+    shorts=server_shorts_ok(m); reg=server_regime(m); rows=[]
+    def add(r,lane,direction,fill,score,**extra):
+        p=r.get("entry_plan") or {}; u=p.get("underlying")
+        if not p.get("available") or not u: return
+        if direction=="bearish" and not shorts: return
+        z=p.get("single")
+        rows.append({"ticker":r.get("ticker"),"trade_date":date,"lane":lane,"direction":direction,"fill":fill,"entry":u.get("entry"),"stop":u.get("stop"),"target":u.get("target"),
+                     "rr":u.get("rr"),"score":score,"regime":reg,"parent":r.get("parent"),"logged_by":"nightly",
+                     "contract":{"label":_contract_label(z),"cost":z.get("cost"),"entry_premium":z.get("entry_premium"),"symbol":(z.get("leg") or {}).get("symbol")} if z else None,**extra})
+    for r in (payloads.get("reversal") or {}).get("rows") or []:
+        add(r,"vp_counter",r.get("direction") or "bullish","stop",r.get("prescore"),source="wide scan",level=(r.get("vp_plan") or {}).get("level"))
+    for r in (payloads.get("laggards") or {}).get("rows") or []:
+        p=r.get("entry_plan") or {}
+        lim=p.get("plan")=="pullback" or (p.get("plan")=="vp" and not (p.get("vp_plan") or {}).get("in_zone"))
+        add(r,"laggard","bullish","limit" if lim else "stop",r.get("score"))
+    for r in (payloads.get("accumulation") or {}).get("rows") or []:
+        add(r,"base",r.get("direction") or "bullish","stop",r.get("quality"),bias=r.get("bias"),base_days=r.get("base_days"))
+    for r in (payloads.get("pead") or {}).get("rows") or []:
+        add(r,"pead",r.get("direction") or "bullish","stop",r.get("score"),source="earnings drift",event_date=r.get("event_date"),reaction_pct=r.get("reaction_pct"))
+    for r in (payloads.get("put_side") or {}).get("rows") or []:
+        add(r,r.get("lane") or "putside","bearish","stop",r.get("score"),source="put side",signal=r.get("signal"))
+    return rows
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     threading.Thread(target=_nightly_keepalive,daemon=True,name="nightly-keepalive").start()
@@ -7144,6 +7214,14 @@ def nightly_run():
             ps=get(f"/api/put-side?refresh=1&budget={budget}"); st["counts"]["put_side"]=len(ps.get("rows") or [])
         except Exception as e: st["errors"].append(f"put side: {e}")
         _nightly_free_memory(("putside-",))
+        # v37.4: log the board server-side (nights nobody opens the page were missing)
+        st["stage"]="log board"
+        try:
+            _L=locals()
+            date=str((m or {}).get("asof") or _et_now().date().isoformat())[:10]
+            lrows=board_log_rows(date,m,{"reversal":_L.get("rv"),"laggards":_L.get("lg"),"accumulation":_L.get("ac"),"pead":_L.get("pd_"),"put_side":_L.get("ps")})
+            st["counts"]["logged"]=log_setups(lrows)
+        except Exception as e: st["errors"].append(f"log board: {e}")
         # v36.4: group-flow tags on logged setups (as of each log date), then the free flow read
         st["stage"]="catalysts"
         try:

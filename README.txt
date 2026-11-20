@@ -1,3 +1,6 @@
+v37.4 — the nightly logs the board itself (wide scan, laggards, bases, earnings drift, put side) with the page's rules (shorts only when
+the tape allows them); nights nobody opened the page (11/18, 11/19) and the put side were missing. 11/17 put-side setups back-filled.
+
 v37.3 — a trigger plan is never "buy now" until price has crossed the trigger (a close a few cents short of it turned the Webull order
 into an immediate buy limit, e.g. BSX/VST put-side setups 11/17). Entry-plan and put-side caches bumped.
 
