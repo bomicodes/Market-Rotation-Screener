@@ -4929,7 +4929,11 @@ def strangle_plan(ticker, budget=250.0, rows=None, spot=None, event_date=None, h
             ch["odds"]={"label":"Unrated","notes":[f"Odds unavailable: {e}"]}
     fit=[x for x in choices if x["fits_budget"]]
     best=max(fit,key=lambda x:(x.get("odds") or {}).get("score",0)) if len(fit)>1 else (fit[0] if fit else choices[0])
-    return {"ticker":ticker,"available":True,"spot":round(spot,2),"budget":budget,**best,"choices":choices,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
+    ft=None
+    try:
+        if event_date and df_h is not None: ft=day1_follow_through(df_h,event_date,past,_spy_down_5d())
+    except Exception: ft=None
+    return {"ticker":ticker,"available":True,"spot":round(spot,2),"budget":budget,**best,"choices":choices,"follow_through":ft,"feed":f"Alpaca {ALPACA_OPTIONS_FEED}"}
 
 
 @app.get("/api/strangle-plan/<ticker>")
@@ -4938,7 +4942,7 @@ def api_strangle_plan(ticker):
         try: budget=float(request.args.get("budget") or 250)
         except Exception: budget=250.0
         ev=request.args.get("event_date") or None
-        payload,stale,err=cached_refresh_safe(f"strangle-v35-2:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
+        payload,stale,err=cached_refresh_safe(f"strangle-v375:{ticker.upper()}:{int(budget)}:{ev or '-'}",lambda:strangle_plan(ticker,budget,event_date=ev),ttl=600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7097,6 +7101,201 @@ def board_log_rows(date, m, payloads):
     return rows
 
 
+# ---------------------------------------------------------------------------
+# v37.5 POST-EARNINGS STRANGLE TRACKER + FOLLOW-THROUGH READ
+# The trader buys the strangle at the CLOSE of day 1 (the first session pricing
+# the report) to catch the second leg. Every night the job logs the strangle the
+# screener would pick for each name whose day 1 was today, then grades the open
+# ones on the real option bars: a leg trading +150% (sold there, the other leg at
+# that day's close), -35% combined, the time stop, or the exit-by date.
+# The 11/16-11/20 reports showed a pattern worth measuring: names that CLOSED day 1
+# at the extreme of the day's range and moved no more than ~1.2x their usual
+# reaction (NVDA, AMAT, ROST, PANW) kept going; big over-reactions that faded off
+# the high (TJX, TGT) stalled.
+# ---------------------------------------------------------------------------
+def day1_follow_through(df, event_date, past_dates=None, market_down=None):
+    """Pure: read day 1 of an earnings reaction. Returns None if day 1 isn't in df."""
+    try: i=event_session_index(df,event_date)
+    except Exception: i=None
+    if i is None or i<1: return None
+    d=df.iloc[i]; prev=float(df["Close"].iloc[i-1])
+    o,h,l,c=float(d["Open"]),float(d["High"]),float(d["Low"]),float(d["Close"])
+    react=(c/prev-1)*100; up=react>=0
+    rng=max(h-l,1e-9); loc=((c-l)/rng) if up else ((h-c)/rng)      # 1 = closed at the extreme in the move's direction
+    typical=None
+    if past_dates:
+        moves=[]
+        for pd_ in past_dates:
+            try:
+                j=event_session_index(df,pd_)
+                if j and j>=1 and j<i-20: moves.append(abs(float(df["Close"].iloc[j])/float(df["Close"].iloc[j-1])-1)*100)
+            except Exception: pass
+        if len(moves)>=3: typical=float(np.median(moves))
+    ratio=(abs(react)/typical) if typical else None
+    pts=50; why=[]
+    if loc>=.75: pts+=20; why.append(f"closed {'at the high' if up else 'at the low'} of day 1")
+    elif loc<=.40: pts-=20; why.append(f"faded off the {'high' if up else 'low'} on day 1")
+    else: why.append("closed mid-range on day 1")
+    if ratio is not None:
+        if ratio<=1.2: pts+=10; why.append(f"{abs(react):.1f}% is no bigger than its usual {typical:.1f}% (room left)")
+        elif ratio>=2: pts-=15; why.append(f"{abs(react):.1f}% is {ratio:.1f}× its usual {typical:.1f}% (likely priced in)")
+        else: why.append(f"{abs(react):.1f}% vs its usual {typical:.1f}%")
+    if market_down is not None:
+        if (market_down and not up) or ((not market_down) and up): pts+=10; why.append("moving with the market")
+        else: pts-=5; why.append("moving against the market")
+    pts=max(0,min(100,pts))
+    label="Strong" if pts>=70 else ("Fair" if pts>=50 else "Weak")
+    return {"date":str(df.index[i])[:10],"reaction_pct":round(react,2),"close_location":round(loc,2),"typical_pct":round(typical,2) if typical else None,
+            "ratio":round(ratio,2) if ratio else None,"score":pts,"label":label,"read":f"{label} follow-through: "+", ".join(why)+"."}
+
+
+def grade_strangle(entry_call, entry_put, bars_c, bars_p, trade_date, time_stop, exit_by, tp=150, stop=-35):
+    """Pure: walk the legs' daily bars after the entry close."""
+    ec,ep=float(entry_call),float(entry_put); tot=ec+ep
+    if ec<=0 or ep<=0: return {"status":"error","error":"bad entry"}
+    cb={str(b.get("t"))[:10]:b for b in bars_c or []}; pb={str(b.get("t"))[:10]:b for b in bars_p or []}
+    days=sorted(d for d in set(cb)|set(pb) if d>str(trade_date)[:10])
+    lc,lp=ec,ep; best=0.0
+    for k,d in enumerate(days,1):
+        c=cb.get(d); p=pb.get(d)
+        ch=float(c["h"]) if c else lc; ph=float(p["h"]) if p else lp
+        cc=float(c["c"]) if c else lc; pc=float(p["c"]) if p else lp
+        best=max(best,(ch/ec-1)*100,(ph/ep-1)*100)
+        if ch>=ec*(1+tp/100) or ph>=ep*(1+tp/100):
+            leg="call" if (ch/ec)>=(ph/ep) else "put"
+            val=(ec*(1+tp/100)+pc) if leg=="call" else (ep*(1+tp/100)+cc)
+            return {"status":"win","pct":round((val/tot-1)*100,1),"exit":f"{leg} +{tp}%","closed":d,"sessions":k,"best_leg_pct":round(best)}
+        lc,lp=cc,pc; comb=((cc+pc)/tot-1)*100
+        if comb<=stop: return {"status":"loss","pct":round(comb,1),"exit":f"{stop}% combined","closed":d,"sessions":k,"best_leg_pct":round(best)}
+        if k>=int(time_stop or 5) or (exit_by and d>=str(exit_by)[:10]):
+            return {"status":"win" if comb>0 else "loss","pct":round(comb,1),"exit":"time stop" if k>=int(time_stop or 5) else "exit-by date","closed":d,"sessions":k,"best_leg_pct":round(best)}
+    return {"status":"open","pct":round(((lc+lp)/tot-1)*100,1),"sessions":len(days),"best_leg_pct":round(best)}
+
+
+def _strangle_table(con, backend):
+    con.execute("CREATE TABLE IF NOT EXISTS strangle_log(trade_date TEXT NOT NULL, ticker TEXT NOT NULL, payload TEXT NOT NULL, outcome TEXT, updated_at TEXT, PRIMARY KEY(trade_date,ticker))")
+
+
+def _spy_down_5d():
+    try:
+        c=dl_ohlc("SPY","3mo")["Close"].dropna()
+        return bool(float(c.iloc[-1])<float(c.iloc[-6]))
+    except Exception: return None
+
+
+def log_post_earnings_strangles(budget=250, cap=14):
+    """Names whose day 1 is the latest session: log the screener's strangle pick."""
+    recent,_=discover_recent_earnings(None,3)
+    active=_active_alpaca_us_equity_symbols(); parent=_holdings_parent_map()
+    syms=[s for s in recent if active is None or s in active]
+    syms.sort(key=lambda s:(s in parent,_mcap_value((recent.get(s) or {}).get("market_cap"))),reverse=True)
+    data=dl_ohlcv_bulk(syms[:60],"6mo") if syms else {}
+    mdown=_spy_down_5d(); rows=[]; seen=0
+    for s in syms[:60]:
+        df=data.get(s); meta=recent.get(s) or {}
+        if df is None or len(df)<40: continue
+        try:
+            c=df["Close"].astype(float)
+            if float(c.iloc[-1])<10 or float((c*df["Volume"].astype(float)).tail(20).mean())<20e6: continue
+            ev=meta.get("date")
+            tm=str(meta.get("time") or "").lower()
+            evts=pd.Timestamp(ev)
+            if "after" in tm or tm in ("amc","post-market"): evts=evts.normalize()+pd.Timedelta(hours=17)
+            elif "pre" in tm or tm in ("bmo",): evts=evts.normalize()+pd.Timedelta(hours=8)
+            i=event_session_index(df,evts)
+            if i is None or i!=len(df)-1: continue        # day 1 must be the latest session
+        except Exception: continue
+        if seen>=cap: break
+        seen+=1
+        try:
+            plan=strangle_plan(s,budget,event_date=str(pd.Timestamp(ev).date()))
+            if not plan.get("available"): continue
+            try: past=[d for d in earnings_dates_cached(s) if pd.Timestamp(d).normalize()<pd.Timestamp(ev).normalize()-pd.Timedelta(days=20)]
+            except Exception: past=[]
+            ft=day1_follow_through(dl_ohlc(s,"4y"),evts,past,mdown)
+            rows.append({"ticker":s,"trade_date":str(df.index[-1])[:10],"event_date":str(pd.Timestamp(ev).date()),"parent":parent.get(s),
+                         "tenor":plan.get("tenor"),"expiration":plan.get("expiration"),"dte":plan.get("dte"),"cost":plan.get("cost"),"fits_budget":plan.get("fits_budget"),
+                         "balanced":(plan.get("balance") or {}).get("balanced"),"time_stop_sessions":plan.get("time_stop_sessions"),"exit_by":plan.get("exit_by"),
+                         "call":{k:(plan.get("call") or {}).get(k) for k in ("symbol","strike","mid","delta")},"put":{k:(plan.get("put") or {}).get(k) for k in ("symbol","strike","mid","delta")},
+                         "odds":{k:(plan.get("odds") or {}).get(k) for k in ("label","score","hit_rate")},"follow_through":ft,"market_down_5d":mdown})
+        except Exception as e:
+            rows.append({"ticker":s,"error":str(e)[:80]})
+        finally:
+            if NIGHTLY.get("running"):
+                try: _nightly_free_memory(("options-v","strangle-","chart-","yf-"))
+                except Exception: pass
+    backend=_setup_storage_backend(); now=datetime.utcnow().isoformat(timespec="seconds")+"Z"; n=0
+    with _setup_db() as con:
+        _strangle_table(con,backend)
+        for r in rows:
+            if r.get("error") or not (r.get("call") or {}).get("symbol") or not (r.get("put") or {}).get("symbol"): continue
+            vals=(r["trade_date"],r["ticker"],json.dumps(r,default=str),now)
+            if backend=="postgresql": con.execute("INSERT INTO strangle_log(trade_date,ticker,payload,updated_at) VALUES(%s,%s,%s,%s) ON CONFLICT(trade_date,ticker) DO NOTHING",vals)
+            else: con.execute("INSERT OR IGNORE INTO strangle_log(trade_date,ticker,payload,updated_at) VALUES(?,?,?,?)",vals)
+            n+=1
+        con.commit()
+    return n
+
+
+def update_strangle_outcomes(days=40):
+    backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d"); n=0
+    with _setup_db() as con:
+        _strangle_table(con,backend); con.commit()
+        q="SELECT trade_date,ticker,payload,outcome FROM strangle_log WHERE trade_date>=%s" if backend=="postgresql" else "SELECT trade_date,ticker,payload,outcome FROM strangle_log WHERE trade_date>=?"
+        rows=con.execute(q,(cutoff,)).fetchall()
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","payload","outcome"),r))
+        prior=json.loads(rr["outcome"]) if rr.get("outcome") else {}
+        if prior.get("status") in ("win","loss"): continue
+        pl=json.loads(rr["payload"]); cs=pl["call"]["symbol"]; ps=pl["put"]["symbol"]
+        try:
+            bars=alpaca_option_daily_bars([cs,ps],40) or {}
+            bc,bp=bars.get(cs) or [],bars.get(ps) or []
+            td=str(rr["trade_date"])[:10]
+            e_c=next((float(b["c"]) for b in bc if str(b.get("t"))[:10]==td),None) or float(pl["call"]["mid"])
+            e_p=next((float(b["c"]) for b in bp if str(b.get("t"))[:10]==td),None) or float(pl["put"]["mid"])
+            out=grade_strangle(e_c,e_p,bc,bp,td,pl.get("time_stop_sessions") or 2,pl.get("exit_by"))
+            out.update(entry_call=round(e_c,2),entry_put=round(e_p,2))
+        except Exception as e: out={"status":"error","error":str(e)[:120]}
+        now=datetime.utcnow().isoformat(timespec="seconds")+"Z"
+        with _setup_db() as con:
+            if backend=="postgresql": con.execute("UPDATE strangle_log SET outcome=%s,updated_at=%s WHERE trade_date=%s AND ticker=%s",(json.dumps(out),now,rr["trade_date"],rr["ticker"]))
+            else: con.execute("UPDATE strangle_log SET outcome=?,updated_at=? WHERE trade_date=? AND ticker=?",(json.dumps(out),now,rr["trade_date"],rr["ticker"]))
+            con.commit()
+        n+=1
+    return n
+
+
+def strangle_record_payload(days=120):
+    backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    with _setup_db() as con:
+        _strangle_table(con,backend); con.commit()
+        q="SELECT trade_date,ticker,payload,outcome FROM strangle_log WHERE trade_date>=%s ORDER BY trade_date DESC" if backend=="postgresql" else "SELECT trade_date,ticker,payload,outcome FROM strangle_log WHERE trade_date>=? ORDER BY trade_date DESC"
+        rows=con.execute(q,(cutoff,)).fetchall()
+    items=[]; closed=[]; groups={}
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("trade_date","ticker","payload","outcome"),r))
+        pl=json.loads(rr["payload"]); oc=json.loads(rr["outcome"]) if rr.get("outcome") else {"status":"pending"}
+        ft=(pl.get("follow_through") or {}).get("label"); od=(pl.get("odds") or {}).get("label")
+        items.append({"trade_date":rr["trade_date"],"ticker":rr["ticker"],"tenor":pl.get("tenor"),"cost":pl.get("cost"),"fits_budget":pl.get("fits_budget"),
+                      "call":pl.get("call"),"put":pl.get("put"),"odds":od,"follow_through":ft,"ft_read":(pl.get("follow_through") or {}).get("read"),"outcome":oc})
+        if oc.get("status") in ("win","loss") and oc.get("pct") is not None:
+            closed.append(oc)
+            for key,val in (("follow_through",ft),("odds",od)):
+                if val: groups.setdefault(key,{}).setdefault(val,[]).append(float(oc["pct"]))
+    summ=lambda v:{"n":len(v),"avg_pct":round(float(np.mean(v)),1) if v else None,"wins":sum(1 for x in v if x>0)}
+    return {"logged":len(items),"closed":len(closed),"wins":sum(1 for o in closed if o.get("pct",0)>0),
+            "avg_pct":round(float(np.mean([o["pct"] for o in closed])),1) if closed else None,
+            "tp_hits":sum(1 for o in closed if str(o.get("exit","")).endswith("+150%")),
+            "by":{k:{lab:summ(v) for lab,v in g.items()} for k,g in groups.items()},"recent":items[:20]}
+
+
+@app.get("/api/strangle-record")
+def api_strangle_record():
+    try: return jsonify({"ok":True,**strangle_record_payload()})
+    except Exception as e: return jsonify({"ok":False,"error":str(e)}),500
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     threading.Thread(target=_nightly_keepalive,daemon=True,name="nightly-keepalive").start()
@@ -7209,6 +7408,12 @@ def nightly_run():
         try:
             ac=get(f"/api/accumulation?budget={budget}"); st["counts"]["accumulation"]=len(ac.get("rows") or [])
         except Exception as e: st["errors"].append(f"accumulation: {e}")
+        st["stage"]="strangles"
+        try:
+            st["counts"]["strangles_graded"]=update_strangle_outcomes()
+            st["counts"]["strangles_logged"]=log_post_earnings_strangles(budget)
+        except Exception as e: st["errors"].append(f"strangles: {e}")
+        _nightly_free_memory(("options-v","strangle-","chart-","yf-"))
         st["stage"]="put side"
         try:
             ps=get(f"/api/put-side?refresh=1&budget={budget}"); st["counts"]["put_side"]=len(ps.get("rows") or [])
@@ -14740,6 +14945,38 @@ v32Status=function(p,mode){const s=_v32StatusV372(p,mode);
  if(s&&typeof s.t==="string"&&(/@font-face|<html|<!doctype/i.test(s.t)||(/^Entry plan unavailable/.test(s.t)&&s.t.length>70)))return {...s,t:"Entry plan didn't load (server busy) · retrying"};
  return s;};
 setTimeout(async()=>{try{await window.__v349Gate;v372Load()}catch(e){}},4500);
+
+// ---- v37.5 post-earnings strangle record + follow-through read on the odds badge ---------
+async function v375LoadStrangles(){
+ try{const j=await (await fetch("/api/strangle-record")).json();if(j.ok){window.__strRec=j;v375Render()}}catch(e){console.warn("strangle record",e)}
+}
+function v375Render(){
+ const lanes=document.getElementById("v32RecLanes");if(!lanes)return;
+ let host=document.getElementById("v375Str");
+ if(!host){host=document.createElement("section");host.id="v375Str";host.className="v32Panel";lanes.insertAdjacentElement("afterend",host);}
+ const j=window.__strRec;if(!j){host.innerHTML="";return}
+ const pct=x=>x==null?"—":(x>0?"+":"")+x+"%";
+ const by=(k)=>Object.entries((j.by||{})[k]||{}).map(([lab,v])=>`${v32E(lab)}: ${pct(v.avg_pct)} · ${v.wins}/${v.n} won`).join(" · ")||"—";
+ const rows=(j.recent||[]).map(r=>{const o=r.outcome||{},col=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#8B97A6";
+   return `<tr><td class="v32Num">${v32E(String(r.trade_date).slice(5))}</td><td><b class="v32Num">${v32E(r.ticker)}</b></td><td>${v32E(r.tenor||"")} $${v32E(r.put?.strike??"")}P / $${v32E(r.call?.strike??"")}C${r.fits_budget?"":" ⚠"}</td><td>${v32E(r.follow_through||"—")}</td><td>${v32E(r.odds||"—")}</td><td style="color:${col}">${v32E(o.status||"pending")} ${o.pct!=null?pct(o.pct):""}${o.exit?` · ${v32E(o.exit)}`:""}</td></tr>`}).join("");
+ host.innerHTML=`<div class="v32PanelHead"><h2>Post-earnings strangles</h2><span class="v32Muted">Bought at the day-1 close · a leg at +150% (other leg at that day's close), −35% combined, or the time stop</span></div>
+  <div class="v32Muted" style="margin-bottom:6px">${j.closed?`${j.closed} closed · ${j.wins} won · avg ${pct(j.avg_pct)} · ${j.tp_hits} hit +150%`:`${j.logged} logged, none closed yet`} <br>By follow-through read: ${by("follow_through")}<br>By odds: ${by("odds")}</div>
+  ${rows?`<div class="v32TableWrap"><table class="v32Table"><thead><tr><th>Day 1</th><th>Ticker</th><th>Strangle</th><th>Follow-through</th><th>Odds</th><th>Result</th></tr></thead><tbody>${rows}</tbody></table></div>`:`<div class="v32Empty">Strangles are logged each night for names whose day 1 was that session.</div>`}`;
+}
+const _v32RenderRecordV375=v32RenderRecord;
+v32RenderRecord=function(){const o=_v32RenderRecordV375.apply(this,arguments);try{v375Render()}catch(e){}return o};
+setTimeout(()=>{v375LoadStrangles()},5000);
+// follow-through read next to the strangle odds badge
+const _v35BadgeHTMLV375=v35BadgeHTML;
+v35BadgeHTML=function(t){const h=_v35BadgeHTMLV375(t);const f=(window.__v375FT||{})[t];
+ if(!f)return h;const c={Strong:"#3DD68C",Fair:"#F2B84B",Weak:"#FF8A78"}[f.label]||"#8B97A6";
+ return h+` <span style="font-size:11.5px;font-weight:600;color:${c}" title="${v32E(f.read||"")}">${v32E(f.label)} follow-through</span>`;};
+window.__v375FT={};
+const _fetchV375=window.fetch.bind(window);
+window.fetch=function(u,o){const p=_fetchV375(u,o);
+ try{const s=String(u||"");if(s.startsWith("/api/strangle-plan/")){const t=decodeURIComponent(s.split("/api/strangle-plan/")[1].split("?")[0]).toUpperCase();
+   p.then(r=>r.clone().json()).then(j=>{if(j&&j.follow_through){window.__v375FT[t]=j.follow_through;try{v35Paint(t)}catch(e){}}}).catch(()=>{});}}catch(e){}
+ return p;};
 
 // ---- v37 catalyst calendar ---------------------------------------------------------------
 let v37CatFilter="board";
