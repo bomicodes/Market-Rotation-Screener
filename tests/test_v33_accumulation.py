@@ -305,3 +305,32 @@ def test_v374_board_log_rows_and_short_gate():
     assert b["direction"] == "bearish" and b["contract"]["label"] == "2026-12-18 $10P" and b["regime"] == "Risk-Off"
     # shorts not allowed -> the put is not logged
     assert [r["ticker"] for r in A.board_log_rows("2026-11-19", risk_on, payloads)] == ["AAA"]
+
+
+def test_v375_grade_strangle():
+    import app as A
+    bc = [{"t": "2026-11-18", "h": 1.0, "c": 1.0}, {"t": "2026-11-19", "h": 0.8, "c": 0.6}, {"t": "2026-11-20", "h": 0.5, "c": 0.3}]
+    bp = [{"t": "2026-11-18", "h": 1.0, "c": 1.0}, {"t": "2026-11-19", "h": 1.6, "c": 1.5}, {"t": "2026-11-20", "h": 2.7, "c": 2.6}]
+    g = A.grade_strangle(1.0, 1.0, bc, bp, "2026-11-18", 3, "2026-11-25")
+    assert g["status"] == "win" and g["exit"] == "put +150%" and g["closed"] == "2026-11-20" and g["pct"] == 40.0   # (2.5 + 0.3)/2 - 1
+    # nothing happens: time stop after 2 sessions
+    flat = [{"t": "2026-11-19", "h": 1.05, "c": 0.9}, {"t": "2026-11-20", "h": 1.0, "c": 0.85}]
+    g2 = A.grade_strangle(1.0, 1.0, flat, flat, "2026-11-18", 2, "2026-11-25")
+    assert g2["status"] == "loss" and g2["exit"] == "time stop" and g2["pct"] == -15.0
+    # combined stop
+    bad = [{"t": "2026-11-19", "h": 0.7, "c": 0.6}]
+    assert A.grade_strangle(1.0, 1.0, bad, bad, "2026-11-18", 3, None)["exit"] == "-35% combined"
+
+
+def test_v375_day1_follow_through():
+    import app as A
+    # 40 quiet days, then a -3% day 1 that closes at the low, in a falling market
+    closes = [100.0] * 40 + [97.0]
+    highs = [101.0] * 40 + [99.5]; lows = [99.0] * 40 + [96.9]
+    df = _bars(closes, highs=highs, lows=lows, opens=[100.0] * 40 + [99.0])
+    f = A.day1_follow_through(df, df.index[-1], None, True)
+    assert f["close_location"] >= 0.95 and f["label"] == "Strong" and "with the market" in f["read"]
+    # a fade off the high on an up day, against a falling market
+    df2 = _bars([100.0] * 40 + [104.0], highs=[101.0] * 40 + [109.0], lows=[99.0] * 40 + [100.5], opens=[100.0] * 40 + [107.0])
+    f2 = A.day1_follow_through(df2, df2.index[-1], None, True)
+    assert f2["label"] == "Weak"

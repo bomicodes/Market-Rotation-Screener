@@ -1,3 +1,7 @@
+v37.5 — post-earnings strangle tracker: each night logs the strangle the screener would buy at the day-1 close for that session's
+reporters and grades it on real option bars (leg +150%, -35% combined, time stop, exit-by); Track record panel by follow-through read
+and odds. New day-1 follow-through read (close location, size vs usual reaction, with/against the market) on strangle plans and badges.
+
 v37.4 — the nightly logs the board itself (wide scan, laggards, bases, earnings drift, put side) with the page's rules (shorts only when
 the tape allows them); nights nobody opened the page (11/18, 11/19) and the put side were missing. 11/17 put-side setups back-filled.
 
