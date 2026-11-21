@@ -4858,7 +4858,7 @@ def strangle_odds(choice, spot, moves, vp):
     return out
 
 
-def strangle_plan(ticker, budget=250.0, rows=None, spot=None, event_date=None, history=None, vp=None):
+def strangle_plan(ticker, budget=250.0, rows=None, spot=None, event_date=None, history=None, vp=None, max_spread=30):
     """Post-earnings strangle on 1-week and 2-week contracts (the trader's style).
     Returns both tenors under `choices`; the top-level fields are the preferred
     one: the 1-week pair if it fits the budget, else the 2-week, else the 1-week."""
@@ -4873,7 +4873,7 @@ def strangle_plan(ticker, budget=250.0, rows=None, spot=None, event_date=None, h
         contracts=alpaca_option_contracts(ticker,start,end); meta={x.get("symbol"):x for x in contracts if x.get("symbol")}
         snaps=alpaca_option_chain(ticker,start,end,spot); rows=[option_contract_row(sym,snap,meta[sym],spot) for sym,snap in snaps.items() if sym in meta]
     rows=[r for r in rows if r.get("mid") and r["mid"]>0 and r.get("dte") is not None and lo_d<=r["dte"]<=hi_d and r.get("delta") is not None
-          and r.get("spread_pct") is not None and r["spread_pct"]<=30]
+          and r.get("spread_pct") is not None and r["spread_pct"]<=max_spread]
     if not rows: return {"ticker":ticker,"available":False,"reason":"No 1–2 week contracts with usable quotes."}
     R=STRANGLE_RULES; choices=[]
     for label,mn,mx,target,days in STRANGLE_TENORS:
@@ -7191,25 +7191,27 @@ def log_post_earnings_strangles(budget=250, cap=14):
     syms.sort(key=lambda s:(s in parent,_mcap_value((recent.get(s) or {}).get("market_cap"))),reverse=True)
     data=dl_ohlcv_bulk(syms[:60],"6mo") if syms else {}
     mdown=_spy_down_5d(); rows=[]; seen=0
+    diag={"reporters":len(syms),"no_bars":0,"filtered_price_volume":0,"day1_not_latest":0,"no_plan":0,"errors":0,"tickers":[]}
     for s in syms[:60]:
         df=data.get(s); meta=recent.get(s) or {}
-        if df is None or len(df)<40: continue
+        if df is None or len(df)<40: diag["no_bars"]+=1; continue
         try:
             c=df["Close"].astype(float)
-            if float(c.iloc[-1])<10 or float((c*df["Volume"].astype(float)).tail(20).mean())<20e6: continue
+            if float(c.iloc[-1])<10 or float((c*df["Volume"].astype(float)).tail(20).mean())<20e6: diag["filtered_price_volume"]+=1; continue
             ev=meta.get("date")
             tm=str(meta.get("time") or "").lower()
             evts=pd.Timestamp(ev)
             if "after" in tm or tm in ("amc","post-market"): evts=evts.normalize()+pd.Timedelta(hours=17)
             elif "pre" in tm or tm in ("bmo",): evts=evts.normalize()+pd.Timedelta(hours=8)
             i=event_session_index(df,evts)
-            if i is None or i!=len(df)-1: continue        # day 1 must be the latest session
+            if i is None or i!=len(df)-1: diag["day1_not_latest"]+=1; continue        # day 1 must be the latest session
         except Exception: continue
         if seen>=cap: break
         seen+=1
         try:
-            plan=strangle_plan(s,budget,event_date=str(pd.Timestamp(ev).date()))
-            if not plan.get("available"): continue
+            plan=strangle_plan(s,budget,event_date=str(pd.Timestamp(ev).date()),max_spread=75)
+            if not plan.get("available"): diag["no_plan"]+=1; diag["tickers"].append(f"{s}: {plan.get('reason')}"[:70]); continue
+            diag["tickers"].append(f"{s}: logged")
             try: past=[d for d in earnings_dates_cached(s) if pd.Timestamp(d).normalize()<pd.Timestamp(ev).normalize()-pd.Timedelta(days=20)]
             except Exception: past=[]
             ft=day1_follow_through(dl_ohlc(s,"4y"),evts,past,mdown)
@@ -7219,7 +7221,7 @@ def log_post_earnings_strangles(budget=250, cap=14):
                          "call":{k:(plan.get("call") or {}).get(k) for k in ("symbol","strike","mid","delta")},"put":{k:(plan.get("put") or {}).get(k) for k in ("symbol","strike","mid","delta")},
                          "odds":{k:(plan.get("odds") or {}).get(k) for k in ("label","score","hit_rate")},"follow_through":ft,"market_down_5d":mdown})
         except Exception as e:
-            rows.append({"ticker":s,"error":str(e)[:80]})
+            rows.append({"ticker":s,"error":str(e)[:80]}); diag["errors"]+=1; diag["tickers"].append(f"{s}: {e}"[:70])
         finally:
             if NIGHTLY.get("running"):
                 try: _nightly_free_memory(("options-v","strangle-","chart-","yf-"))
@@ -7234,6 +7236,9 @@ def log_post_earnings_strangles(budget=250, cap=14):
             else: con.execute("INSERT OR IGNORE INTO strangle_log(trade_date,ticker,payload,updated_at) VALUES(?,?,?,?)",vals)
             n+=1
         con.commit()
+    diag["logged"]=n
+    try: _kv_put("strangle-log-diag",diag)
+    except Exception: pass
     return n
 
 
@@ -7292,7 +7297,7 @@ def strangle_record_payload(days=120):
 
 @app.get("/api/strangle-record")
 def api_strangle_record():
-    try: return jsonify({"ok":True,**strangle_record_payload()})
+    try: return jsonify({"ok":True,**strangle_record_payload(),"last_log":_kv_get("strangle-log-diag",{})})
     except Exception as e: return jsonify({"ok":False,"error":str(e)}),500
 
 
@@ -7412,6 +7417,11 @@ def nightly_run():
         try:
             st["counts"]["strangles_graded"]=update_strangle_outcomes()
             st["counts"]["strangles_logged"]=log_post_earnings_strangles(budget)
+            try:
+                dg=_kv_get("strangle-log-diag",{}) or {}
+                st["counts"]["strangles_diag"]={k:dg.get(k) for k in ("reporters","no_bars","filtered_price_volume","day1_not_latest","no_plan","errors")}
+                st["counts"]["strangles_names"]=(dg.get("tickers") or [])[:14]
+            except Exception: pass
         except Exception as e: st["errors"].append(f"strangles: {e}")
         _nightly_free_memory(("options-v","strangle-","chart-","yf-"))
         st["stage"]="put side"
