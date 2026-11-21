@@ -1,3 +1,6 @@
+v37.6 — strangle tracker confirms day 1 by the volume spike (calendar session or a neighbour, >= 1.5x the 20-day average);
+calendars were a day off for PANW 11/18. Logs which reporters missed the day-1 check.
+
 v37.5 — post-earnings strangle tracker: each night logs the strangle the screener would buy at the day-1 close for that session's
 reporters and grades it on real option bars (leg +150%, -35% combined, time stop, exit-by); Track record panel by follow-through read
 and odds. New day-1 follow-through read (close location, size vs usual reaction, with/against the market) on strangle plans and badges.

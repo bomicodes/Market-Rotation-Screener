@@ -7113,10 +7113,31 @@ def board_log_rows(date, m, payloads):
 # reaction (NVDA, AMAT, ROST, PANW) kept going; big over-reactions that faded off
 # the high (TJX, TGT) stalled.
 # ---------------------------------------------------------------------------
-def day1_follow_through(df, event_date, past_dates=None, market_down=None):
+def confirm_day1_index(df, i):
+    """v37.6: earnings calendars are sometimes a day off (PANW 11/18 was listed
+    after-close, but its +9.9% reaction was that same session). Day 1 is the
+    session with the volume spike: pick the heaviest of the calendar's session and
+    its neighbours, if it is at least 1.5x the 20-day average."""
+    if i is None or "Volume" not in getattr(df,"columns",[]): return i
+    v=df["Volume"].astype(float).values; best=i; bestr=0.0
+    for j in (i-1,i,i+1):
+        if j<1 or j>=len(df): continue
+        base=float(np.nanmean(v[max(0,j-21):j-1])) if j>2 else 0.0
+        r=(v[j]/base) if base>0 else 0.0
+        if r>bestr: best,bestr=j,r
+    return best if bestr>=1.5 else i
+
+
+def day1_follow_through(df, event_date, past_dates=None, market_down=None, day1_date=None):
     """Pure: read day 1 of an earnings reaction. Returns None if day 1 isn't in df."""
-    try: i=event_session_index(df,event_date)
-    except Exception: i=None
+    i=None
+    if day1_date is not None:
+        try:
+            idx=[str(x)[:10] for x in df.index]; i=idx.index(str(day1_date)[:10])
+        except Exception: i=None
+    if i is None:
+        try: i=confirm_day1_index(df,event_session_index(df,event_date))
+        except Exception: i=None
     if i is None or i<1: return None
     d=df.iloc[i]; prev=float(df["Close"].iloc[i-1])
     o,h,l,c=float(d["Open"]),float(d["High"]),float(d["Low"]),float(d["Close"])
@@ -7203,7 +7224,7 @@ def log_post_earnings_strangles(budget=250, cap=14):
             evts=pd.Timestamp(ev)
             if "after" in tm or tm in ("amc","post-market"): evts=evts.normalize()+pd.Timedelta(hours=17)
             elif "pre" in tm or tm in ("bmo",): evts=evts.normalize()+pd.Timedelta(hours=8)
-            i=event_session_index(df,evts)
+            i=confirm_day1_index(df,event_session_index(df,evts))
             if i is None or i!=len(df)-1:
                 diag["day1_not_latest"]+=1
                 if len(diag.setdefault("not_latest",[]))<20: diag["not_latest"].append(f"{s} {str(ev)[:10]} {tm or '-'} day1={str(df.index[i])[:10] if i is not None else '?'}")
@@ -7217,7 +7238,7 @@ def log_post_earnings_strangles(budget=250, cap=14):
             diag["tickers"].append(f"{s}: logged")
             try: past=[d for d in earnings_dates_cached(s) if pd.Timestamp(d).normalize()<pd.Timestamp(ev).normalize()-pd.Timedelta(days=20)]
             except Exception: past=[]
-            ft=day1_follow_through(dl_ohlc(s,"4y"),evts,past,mdown)
+            ft=day1_follow_through(dl_ohlc(s,"4y"),evts,past,mdown,day1_date=str(df.index[-1])[:10])
             rows.append({"ticker":s,"trade_date":str(df.index[-1])[:10],"event_date":str(pd.Timestamp(ev).date()),"parent":parent.get(s),
                          "tenor":plan.get("tenor"),"expiration":plan.get("expiration"),"dte":plan.get("dte"),"cost":plan.get("cost"),"fits_budget":plan.get("fits_budget"),
                          "balanced":(plan.get("balance") or {}).get("balanced"),"time_stop_sessions":plan.get("time_stop_sessions"),"exit_by":plan.get("exit_by"),
