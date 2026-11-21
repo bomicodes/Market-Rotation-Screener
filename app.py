@@ -7204,7 +7204,10 @@ def log_post_earnings_strangles(budget=250, cap=14):
             if "after" in tm or tm in ("amc","post-market"): evts=evts.normalize()+pd.Timedelta(hours=17)
             elif "pre" in tm or tm in ("bmo",): evts=evts.normalize()+pd.Timedelta(hours=8)
             i=event_session_index(df,evts)
-            if i is None or i!=len(df)-1: diag["day1_not_latest"]+=1; continue        # day 1 must be the latest session
+            if i is None or i!=len(df)-1:
+                diag["day1_not_latest"]+=1
+                if len(diag.setdefault("not_latest",[]))<20: diag["not_latest"].append(f"{s} {str(ev)[:10]} {tm or '-'} day1={str(df.index[i])[:10] if i is not None else '?'}")
+                continue        # day 1 must be the latest session
         except Exception: continue
         if seen>=cap: break
         seen+=1
@@ -7421,6 +7424,7 @@ def nightly_run():
                 dg=_kv_get("strangle-log-diag",{}) or {}
                 st["counts"]["strangles_diag"]={k:dg.get(k) for k in ("reporters","no_bars","filtered_price_volume","day1_not_latest","no_plan","errors")}
                 st["counts"]["strangles_names"]=(dg.get("tickers") or [])[:14]
+                st["counts"]["strangles_not_latest"]=[x for x in (dg.get("not_latest") or []) if x.split(" ")[0] in ("WMT","INTU","NVDA","PANW","TGT","TJX","ROST","LOW","HD","DIS","AMAT")][:8]
             except Exception: pass
         except Exception as e: st["errors"].append(f"strangles: {e}")
         _nightly_free_memory(("options-v","strangle-","chart-","yf-"))
