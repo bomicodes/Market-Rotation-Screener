@@ -334,3 +334,14 @@ def test_v375_day1_follow_through():
     df2 = _bars([100.0] * 40 + [104.0], highs=[101.0] * 40 + [109.0], lows=[99.0] * 40 + [100.5], opens=[100.0] * 40 + [107.0])
     f2 = A.day1_follow_through(df2, df2.index[-1], None, True)
     assert f2["label"] == "Weak"
+
+
+def test_v376_confirm_day1_by_volume():
+    import app as A, numpy as np
+    df = _bars([100.0] * 30 + [110.0, 111.0], vol=1_000_000)
+    v = df["Volume"].values.copy(); v[30] = 5_000_000; df["Volume"] = v
+    # calendar maps day 1 to the session AFTER the spike (an "after-close" listing that was wrong)
+    assert A.confirm_day1_index(df, 31) == 30
+    # no spike anywhere -> keep the calendar's session
+    df2 = _bars([100.0] * 32, vol=1_000_000)
+    assert A.confirm_day1_index(df2, 31) == 31
