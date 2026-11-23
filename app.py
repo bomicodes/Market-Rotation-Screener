@@ -4438,7 +4438,7 @@ def auth_required():
 def protect_app():
     # v29: the nightly trigger/status endpoints are public but self-limiting
     # (one run per market close, no data returned beyond run status).
-    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status") or request.path.startswith("/static/"):
+    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print") or request.path.startswith("/static/"):
         return None
     if auth_required():
         if request.path.startswith("/api/"):
@@ -7325,6 +7325,96 @@ def api_strangle_record():
     except Exception as e: return jsonify({"ok":False,"error":str(e)}),500
 
 
+# ---------------------------------------------------------------------------
+# v37.7 LOG DIGEST
+# A plain-text summary written to the server log (Render keeps it private), so the
+# board, open trades and strangles can be checked without opening the site:
+#   - at the end of every nightly run
+#   - at 12:30 ET on trading days (open trades marked to the latest price)
+#   - on demand: GET /api/digest/print (public, returns nothing but "queued",
+#     at most once every 5 minutes)
+# Lines start with "[digest" so they can be filtered.
+# ---------------------------------------------------------------------------
+DIGEST_STATE={"last":0.0,"midday_for":None}
+
+
+def _dg_plan(p):
+    p=p or {}; u=p.get("underlying") or {}; z=p.get("single") or {}; L=z.get("leg") or {}
+    if not p.get("available") or not u: return "no plan"
+    c=f"{str(L.get('expiration',''))[5:]} ${L.get('strike')}{'P' if str(L.get('type','')).lower().startswith('p') else 'C'} ≈${z.get('cost')}" if L else f"over budget (cheapest ${p.get('cheapest_single_cost')})"
+    return f"entry {u.get('entry')} stop {u.get('stop')} tgt {u.get('target')} rr {u.get('rr')} · {c}"
+
+
+def _dg_last_price(t):
+    try:
+        c=dl_ohlc(t,"5d")["Close"].dropna(); return float(c.iloc[-1])
+    except Exception: return None
+
+
+def build_digest(kind="nightly"):
+    client=app.test_client()
+    with client.session_transaction() as sess: sess["authenticated"]=True
+    def get(url):
+        try: return client.get(url).get_json(silent=True) or {}
+        except Exception: return {}
+    hints=_kv_get("nightly-hints",{}) or {}; budget=int(float(hints.get("budget") or 250))
+    m=get("/api/market"); out=[]
+    i=(m.get("internals") or {}); spy=i.get("SPY") or {}; vix=i.get("VIX") or {}
+    st=_nightly_public_status()
+    out.append(f"[digest {kind} {m.get('asof') or ''}] tape {server_regime(m)} · shorts {'allowed' if server_shorts_ok(m) else 'held back'} · "
+               f"SPY {spy.get('value') and round(spy['value'],2)} ({spy.get('d1') and round(spy['d1'],2)}% d, {spy.get('d5') and round(spy['d5'],2)}% 5d, {spy.get('d20') and round(spy['d20'],2)}% 20d, above20={spy.get('above20')}) · VIX {vix.get('value') and round(vix['value'],1)} · "
+               f"nightly {st.get('stage')} {st.get('started')}→{st.get('finished')} errors={len(st.get('errors') or [])}")
+    flows=_kv_get("planflow-last",{}) or {}
+    board=[]
+    lanes=[("reversal",f"/api/reversal-scan?budget={budget}"),("put side",f"/api/put-side?budget={budget}"),("bases",f"/api/accumulation?budget={budget}"),("drift",f"/api/pead-scan?budget={budget}")]
+    if hints.get("groups"): lanes.append(("laggards",f"/api/laggards?groups={','.join(hints['groups'][:10])}&budget={budget}"))
+    for name,url in lanes:
+        j=get(url)
+        for r in (j.get("rows") or [])[:8]:
+            d="S" if (r.get("direction")=="bearish" or name=="put side") else "L"
+            board.append(f"{name}/{r.get('lane') or ''} {r.get('ticker')} {d} {r.get('signal') or ''} · {_dg_plan(r.get('entry_plan'))}")
+    for k in range(0,len(board),6):
+        out.append(f"[digest board {k//6+1}] "+" | ".join(board[k:k+6]))
+    tr=get("/api/track-record"); since=(pd.Timestamp.now()-pd.Timedelta(days=12)).strftime("%Y-%m-%d")
+    opn=[]; done=[]
+    for r in tr.get("recent") or []:
+        o=r.get("outcome") or {}
+        if str(r.get("trade_date"))<since: continue
+        tag=f"{r.get('ticker')} {r.get('lane')} {'S' if r.get('direction')=='bearish' else 'L'}"
+        if o.get("status")=="open":
+            px=_dg_last_price(r["ticker"]) if kind=="midday" else None
+            mark=""
+            if px and r.get("entry") and r.get("stop"):
+                e=float(o.get("fill_price") or r["entry"]); risk=abs(e-float(r["stop"])) or 1
+                rr_=((px-e) if r.get("direction")!="bearish" else (e-px))/risk; mark=f" now {px:.2f} ({rr_:+.2f}R)"
+            opn.append(f"{tag} {o.get('r'):+}R{mark} stop {r.get('stop')} tgt {r.get('target')}" if o.get("r") is not None else f"{tag} open{mark}")
+        elif o.get("status") in ("win","loss","timeout"):
+            done.append(f"{tag} {o.get('status')} {o.get('r')}R {str(o.get('closed') or '')[5:]}")
+    out.append("[digest trades open] "+(" | ".join(opn) or "none"))
+    out.append("[digest trades closed 12d] "+(" | ".join(done[:20]) or "none"))
+    lanes_=tr.get("lanes") or []
+    out.append("[digest lanes] "+" | ".join(f"{l['lane']} {l.get('wins')}-{l.get('losses')} avg {l.get('avg_r')}R calls {l.get('long_avg_r')} puts {l.get('short_avg_r')}" for l in lanes_))
+    sr=get("/api/strangle-record")
+    out.append(f"[digest strangles] closed {sr.get('closed')} won {sr.get('wins')} avg {sr.get('avg_pct')}% tp {sr.get('tp_hits')} · by follow-through {json.dumps((sr.get('by') or {}).get('follow_through') or {})} · "+" | ".join(
+        f"{x.get('ticker')} {str(x.get('trade_date'))[5:]} {x.get('tenor')} ${(x.get('put') or {}).get('strike')}P/${(x.get('call') or {}).get('strike')}C ft {x.get('follow_through')} → {(x.get('outcome') or {}).get('status')} {(x.get('outcome') or {}).get('pct')}" for x in (sr.get("recent") or [])[:10]))
+    return out
+
+
+def print_digest(kind="nightly"):
+    try:
+        for line in build_digest(kind): print(line[:3500],flush=True)
+    except Exception as e:
+        print(f"[digest error] {e!r}",flush=True)
+
+
+@app.get("/api/digest/print")
+def api_digest_print():
+    if time.time()-DIGEST_STATE["last"]<300: return jsonify({"ok":True,"queued":False,"reason":"printed in the last 5 minutes"})
+    DIGEST_STATE["last"]=time.time()
+    threading.Thread(target=print_digest,args=("on demand",),daemon=True,name="digest").start()
+    return jsonify({"ok":True,"queued":True})
+
+
 def nightly_run():
     st=NIGHTLY; st.update(running=True,started=time.time(),finished=None,stage="start",counts={},errors=[])
     threading.Thread(target=_nightly_keepalive,daemon=True,name="nightly-keepalive").start()
@@ -7487,6 +7577,8 @@ def nightly_run():
             st["counts"]["options_flow"]=nf
         except Exception as e: st["errors"].append(f"options flow: {e}")
         st["stage"]="done"
+        try: threading.Thread(target=print_digest,args=("nightly",),daemon=True,name="digest").start()
+        except Exception: pass
     except Exception as e:
         st["errors"].append(str(e)); st["stage"]="failed"
     finally:
@@ -7547,6 +7639,12 @@ def _nightly_watchdog():
     while True:
         time.sleep(90 if first else 300); first=False
         WATCHDOG["last_check"]=time.time()
+        try:
+            et=_et_now(); key=et.strftime("%Y-%m-%d")
+            if et.weekday()<5 and (et.hour*60+et.minute)>=750 and (et.hour*60+et.minute)<=800 and DIGEST_STATE["midday_for"]!=key:
+                DIGEST_STATE["midday_for"]=key
+                threading.Thread(target=print_digest,args=("midday",),daemon=True,name="digest-midday").start()
+        except Exception: pass
         try:
             close=float(last_market_close_ts()); now=time.time()
             if not (2700<=now-close<=12*3600):

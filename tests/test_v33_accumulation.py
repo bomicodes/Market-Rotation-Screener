@@ -345,3 +345,21 @@ def test_v376_confirm_day1_by_volume():
     # no spike anywhere -> keep the calendar's session
     df2 = _bars([100.0] * 32, vol=1_000_000)
     assert A.confirm_day1_index(df2, 31) == 31
+
+
+def test_v377_digest_endpoint_is_public_and_quiet():
+    import app as A
+    A.DIGEST_STATE["last"] = 0.0
+    called = []
+    orig = A.print_digest
+    A.print_digest = lambda kind="nightly": called.append(kind)
+    try:
+        c = A.app.test_client()
+        j = c.get("/api/digest/print").get_json()
+        assert j["ok"] and j["queued"] and set(j) == {"ok", "queued"}      # returns no data
+        assert c.get("/api/digest/print").get_json()["queued"] is False    # rate limited
+    finally:
+        A.print_digest = orig
+    p = {"available": True, "underlying": {"entry": 10, "stop": 11, "target": 8, "rr": 2},
+         "single": {"cost": 150, "leg": {"expiration": "2026-12-18", "strike": 9.5, "type": "put"}}}
+    assert A._dg_plan(p) == "entry 10 stop 11 tgt 8 rr 2 · 12-18 $9.5P ≈$150"
