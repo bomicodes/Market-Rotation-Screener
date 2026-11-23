@@ -1,3 +1,7 @@
+v37.7 — plain-text digest written to the server log (board, open trades marked midday, closed trades, lane records, strangles):
+after each nightly, at 12:30 ET on trading days, and on demand via GET /api/digest/print (public, returns no data, 5-min limit) or the
+"Print digest" workflow. Lets the board be checked through the Render logs without opening the site.
+
 v37.6 — strangle tracker confirms day 1 by the volume spike (calendar session or a neighbour, >= 1.5x the 20-day average);
 calendars were a day off for PANW 11/18. Logs which reporters missed the day-1 check.
 

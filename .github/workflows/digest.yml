@@ -1,0 +1,15 @@
+name: Print digest to the server log
+
+# Asks the app to write its plain-text digest (board, open trades, strangles) to
+# its own server log. The response here contains no data -- only "queued".
+on:
+  workflow_dispatch: {}
+
+jobs:
+  print:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Request the digest
+        run: |
+          curl -s --max-time 90 "https://market-rotation-screener.onrender.com/api/digest/print" | head -c 200; echo
