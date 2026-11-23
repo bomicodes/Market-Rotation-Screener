@@ -6968,7 +6968,7 @@ def put_side_candidates(data, memberships, flows):
                                 "score":round(2*min(3,(G["ret20"]-s["ret20"])/3)+(2 if bar else 0)+(1.5 if vol_conf else 0)+min(2,-f["flow"]/25)+lv["rr"]/2,2)})
             gap=s["ret20"]-G["ret20"]
             if G["ret20"]<=-2 and gap>=3 and corr is not None and corr>=.5 and (bar or s["c"]<s["sma10"]):
-                lv=_ps_levels(s["low3"]-.01,s["high5"]+.1*s["atr"],[s["sma50"] if s["sma50"]<s["low3"] else None,s["low20"],s["low60"]],s["atr"])
+                lv=_ps_levels(s["low3"]-.01,min(s["high5"]+.1*s["atr"],s["low3"]+2*s["atr"]),[s["sma50"] if s["sma50"]<s["low3"] else None,s["low20"],s["low60"]],s["atr"])
                 if lv:
                     out.append({"ticker":t,"parent":g,"lane":"catch_down","signal":bar or "Closed below the 10-day","levels":lv,"ret20":round(s["ret20"],1),"group_ret20":round(G["ret20"],1),
                                 "catch_down_gap":round(gap,1),"group_flow":f.get("flow"),"group_signal":f.get("signal"),"corr":round(corr,2),
@@ -7026,7 +7026,7 @@ def api_put_side():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"putside-v2:{budget}",lambda:put_side_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"putside-v3:{budget}",lambda:put_side_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7372,14 +7372,24 @@ def build_digest(kind="nightly"):
         j=get(url)
         for r in (j.get("rows") or [])[:8]:
             d="S" if (r.get("direction")=="bearish" or name=="put side") else "L"
-            board.append(f"{name}/{r.get('lane') or ''} {r.get('ticker')} {d} {r.get('signal') or ''} · {_dg_plan(r.get('entry_plan'))}")
+            sg=r.get("signal") or ""
+            if isinstance(sg,dict): sg=f"{sg.get('timeframe','')} {sg.get('type','')}".strip()
+            board.append(f"{name}/{r.get('lane') or ''} {r.get('ticker')} {d} {sg} · {_dg_plan(r.get('entry_plan'))}")
     for k in range(0,len(board),6):
         out.append(f"[digest board {k//6+1}] "+" | ".join(board[k:k+6]))
     tr=get("/api/track-record"); since=(pd.Timestamp.now()-pd.Timedelta(days=12)).strftime("%Y-%m-%d")
-    opn=[]; done=[]
-    for r in tr.get("recent") or []:
+    opn=[]; done=[]; recs=[]
+    try:
+        backend=_setup_storage_backend()
+        with _setup_db() as con:
+            q="SELECT trade_date,ticker,lane,direction,payload,outcome FROM setup_log WHERE trade_date>=%s ORDER BY trade_date DESC" if backend=="postgresql" else "SELECT trade_date,ticker,lane,direction,payload,outcome FROM setup_log WHERE trade_date>=? ORDER BY trade_date DESC"
+            for row in con.execute(q,(since,)).fetchall():
+                rr=dict(row) if hasattr(row,"keys") else dict(zip(("trade_date","ticker","lane","direction","payload","outcome"),row))
+                pl=json.loads(rr["payload"]); recs.append({"trade_date":rr["trade_date"],"ticker":rr["ticker"],"lane":rr["lane"],"direction":rr["direction"],
+                    "entry":pl.get("entry"),"stop":pl.get("stop"),"target":pl.get("target"),"outcome":json.loads(rr["outcome"]) if rr.get("outcome") else {}})
+    except Exception as e: out.append(f"[digest error trades] {e!r}")
+    for r in recs:
         o=r.get("outcome") or {}
-        if str(r.get("trade_date"))<since: continue
         tag=f"{r.get('ticker')} {r.get('lane')} {'S' if r.get('direction')=='bearish' else 'L'}"
         if o.get("status")=="open":
             px=_dg_last_price(r["ticker"]) if kind=="midday" else None
@@ -7391,7 +7401,7 @@ def build_digest(kind="nightly"):
         elif o.get("status") in ("win","loss","timeout"):
             done.append(f"{tag} {o.get('status')} {o.get('r')}R {str(o.get('closed') or '')[5:]}")
     out.append("[digest trades open] "+(" | ".join(opn) or "none"))
-    out.append("[digest trades closed 12d] "+(" | ".join(done[:20]) or "none"))
+    out.append("[digest trades closed 12d] "+(" | ".join(done[:30]) or "none"))
     lanes_=tr.get("lanes") or []
     out.append("[digest lanes] "+" | ".join(f"{l['lane']} {l.get('wins')}-{l.get('losses')} avg {l.get('avg_r')}R calls {l.get('long_avg_r')} puts {l.get('short_avg_r')}" for l in lanes_))
     sr=get("/api/strangle-record")
