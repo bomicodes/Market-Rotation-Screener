@@ -1,3 +1,6 @@
+v37.9 — MAX_CONTRACT (Render env) sets the max premium per contract for the nightly board, logging and digest; the page adopts it
+(set to $200 on 11/24).
+
 v37.8 — real breadth from the ~350-stock group universe (% above 20/50-day, 20-day highs vs lows), saved by the group-flow stage
 and printed in the digest next to RSP/SPY, IWM/SPY, QQQ/SPY and credit.
 
