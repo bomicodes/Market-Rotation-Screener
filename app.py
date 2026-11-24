@@ -7372,13 +7372,24 @@ def _dg_last_price(t):
     except Exception: return None
 
 
+def board_budget(hints=None):
+    """v37.9: MAX_CONTRACT (Render env) is the max premium per contract for the
+    nightly board, the logging and the digest. Without it, the page's last setting."""
+    try:
+        v=int(float(os.environ.get("MAX_CONTRACT") or 0))
+        if v>=25: return v
+    except Exception: pass
+    try: return int(float((hints or {}).get("budget") or 250))
+    except Exception: return 250
+
+
 def build_digest(kind="nightly"):
     client=app.test_client()
     with client.session_transaction() as sess: sess["authenticated"]=True
     def get(url):
         try: return client.get(url).get_json(silent=True) or {}
         except Exception: return {}
-    hints=_kv_get("nightly-hints",{}) or {}; budget=int(float(hints.get("budget") or 250))
+    hints=_kv_get("nightly-hints",{}) or {}; budget=board_budget(hints)
     m=get("/api/market"); out=[]
     i=(m.get("internals") or {}); spy=i.get("SPY") or {}; vix=i.get("VIX") or {}
     st=_nightly_public_status()
@@ -7466,7 +7477,7 @@ def nightly_run():
         r=client.post(url,json=body); return r.get_json(silent=True) or {}
     try:
         hints=_kv_get("nightly-hints",{}) or {}
-        budget=int(float(hints.get("budget") or 250))
+        budget=board_budget(hints)
         # v34.8.2: grade yesterday's/today's setups first -- cheap, and it is the
         # part that answers "how did the picks do" even if a later stage fails.
         st["stage"]="outcomes"
@@ -7727,7 +7738,7 @@ def _start_watchdog_in_worker():
 def api_nightly_status():
     fmt=lambda t:datetime.fromtimestamp(t).astimezone(_et_now().tzinfo).isoformat(timespec="minutes") if t else None
     wd={k:(fmt(v) if k in ("alive_since","last_check","last_start") else v) for k,v in WATCHDOG.items()}
-    return jsonify({"ok":True,**_nightly_public_status(),"watchdog":wd})
+    return jsonify({"ok":True,**_nightly_public_status(),"watchdog":wd,"max_contract":board_budget(_kv_get("nightly-hints",{}) or {})})
 
 
 @app.post("/api/nightly/hints")
@@ -7737,7 +7748,7 @@ def api_nightly_hints():
         clean=lambda xs,n:[str(x).upper()[:12] for x in (xs or []) if str(x).strip()][:n]
         hints={"groups":clean(b.get("groups"),20),"candidates":clean(b.get("candidates"),60),"finalists":clean(b.get("finalists"),16),
                "parents":{str(k).upper()[:12]:str(v).upper()[:12] for k,v in list((b.get("parents") or {}).items())[:60]},
-               "budget":max(25,min(100000,int(float(b.get("budget") or 250)))),"saved":time.time()}
+               "budget":board_budget({"budget":max(25,min(100000,int(float(b.get("budget") or 250))))}),"saved":time.time()}
         _kv_put("nightly-hints",hints)
         return jsonify({"ok":True})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),400
@@ -15136,6 +15147,11 @@ function v375Render(){
 const _v32RenderRecordV375=v32RenderRecord;
 v32RenderRecord=function(){const o=_v32RenderRecordV375.apply(this,arguments);try{v375Render()}catch(e){}return o};
 setTimeout(()=>{v375LoadStrangles()},5000);
+
+// ---- v37.9 the page follows the server's MAX_CONTRACT ---------------------------------
+setTimeout(async()=>{try{const j=await (await fetch("/api/nightly/status")).json();const mc=Number(j.max_contract);
+ if(Number.isFinite(mc)&&mc>=25&&mc!==v26Budget()){localStorage.setItem(V26_BUDGET_KEY,String(mc));
+   ["v32Budget","v26BudgetInput"].forEach(id=>{const el=document.getElementById(id);if(el){el.value=mc;el.dispatchEvent(new Event("change",{bubbles:true}))}});}}catch(e){}},2500);
 // follow-through read next to the strangle odds badge
 const _v35BadgeHTMLV375=v35BadgeHTML;
 v35BadgeHTML=function(t){const h=_v35BadgeHTMLV375(t);const f=(window.__v375FT||{})[t];
