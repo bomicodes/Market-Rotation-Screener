@@ -1,3 +1,6 @@
+v37.10 — strangle day 1 never moves forward to a heavier day 2 (KSS/ANF/DKS were re-logged 11/24); a ticker is logged at most once
+per 7 days and the duplicates were removed.
+
 v37.9 — MAX_CONTRACT (Render env) sets the max premium per contract for the nightly board, logging and digest; the page adopts it
 (set to $200 on 11/24).
 

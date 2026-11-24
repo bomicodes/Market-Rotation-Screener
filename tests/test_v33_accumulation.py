@@ -342,6 +342,9 @@ def test_v376_confirm_day1_by_volume():
     v = df["Volume"].values.copy(); v[30] = 5_000_000; df["Volume"] = v
     # calendar maps day 1 to the session AFTER the spike (an "after-close" listing that was wrong)
     assert A.confirm_day1_index(df, 31) == 30
+    # a heavier day 2 never moves day 1 forward
+    v2 = df["Volume"].values.copy(); v2[31] = 9_000_000; df["Volume"] = v2
+    assert A.confirm_day1_index(df, 30) == 30
     # no spike anywhere -> keep the calendar's session
     df2 = _bars([100.0] * 32, vol=1_000_000)
     assert A.confirm_day1_index(df2, 31) == 31
