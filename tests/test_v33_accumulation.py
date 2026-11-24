@@ -363,3 +363,11 @@ def test_v377_digest_endpoint_is_public_and_quiet():
     p = {"available": True, "underlying": {"entry": 10, "stop": 11, "target": 8, "rr": 2},
          "single": {"cost": 150, "leg": {"expiration": "2026-12-18", "strike": 9.5, "type": "put"}}}
     assert A._dg_plan(p) == "entry 10 stop 11 tgt 8 rr 2 · 12-18 $9.5P ≈$150"
+
+
+def test_v378_universe_breadth():
+    import app as A, numpy as np
+    up = _bars(list(np.linspace(90, 110, 60)))
+    down = _bars(list(np.linspace(110, 90, 60)))
+    b = A.universe_breadth({"AAA": up, "BBB": down, "CCC": down})
+    assert b["n"] == 3 and b["above50_pct"] == 33 and b["new20_highs"] == 1 and b["new20_lows"] == 2

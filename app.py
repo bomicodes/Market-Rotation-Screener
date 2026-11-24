@@ -5803,8 +5803,29 @@ def _group_universe():
     return memberships,data,rrg
 
 
+def universe_breadth(data):
+    """v37.8: real breadth on the ~350-stock group universe (RSP/SPY can read
+    'improving' in a mega-cap-led sell-off while most stocks are falling)."""
+    a20=a50=hi=lo=n=0
+    for t,df in (data or {}).items():
+        if t in RRG_UNIVERSE or t=="SPY": continue
+        try:
+            c=df["Close"].dropna().astype(float)
+            if len(c)<55: continue
+            n+=1; last=float(c.iloc[-1])
+            a20+=last>float(c.tail(20).mean()); a50+=last>float(c.tail(50).mean())
+            hi+=last>=float(c.tail(20).max()); lo+=last<=float(c.tail(20).min())
+        except Exception: continue
+    if not n: return None
+    return {"n":n,"above20_pct":round(100*a20/n),"above50_pct":round(100*a50/n),"new20_highs":hi,"new20_lows":lo}
+
+
 def group_flow_payload():
     memberships,data,rrg=_group_universe()
+    try:
+        br=universe_breadth(data)
+        if br: br["asof"]=str(max(df.index[-1] for df in data.values()).date()); _kv_put("breadth-latest",br)
+    except Exception: pass
     groups=group_volume_rotation(data,memberships,rrg)
     return {"available":bool(groups),"groups":groups,"as_of":str(max((df.index[-1] for df in data.values()),default=pd.Timestamp.now()).date()) if data else None,
             "method":"20 sessions: % of a group's top-15 holdings with up/down-day volume ≥ 1.2 minus % ≤ 0.83, next to the group's RRG quadrant vs SPY."}
@@ -7361,6 +7382,12 @@ def build_digest(kind="nightly"):
     m=get("/api/market"); out=[]
     i=(m.get("internals") or {}); spy=i.get("SPY") or {}; vix=i.get("VIX") or {}
     st=_nightly_public_status()
+    br=_kv_get("breadth-latest",{}) or {}
+    rr=lambda k:(i.get(k) or {})
+    fmt=lambda v:"—" if v is None else f"{v:+.2f}%"
+    out.append(f"[digest breadth] RSP/SPY {fmt(rr('RSP').get('d5'))} 5d {fmt(rr('RSP').get('d20'))} 20d · IWM/SPY {fmt(rr('IWM').get('d5'))} 5d · QQQ/SPY {fmt(rr('QQQ').get('d5'))} 5d · "
+               f"credit HYG/LQD {fmt(rr('CREDIT').get('d5'))} 5d {fmt(rr('CREDIT').get('d20'))} 20d · participation {m.get('participation')} · risk appetite {m.get('risk_appetite')} · "
+               f"universe ({br.get('asof')}, {br.get('n')} stocks): {br.get('above20_pct')}% above 20-day, {br.get('above50_pct')}% above 50-day, {br.get('new20_highs')} at 20-day highs vs {br.get('new20_lows')} at lows")
     out.append(f"[digest {kind} {m.get('asof') or ''}] tape {server_regime(m)} · shorts {'allowed' if server_shorts_ok(m) else 'held back'} · "
                f"SPY {spy.get('value') and round(spy['value'],2)} ({spy.get('d1') and round(spy['d1'],2)}% d, {spy.get('d5') and round(spy['d5'],2)}% 5d, {spy.get('d20') and round(spy['d20'],2)}% 20d, above20={spy.get('above20')}) · VIX {vix.get('value') and round(vix['value'],1)} · "
                f"nightly {st.get('stage')} {st.get('started')}→{st.get('finished')} errors={len(st.get('errors') or [])}")

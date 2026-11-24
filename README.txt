@@ -1,3 +1,6 @@
+v37.8 — real breadth from the ~350-stock group universe (% above 20/50-day, 20-day highs vs lows), saved by the group-flow stage
+and printed in the digest next to RSP/SPY, IWM/SPY, QQQ/SPY and credit.
+
 v37.7 — plain-text digest written to the server log (board, open trades marked midday, closed trades, lane records, strangles):
 after each nightly, at 12:30 ET on trading days, and on demand via GET /api/digest/print (public, returns no data, 5-min limit) or the
 "Print digest" workflow. Lets the board be checked through the Render logs without opening the site.
