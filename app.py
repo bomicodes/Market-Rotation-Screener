@@ -7141,7 +7141,9 @@ def confirm_day1_index(df, i):
     its neighbours, if it is at least 1.5x the 20-day average."""
     if i is None or "Volume" not in getattr(df,"columns",[]): return i
     v=df["Volume"].astype(float).values; best=i; bestr=0.0
-    for j in (i-1,i,i+1):
+    # v37.10: only the calendar's session or the one BEFORE it -- a heavy day 2
+    # (KSS/ANF/DKS 11/24) must not become a second "day 1"
+    for j in (i-1,i):
         if j<1 or j>=len(df): continue
         base=float(np.nanmean(v[max(0,j-21):j-1])) if j>2 else 0.0
         r=(v[j]/base) if base>0 else 0.0
@@ -7274,8 +7276,12 @@ def log_post_earnings_strangles(budget=250, cap=14):
     backend=_setup_storage_backend(); now=datetime.utcnow().isoformat(timespec="seconds")+"Z"; n=0
     with _setup_db() as con:
         _strangle_table(con,backend)
+        wk=(pd.Timestamp.now()-pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+        q="SELECT ticker,trade_date FROM strangle_log WHERE trade_date>=%s" if backend=="postgresql" else "SELECT ticker,trade_date FROM strangle_log WHERE trade_date>=?"
+        recent_t={(dict(x) if hasattr(x,"keys") else dict(zip(("ticker","trade_date"),x)))["ticker"] for x in con.execute(q,(wk,)).fetchall()}
         for r in rows:
             if r.get("error") or not (r.get("call") or {}).get("symbol") or not (r.get("put") or {}).get("symbol"): continue
+            if r["ticker"] in recent_t: continue
             vals=(r["trade_date"],r["ticker"],json.dumps(r,default=str),now)
             if backend=="postgresql": con.execute("INSERT INTO strangle_log(trade_date,ticker,payload,updated_at) VALUES(%s,%s,%s,%s) ON CONFLICT(trade_date,ticker) DO NOTHING",vals)
             else: con.execute("INSERT OR IGNORE INTO strangle_log(trade_date,ticker,payload,updated_at) VALUES(?,?,?,?)",vals)
@@ -7291,6 +7297,19 @@ def update_strangle_outcomes(days=40):
     backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d"); n=0
     with _setup_db() as con:
         _strangle_table(con,backend); con.commit()
+        # v37.10: drop a ticker's later rows logged within 7 days of an earlier one (heavy day 2 re-logged as day 1)
+        try:
+            q0="SELECT trade_date,ticker FROM strangle_log WHERE trade_date>=%s ORDER BY trade_date" if backend=="postgresql" else "SELECT trade_date,ticker FROM strangle_log WHERE trade_date>=? ORDER BY trade_date"
+            first={}; drop=[]
+            for x in con.execute(q0,(cutoff,)).fetchall():
+                xx=dict(x) if hasattr(x,"keys") else dict(zip(("trade_date","ticker"),x))
+                t,d=xx["ticker"],str(xx["trade_date"])[:10]
+                if t in first and (pd.Timestamp(d)-pd.Timestamp(first[t])).days<=7: drop.append((d,t))
+                else: first[t]=d
+            for d,t in drop:
+                con.execute("DELETE FROM strangle_log WHERE trade_date=%s AND ticker=%s" if backend=="postgresql" else "DELETE FROM strangle_log WHERE trade_date=? AND ticker=?",(d,t))
+            con.commit()
+        except Exception: pass
         q="SELECT trade_date,ticker,payload,outcome FROM strangle_log WHERE trade_date>=%s" if backend=="postgresql" else "SELECT trade_date,ticker,payload,outcome FROM strangle_log WHERE trade_date>=?"
         rows=con.execute(q,(cutoff,)).fetchall()
     for r in rows:
