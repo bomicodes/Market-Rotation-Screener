@@ -9613,7 +9613,7 @@ body.v32 [hidden]{display:none!important}.v32LogForm input{width:72px;min-height
    <section class="v32Plan">
     <div class="v32Title"><h1>Tonight's plan</h1><span id="v32PlanSub" class="v32Muted"></span>
      <div class="v32Seg" role="group" aria-label="Filter ideas">
-      <button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button><button type="button" data-v32-filter="base">Bases</button><button type="button" data-v32-filter="pead">Earnings drift</button>
+      <button type="button" data-v32-filter="focus" title="Only the setups with the best record: pullbacks with the trend, failed-bounce puts, and Strong post-earnings strangles">Focus</button><button type="button" data-v32-filter="all" class="on">All</button><button type="button" data-v32-filter="long">Long</button><button type="button" data-v32-filter="short">Short</button><button type="button" data-v32-filter="laggard">Laggards</button><button type="button" data-v32-filter="base">Bases</button><button type="button" data-v32-filter="pead">Earnings drift</button>
      </div>
     </div>
     <div id="v32Cards" class="v32Cards"></div>
@@ -14657,7 +14657,7 @@ function v32RenderTonight(){
  try{v32RenderMeta();v32RenderTape();}catch(e){}
  const host=document.getElementById("v32Cards");if(!host)return;
  const {ideas,filtered}=v32CollectIdeas();
- const shown=ideas.filter(c=>v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard")||(v32Filter==="base"&&c.kind==="base")||(v32Filter==="pead"&&c.kind==="pead"));
+ const shown=ideas.filter(c=>(v32Filter==="focus"&&v3712IsFocus(c))||v32Filter==="all"||(v32Filter==="long"&&c.dir!=="bearish")||(v32Filter==="short"&&c.dir==="bearish")||(v32Filter==="laggard"&&c.kind==="laggard")||(v32Filter==="base"&&c.kind==="base")||(v32Filter==="pead"&&c.kind==="pead"));
  const st=document.getElementById("topSetupsStatus")?.textContent||"";
  const sub=document.getElementById("v32PlanSub");
  const held=[...(window.__v35HeldShorts||[])];
@@ -15213,6 +15213,28 @@ function v375Render(){
 const _v32RenderRecordV375=v32RenderRecord;
 v32RenderRecord=function(){const o=_v32RenderRecordV375.apply(this,arguments);try{v375Render()}catch(e){}return o};
 setTimeout(()=>{v375LoadStrangles()},5000);
+
+// ---- v37.12 Focus view: only the setups with the best record ----------------------------
+// Pullbacks with the trend (the only positive lane, 75% reached +0.5R), failed-bounce
+// puts (the put version of a pullback) and post-earnings strangles rated Strong.
+function v3712IsFocus(c){return c&&(c.lane==="pullback"||c.lane==="failed_bounce")}
+function v3712StrongStrangles(){
+ const j=window.__strRec;if(!j)return [];const rec=j.recent||[];if(!rec.length)return [];
+ const last=rec.map(r=>String(r.trade_date)).sort().pop();
+ return rec.filter(r=>String(r.trade_date)===last&&r.follow_through==="Strong");}
+const _v32RenderTonightV3712=v32RenderTonight;
+v32RenderTonight=function(){const o=_v32RenderTonightV3712();
+ try{if(v32Filter==="focus"){const host=document.getElementById("v32Cards");if(host){
+   const ss=v3712StrongStrangles();
+   const panel=`<section class="v32Panel" style="margin-bottom:10px"><div class="v32PanelHead"><h2>Focus</h2><span class="v32Muted">Pullbacks with the trend · failed-bounce puts · Strong post-earnings strangles · everything else is under “All”</span></div>${
+     ss.length?`<div style="font-size:13px"><b>Strangles, day 1 ${v32E(String(ss[0].trade_date).slice(5))} (bought at that close):</b> ${ss.map(r=>`${v32E(r.ticker)} ${v32E(r.tenor||"")} $${v32E(r.put?.strike??"")}P / $${v32E(r.call?.strike??"")}C${r.cost?` ≈ ${v32$(r.cost,0)}`:""}`).join(" · ")}</div>`:`<div class="v32Muted" style="font-size:13px">No Strong-follow-through strangle from the latest session.</div>`}</section>`;
+   if(!host.querySelector("article.v32Card"))host.innerHTML=panel+`<div class="v32Empty">No focus setups tonight. On nights like this the best trade is often no trade.</div>`;
+   else host.insertAdjacentHTML("afterbegin",panel);}}}catch(e){console.warn("focus",e)}
+ return o;};
+document.addEventListener("click",e=>{const f=e.target?.closest?.("[data-v32-filter]");if(f){try{localStorage.setItem("v3712Filter",f.dataset.v32Filter)}catch(err){}}},true);
+(function(){let f="focus";try{f=localStorage.getItem("v3712Filter")||"focus"}catch(e){}
+ v32Filter=f;document.querySelectorAll("[data-v32-filter]").forEach(b=>b.classList.toggle("on",b.dataset.v32Filter===f));
+ setTimeout(()=>{try{v32RenderTonight()}catch(e){}},6000);})();
 
 // ---- v37.11 reversal / counter-trend ideas hidden from Tonight's plan (still logged) -----
 // 11/12-11/24: VP + STRAT reversal 3-38, rejection 0-2. Tracked in the background in
