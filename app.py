@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "37.1"
+APP_VERSION = "37.15"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5005,8 +5005,17 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
     the two can be compared. Limit/pullback plans are unchanged."""
     fill=row.get("fill") or ("limit" if row.get("lane")=="pullback" else "stop")
     if fill!="stop":
-        return _evaluate_close_confirm(row, df, max_wait, max_hold)
+        out=_evaluate_close_confirm(row, df, max_wait, max_hold)
+        try:
+            p=_evaluate_partial_be(row, df, out, max_hold)
+            if p: out["pbe"]=p
+        except Exception: pass
+        return out
     out=_evaluate_trigger_failed2u(row, df, max_wait, max_hold, intraday)
+    try:
+        p=_evaluate_partial_be(row, df, out, max_hold)
+        if p: out["pbe"]=p
+    except Exception: pass
     try:
         alt=_evaluate_close_confirm(row, df, max_wait, max_hold)
         out["close_confirm"]={k:alt.get(k) for k in ("status","r","filled","fill_price","closed") if alt.get(k) is not None}
@@ -5018,6 +5027,60 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
     try: out["dip"]=_evaluate_support_dip(row, df, max_wait, max_hold)
     except Exception: pass
     return out
+
+
+def _evaluate_partial_be(row, df, primary, max_hold=15):
+    """v37.15 "half at +0.5R, then break-even" exit, graded on the SAME fill as the
+    primary result (same entry day and price). Before the partial: the plan's stop,
+    and for trigger plans the failed-2U/2D close exit. At +0.5R half is sold (+0.25R
+    banked) and the stop on the rest moves to the entry price; the rest exits at
+    break-even, the target, or time. R is the plan's risk from the fill price.
+    Conservative with daily bars: on any bar that touches both the stop and +0.5R the
+    stop counts; on a limit fill day the +0.5R touch doesn't count (it may have come
+    before the dip); the break-even stop is only checked from the bar after the partial.
+    A "win" is any trade that ends above zero, which here means the partial was hit."""
+    if not primary or not primary.get("filled") or primary.get("fill_price") is None: return None
+    if primary.get("status") not in ("win","loss","timeout","open"): return None
+    bull=str(row.get("direction") or "bullish")!="bearish"
+    trig=(row.get("fill") or ("limit" if row.get("lane")=="pullback" else "stop"))=="stop"
+    stop,target=float(row["stop"]),float(row["target"]); px=float(primary["fill_price"])
+    entry=float(row["entry"])
+    risk=abs(px-stop) or 1e-9
+    half=px+.5*risk if bull else px-.5*risk
+    tr=abs(target-px)/risk
+    idx=[str(x)[:10] for x in df.index]
+    if primary["filled"] not in idx: return None
+    fi=idx.index(primary["filled"])
+    partial=False
+    end=min(len(df),fi+max_hold)
+    for j in range(fi,end):
+        b=df.iloc[j]; hi,lo,cl=float(b["High"]),float(b["Low"]),float(b["Close"])
+        d=idx[j]
+        if not partial:
+            stop_hit=(lo<=stop) if bull else (hi>=stop)
+            # the primary grade already checked the fill day against hourly bars
+            if stop_hit and j==fi and primary.get("intraday_checked"): stop_hit=False
+            if stop_hit:
+                return {"status":"loss","r":-1.0,"partial":False,"closed":d}
+            hit=(hi>=half) if bull else (lo<=half)
+            if hit and not (j==fi and not trig):
+                partial=True
+                if (hi>=target) if bull else (lo<=target):
+                    return {"status":"win","r":round(.25+.5*tr,2),"partial":True,"exit":"target","closed":d}
+                continue
+            if trig and (((bull and cl<entry) or ((not bull) and cl>entry))):
+                r=((cl-px) if bull else (px-cl))/risk
+                return {"status":"win" if r>0 else "loss","r":round(r,2),"partial":False,"exit":"failed 2U" if bull else "failed 2D","closed":d}
+        else:
+            if (lo<=px) if bull else (hi>=px):
+                return {"status":"win","r":.25,"partial":True,"exit":"break-even","closed":d}
+            if (hi>=target) if bull else (lo<=target):
+                return {"status":"win","r":round(.25+.5*tr,2),"partial":True,"exit":"target","closed":d}
+    last=df.iloc[end-1]; cl=float(last["Close"]); cr=((cl-px) if bull else (px-cl))/risk
+    r=.25+.5*cr if partial else cr
+    done=len(df)>=fi+max_hold
+    if not done: return {"status":"open","r":round(r,2),"partial":partial}
+    return {"status":"win" if r>0 else "loss","r":round(r,2),"partial":partial,"exit":"time","closed":idx[end-1]}
 
 
 def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None, grace=False):
@@ -5203,7 +5266,9 @@ def update_setup_outcomes(days=45):
         # when the breakout never did) and kept updating while it is open
         _need_dip=_final and _trig and (("dip" not in prior) or (prior.get("dip") or {}).get("status") in ("waiting","open","pending"))
         _full=(not _final) or (_trig and "close_confirm" not in prior and prior.get("status")!="expired") or (_trig and _sameday)
-        if not _full and not _need_grace and not _need_dip: continue
+        # v37.15: add the half-at-+0.5R / break-even variant to every filled trade once
+        _need_pbe=_final and prior.get("status") in ("win","loss","timeout") and prior.get("filled") and ("pbe" not in prior or (prior.get("pbe") or {}).get("status")=="open")
+        if not _full and not _need_grace and not _need_dip and not _need_pbe: continue
         t=rr["ticker"]
         if t not in frames:
             try: frames[t]=dl_ohlc(t,"3mo").dropna(subset=["High","Low","Close"])
@@ -5224,6 +5289,11 @@ def update_setup_outcomes(days=45):
             if _need_dip:
                 try: out["dip"]=_evaluate_support_dip(pl,frames[t])
                 except Exception as e: out["dip"]={"status":"error","error":str(e)}
+            if _need_pbe:
+                try:
+                    p=_evaluate_partial_be(pl,frames[t],prior)
+                    if p: out["pbe"]=p
+                except Exception as e: out["pbe"]={"status":"error","error":str(e)}
         else:
           try: out=evaluate_setup_outcome(pl,frames[t],intraday=_intraday)
           except Exception as e: out={"status":"error","error":str(e)}
@@ -5280,6 +5350,8 @@ def track_record_payload(days=120):
             g.setdefault("dir_"+("short" if str(rr.get("direction"))=="bearish" else "long"),[]).append(float(oc["r"]))
         gr=oc.get("grace") or {}
         if gr.get("status") in ("win","loss","timeout") and gr.get("r") is not None: g.setdefault("gr",[]).append(float(gr["r"]))
+        pb=oc.get("pbe") or {}
+        if st in ("win","loss","timeout") and pb.get("status") in ("win","loss") and pb.get("r") is not None: g.setdefault("pbe",[]).append(float(pb["r"]))
         tag=pl.get("group_tag")
         if tag in ("with","against","neutral") and st in ("win","loss","timeout") and oc.get("r") is not None: g.setdefault("tag_"+tag,[]).append(float(oc["r"]))
         if st in ("win","loss","timeout") and oc.get("option_best_pct") is not None:
@@ -5303,6 +5375,8 @@ def track_record_payload(days=120):
             v=g.pop("dir_"+dk,[]); g[dk+"_n"]=len(v); g[dk+"_avg_r"]=round(float(np.mean(v)),2) if v else None; g[dk+"_wins"]=sum(1 for x in v if x>0)
         tp=g.pop("tp1",[]); g["tp1_n"]=len(tp); g["tp1_rate"]=round(100*sum(tp)/len(tp)) if tp else None
         gr=g.pop("gr",[]); g["grace_n"]=len(gr); g["grace_avg_r"]=round(float(np.mean(gr)),2) if gr else None
+        pb=g.pop("pbe",[]); g["pbe_n"]=len(pb); g["pbe_avg_r"]=round(float(np.mean(pb)),2) if pb else None
+        g["pbe_wins"]=sum(1 for x in pb if x>0); g["pbe_win_rate"]=round(100*g["pbe_wins"]/len(pb)) if pb else None
         for tg in ("with","against","neutral"):
             v=g.pop("tag_"+tg,[]); g[tg+"_n"]=len(v); g[tg+"_avg_r"]=round(float(np.mean(v)),2) if v else None
             g[tg+"_wins"]=sum(1 for x in v if x>0)
@@ -7501,7 +7575,8 @@ def win_rate_slices(days=60, min_n=3):
         recs.append({"lane":rr["lane"],"dir":"put" if rr["direction"]=="bearish" else "call","group":pl.get("group_tag") or "untagged",
                      "tape":pl.get("regime") or "?","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
                      "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50),
-                     "mfe":_safe_float(oc.get("mfe_r")),"days":oc.get("days")})
+                     "mfe":_safe_float(oc.get("mfe_r")),"days":oc.get("days"),
+                     "pbe":(oc.get("pbe") or {}) if (oc.get("pbe") or {}).get("status") in ("win","loss") else None})
     keys=("lane","dir","group","tape","rr")
     out=[]
     def add(name,sub):
@@ -7518,7 +7593,15 @@ def win_rate_slices(days=60, min_n=3):
     reach=lambda sub,x:round(100*sum(1 for z in sub if z["mfe"]>=x)/len(sub)) if sub else None
     mfe={"n":len(mf),**{f"reached_{x}R":reach(mf,x) for x in (0.25,0.5,0.75,1.0,1.5,2.0)},
          "by_lane":{ln:{"n":len([z for z in mf if z["lane"]==ln]),"0.5R":reach([z for z in mf if z["lane"]==ln],.5),"1R":reach([z for z in mf if z["lane"]==ln],1.0)} for ln in sorted({z["lane"] for z in mf})}}
-    return {"mfe":mfe,"closed":len(recs),"overall_win":round(100*sum(z["win"] for z in recs)/len(recs)) if recs else None,
+    def _pb(sub):
+        v=[z["pbe"] for z in sub if z["pbe"]]
+        if not v: return None
+        return {"n":len(v),"win":round(100*sum(1 for p in v if float(p["r"])>0)/len(v)),"avg_r":round(float(np.mean([float(p["r"]) for p in v])),2),
+                "plan_win":round(100*sum(1 for z in sub if z["pbe"] and z["win"])/len(v)),"plan_avg_r":round(float(np.mean([z["r"] for z in sub if z["pbe"]])),2),
+                "exits":{e:sum(1 for p in v if p.get("exit",("stop" if float(p["r"])<=-1 else "?"))==e) for e in ("break-even","target","time","failed 2U","failed 2D","stop")}}
+    pbe={"all":_pb(recs),"by_lane":{ln:_pb([z for z in recs if z["lane"]==ln]) for ln in sorted({z["lane"] for z in recs})},
+         "by_dir":{d:_pb([z for z in recs if z["dir"]==d]) for d in ("call","put")}}
+    return {"pbe":pbe,"mfe":mfe,"closed":len(recs),"overall_win":round(100*sum(z["win"] for z in recs)/len(recs)) if recs else None,
             "overall_tp1":round(100*sum(z["tp1"] for z in recs)/len(recs)) if recs else None,"slices":out}
 
 
@@ -7529,6 +7612,10 @@ def print_digest(kind="nightly"):
             w=win_rate_slices(); sl=w["slices"]
             print(f"[digest edge] {w['closed']} closed · win {w['overall_win']}% · option +50% hit {w['overall_tp1']}% · best: "+" | ".join(f"{n} n{c} win {wr}% avg {ar}R tp1 {t}%" for n,c,wr,ar,t in sl[:14]),flush=True)
             print(f"[digest edge mfe] best move in your favour before exit: {json.dumps(w['mfe'])}",flush=True)
+            pb=w.get("pbe") or {}
+            def _pbs(name,x): return f"{name} n{x['n']} win {x['win']}% avg {x['avg_r']:+}R (plan as-is: win {x['plan_win']}% avg {x['plan_avg_r']:+}R)" if x else f"{name} —"
+            print("[digest pbe] half at +0.5R then break-even: "+" | ".join([_pbs("all",pb.get("all"))]+[_pbs(k,v) for k,v in (pb.get("by_lane") or {}).items() if v]+[_pbs(k,v) for k,v in (pb.get("by_dir") or {}).items() if v]),flush=True)
+            if pb.get("all"): print(f"[digest pbe exits] {json.dumps(pb['all']['exits'])}",flush=True)
             print("[digest edge worst] "+" | ".join(f"{n} n{c} win {wr}% avg {ar}R" for n,c,wr,ar,t in sorted(sl,key=lambda t:(t[2],-t[1]))[:10]),flush=True)
         except Exception as e: print(f"[digest edge error] {e!r}",flush=True)
     except Exception as e:
@@ -14784,7 +14871,7 @@ function v32RenderRecord(){
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
-  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.tp1_n?`<div style="grid-column:1/-1"><div class="k">Option reached +50% (your first take-profit)</div><div class="v32Num">${l.tp1_rate}% of ${l.tp1_n} closed</div></div>`:""}${l.short_n?`<div style="grid-column:1/-1"><div class="k">Calls vs puts</div><div class="v32Num">${l.long_n?`calls: ${(l.long_avg_r>0?"+":"")+l.long_avg_r}R · ${l.long_wins}/${l.long_n} won`:"calls: —"} · puts: ${(l.short_avg_r>0?"+":"")+l.short_avg_r}R · ${l.short_wins}/${l.short_n} won</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.pbe_n?`<div style="grid-column:1/-1"><div class="k">If you took half at +0.5R and moved the stop to break-even</div><div class="v32Num">${l.pbe_win_rate}% won · ${(l.pbe_avg_r>0?"+":"")+l.pbe_avg_r}R avg · ${l.pbe_n} closed</div></div>`:""}${l.tp1_n?`<div style="grid-column:1/-1"><div class="k">Option reached +50% (your first take-profit)</div><div class="v32Num">${l.tp1_rate}% of ${l.tp1_n} closed</div></div>`:""}${l.short_n?`<div style="grid-column:1/-1"><div class="k">Calls vs puts</div><div class="v32Num">${l.long_n?`calls: ${(l.long_avg_r>0?"+":"")+l.long_avg_r}R · ${l.long_wins}/${l.long_n} won`:"calls: —"} · puts: ${(l.short_avg_r>0?"+":"")+l.short_avg_r}R · ${l.short_wins}/${l.short_n} won</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
  const rows=document.getElementById("v32RecRows");
  if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
  const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};

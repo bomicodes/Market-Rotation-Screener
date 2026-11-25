@@ -374,3 +374,29 @@ def test_v378_universe_breadth():
     down = _bars(list(np.linspace(110, 90, 60)))
     b = A.universe_breadth({"AAA": up, "BBB": down, "CCC": down})
     assert b["n"] == 3 and b["above50_pct"] == 33 and b["new20_highs"] == 1 and b["new20_lows"] == 2
+
+
+def test_v3715_partial_then_breakeven_variant():
+    import app as A, pandas as pd
+    idx = pd.to_datetime(["2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16"])
+    row = {"trade_date": "2026-11-10", "direction": "bullish", "entry": 100, "stop": 98, "target": 104, "fill": "limit", "lane": "pullback"}
+    # fills at 100 on 11/11 (a high of 101.5 that day doesn't count -- it may have come before the dip),
+    # +0.5R (101) on 11/12, back to break-even on 11/13 -> +0.25R, a win
+    df = pd.DataFrame({"Open": [102, 100.8, 100.5, 101, 101], "High": [102.5, 101.5, 101.4, 101.1, 101],
+                       "Low": [101, 99.8, 100.2, 99.9, 100], "Close": [101.5, 100.4, 101.2, 100.2, 100.5]}, index=idx)
+    p = A.evaluate_setup_outcome(row, df)["pbe"]
+    assert p["status"] == "win" and p["r"] == 0.25 and p["exit"] == "break-even" and p["closed"] == "2026-11-13"
+    # partial then target: 0.25 + 0.5 * 2R
+    df2 = df.copy(); df2.loc["2026-11-13", "High"] = 104.2; df2.loc["2026-11-13", "Low"] = 100.5
+    p2 = A.evaluate_setup_outcome(row, df2)["pbe"]
+    assert p2["exit"] == "target" and p2["r"] == 1.25
+    # stopped out before +0.5R: the full -1R
+    df3 = df.copy(); df3.loc["2026-11-12", "High"] = 100.6; df3.loc["2026-11-12", "Low"] = 97.5
+    p3 = A.evaluate_setup_outcome(row, df3)["pbe"]
+    assert p3["status"] == "loss" and p3["r"] == -1.0
+    # bearish mirror on a trigger plan: fills on the break of 50, +0.5R = 49
+    rowp = {"trade_date": "2026-11-10", "direction": "bearish", "entry": 50, "stop": 52, "target": 46, "fill": "stop", "lane": "catch_down"}
+    dfp = pd.DataFrame({"Open": [51, 50.5, 49.6, 49.4, 49.8], "High": [51.5, 50.6, 49.9, 50.1, 50],
+                        "Low": [50.5, 48.9, 49.2, 49.3, 49.5], "Close": [50.8, 49.7, 49.5, 49.6, 49.9]}, index=idx)
+    pp = A.evaluate_setup_outcome(rowp, dfp)["pbe"]
+    assert pp["status"] == "win" and pp["r"] == 0.25 and pp["exit"] == "break-even"
