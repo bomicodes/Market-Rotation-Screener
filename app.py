@@ -7535,8 +7535,59 @@ def print_digest(kind="nightly"):
         print(f"[digest error] {e!r}",flush=True)
 
 
+def ticker_check_lines(tickers, budget):
+    """v37.14: run named tickers through the screener and describe them for the log."""
+    client=app.test_client()
+    with client.session_transaction() as sess: sess["authenticated"]=True
+    def get(url):
+        try: return client.get(url).get_json(silent=True) or {}
+        except Exception: return {}
+    out=[]
+    fl=(get("/api/plan-flow?tickers="+",".join(tickers)).get("rows") or {})
+    for t in tickers:
+        try:
+            st=_context_structure(t)
+            if not st.get("available"): out.append(f"[digest check {t}] no price structure"); continue
+            pb=st.get("pullback") or {}
+            try: vpb=vp_bundle_cached(t); vpp=(vpb.get("plans") or {}) if vpb.get("available") else {}; vp=vpb.get("vp") or {}
+            except Exception: vpp={}; vp={}
+            line=(f"[digest check {t}] spot {st.get('spot')} · 20d {st.get('return_20d')}% 50d {st.get('return_50d')}% · sma20 {st.get('sma20')} sma50 {st.get('sma50')} · "
+                  f"structure {st.get('direction')} strength {st.get('trend_strength')} · ATR {st.get('atr14')} · breakout trigger {st.get('trigger')} stop {st.get('invalidation')} t2 {st.get('target2')} rr {st.get('rr_to_target2')} · "
+                  f"pullback {pb.get('direction')} entry {pb.get('entry')} stop {pb.get('stop')} tgt {pb.get('target')} in_zone {pb.get('in_zone')} · "
+                  f"VP poc {vp.get('poc')} val {vp.get('val')} vah {vp.get('vah')}")
+            out.append(line)
+            for d in ("bullish","bearish"):
+                for plan in ("pullback","vp","breakout"):
+                    p=get(f"/api/entry-plan/{t}?direction={d}&plan={plan}&budget={budget}")
+                    if p.get("available") and (p.get("plan")==plan):
+                        o=(p.get("broker_order") or {}).get("entry") or {}
+                        out.append(f"[digest check {t} {d} {plan}] {_dg_plan(p)} · in_zone {(p.get('underlying') or {}).get('in_zone')} · webull {o.get('type')} {o.get('stop','')}/{o.get('limit')} · notes {' '.join(p.get('notes') or [])[:300]}")
+            f=fl.get(t) or {}
+            out.append(f"[digest check {t} flow] {f.get('read')} · score {f.get('score')} · next earnings {f.get('next_earnings')} ({f.get('days_to_earnings')}d)")
+        except Exception as e:
+            out.append(f"[digest check {t} error] {e!r}")
+    return out
+
+
 @app.get("/api/digest/print")
 def api_digest_print():
+    # v37.14: ?tickers=A,B,C prints a ticker check instead (public trigger; output goes only to the server log)
+    raw=str(request.args.get("tickers") or "")
+    if raw:
+        tick=[]
+        for x in raw.split(","):
+            x=x.upper().strip()
+            if x and len(x)<=6 and x.replace("-","").replace(".","").isalnum() and x not in tick: tick.append(x)
+        tick=tick[:6]
+        if not tick: return jsonify({"ok":False,"queued":False})
+        if time.time()-DIGEST_STATE.get("last_check",0)<60: return jsonify({"ok":True,"queued":False,"reason":"a check ran in the last minute"})
+        DIGEST_STATE["last_check"]=time.time()
+        def run():
+            try:
+                for line in ticker_check_lines(tick,board_budget(_kv_get("nightly-hints",{}) or {})): print(line[:3500],flush=True)
+            except Exception as e: print(f"[digest check error] {e!r}",flush=True)
+        threading.Thread(target=run,daemon=True,name="digest-check").start()
+        return jsonify({"ok":True,"queued":True})
     if time.time()-DIGEST_STATE["last"]<300: return jsonify({"ok":True,"queued":False,"reason":"printed in the last 5 minutes"})
     DIGEST_STATE["last"]=time.time()
     threading.Thread(target=print_digest,args=("on demand",),daemon=True,name="digest").start()
