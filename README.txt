@@ -1,3 +1,7 @@
+v37.15 — every filled setup is also graded with a "half at +0.5R, stop to break-even" exit on the same fill (before the partial:
+the plan's stop and, for trigger plans, the failed-2U/2D close; after it: break-even, target or time). Shown in the Track record panel
+and printed in the digest ([digest pbe]) next to the plan as-is, by lane and calls vs puts. Closed trades are regraded once by the nightly.
+
 v37.12 — Focus filter on Tonight's plan (the default): pullbacks with the trend, failed-bounce puts and the latest session's Strong
 post-earnings strangles; everything else stays under All.
 
