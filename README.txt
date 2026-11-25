@@ -1,3 +1,6 @@
+v37.12 — Focus filter on Tonight's plan (the default): pullbacks with the trend, failed-bounce puts and the latest session's Strong
+post-earnings strangles; everything else stays under All.
+
 v37.11 — reversal/counter-trend ideas hidden from Tonight's plan (still logged; a "show" link brings them back). Track record adds
 the share of trades whose option reached +50%. Digest adds win-rate slices (lane, direction, group tag, market read, R/R and pairs).
 
