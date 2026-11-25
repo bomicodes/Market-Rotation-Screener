@@ -5282,6 +5282,8 @@ def track_record_payload(days=120):
         if gr.get("status") in ("win","loss","timeout") and gr.get("r") is not None: g.setdefault("gr",[]).append(float(gr["r"]))
         tag=pl.get("group_tag")
         if tag in ("with","against","neutral") and st in ("win","loss","timeout") and oc.get("r") is not None: g.setdefault("tag_"+tag,[]).append(float(oc["r"]))
+        if st in ("win","loss","timeout") and oc.get("option_best_pct") is not None:
+            g.setdefault("tp1",[]).append(float(oc["option_best_pct"])>=50)
         if st in ("win","loss","timeout") and oc.get("option_return_pct") is not None:
             g.setdefault("opt",[]).append(float(oc["option_return_pct"]))
     lanes=[]
@@ -5299,6 +5301,7 @@ def track_record_payload(days=120):
         g["dip_missed_winners"]=sum(1 for s_,_,ps,pr in da if s_=="not filled" and ps=="win")
         for dk in ("long","short"):
             v=g.pop("dir_"+dk,[]); g[dk+"_n"]=len(v); g[dk+"_avg_r"]=round(float(np.mean(v)),2) if v else None; g[dk+"_wins"]=sum(1 for x in v if x>0)
+        tp=g.pop("tp1",[]); g["tp1_n"]=len(tp); g["tp1_rate"]=round(100*sum(tp)/len(tp)) if tp else None
         gr=g.pop("gr",[]); g["grace_n"]=len(gr); g["grace_avg_r"]=round(float(np.mean(gr)),2) if gr else None
         for tg in ("with","against","neutral"):
             v=g.pop("tag_"+tg,[]); g[tg+"_n"]=len(v); g[tg+"_avg_r"]=round(float(np.mean(v)),2) if v else None
@@ -7460,16 +7463,54 @@ def build_digest(kind="nightly"):
     out.append("[digest trades open] "+(" | ".join(opn) or "none"))
     out.append("[digest trades closed 12d] "+(" | ".join(done[:30]) or "none"))
     lanes_=tr.get("lanes") or []
-    out.append("[digest lanes] "+" | ".join(f"{l['lane']} {l.get('wins')}-{l.get('losses')} avg {l.get('avg_r')}R calls {l.get('long_avg_r')} puts {l.get('short_avg_r')}" for l in lanes_))
+    out.append("[digest lanes] "+" | ".join(f"{l['lane']} {l.get('wins')}-{l.get('losses')} win {l.get('win_rate')}% avg {l.get('avg_r')}R · +50% premium hit {l.get('tp1_rate')}% of {l.get('tp1_n')} · calls {l.get('long_avg_r')} puts {l.get('short_avg_r')}" for l in lanes_))
     sr=get("/api/strangle-record")
     out.append(f"[digest strangles] closed {sr.get('closed')} won {sr.get('wins')} avg {sr.get('avg_pct')}% tp {sr.get('tp_hits')} · by follow-through {json.dumps((sr.get('by') or {}).get('follow_through') or {})} · "+" | ".join(
         f"{x.get('ticker')} {str(x.get('trade_date'))[5:]} {x.get('tenor')} ${(x.get('put') or {}).get('strike')}P/${(x.get('call') or {}).get('strike')}C ft {x.get('follow_through')} → {(x.get('outcome') or {}).get('status')} {(x.get('outcome') or {}).get('pct')}" for x in (sr.get("recent") or [])[:10]))
     return out
 
 
+def win_rate_slices(days=60, min_n=3):
+    """v37.11: where do the logged setups win? Win rate (r > 0, plan followed) and
+    option +50% hit rate by lane, direction, group tag, market read, R/R and
+    with/against the group -- and the best two-way combinations."""
+    backend=_setup_storage_backend(); cutoff=(pd.Timestamp.now()-pd.Timedelta(days=days)).strftime("%Y-%m-%d")
+    with _setup_db() as con:
+        q="SELECT lane,direction,payload,outcome FROM setup_log WHERE trade_date>=%s" if backend=="postgresql" else "SELECT lane,direction,payload,outcome FROM setup_log WHERE trade_date>=?"
+        rows=con.execute(q,(cutoff,)).fetchall()
+    recs=[]
+    for r in rows:
+        rr=dict(r) if hasattr(r,"keys") else dict(zip(("lane","direction","payload","outcome"),r))
+        oc=json.loads(rr["outcome"]) if rr.get("outcome") else {}
+        if oc.get("status") not in ("win","loss","timeout") or oc.get("r") is None: continue
+        pl=json.loads(rr["payload"]); x=_safe_float(pl.get("rr"))
+        recs.append({"lane":rr["lane"],"dir":"put" if rr["direction"]=="bearish" else "call","group":pl.get("group_tag") or "untagged",
+                     "tape":pl.get("regime") or "?","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
+                     "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50)})
+    keys=("lane","dir","group","tape","rr")
+    out=[]
+    def add(name,sub):
+        if len(sub)>=min_n: out.append((name,len(sub),round(100*sum(z["win"] for z in sub)/len(sub)),round(float(np.mean([z["r"] for z in sub])),2),round(100*sum(z["tp1"] for z in sub)/len(sub))))
+    for k in keys:
+        for v in sorted({z[k] for z in recs}): add(f"{k}={v}",[z for z in recs if z[k]==v])
+    for i,k1 in enumerate(keys):
+        for k2 in keys[i+1:]:
+            for v1 in {z[k1] for z in recs}:
+                for v2 in {z[k2] for z in recs}:
+                    add(f"{k1}={v1}+{k2}={v2}",[z for z in recs if z[k1]==v1 and z[k2]==v2])
+    out.sort(key=lambda t:(-t[2],-t[1]))
+    return {"closed":len(recs),"overall_win":round(100*sum(z["win"] for z in recs)/len(recs)) if recs else None,
+            "overall_tp1":round(100*sum(z["tp1"] for z in recs)/len(recs)) if recs else None,"slices":out}
+
+
 def print_digest(kind="nightly"):
     try:
         for line in build_digest(kind): print(line[:3500],flush=True)
+        try:
+            w=win_rate_slices(); sl=w["slices"]
+            print(f"[digest edge] {w['closed']} closed · win {w['overall_win']}% · option +50% hit {w['overall_tp1']}% · best: "+" | ".join(f"{n} n{c} win {wr}% avg {ar}R tp1 {t}%" for n,c,wr,ar,t in sl[:14]),flush=True)
+            print("[digest edge worst] "+" | ".join(f"{n} n{c} win {wr}% avg {ar}R" for n,c,wr,ar,t in sorted(sl,key=lambda t:(t[2],-t[1]))[:10]),flush=True)
+        except Exception as e: print(f"[digest edge error] {e!r}",flush=True)
     except Exception as e:
         print(f"[digest error] {e!r}",flush=True)
 
@@ -14672,7 +14713,7 @@ function v32RenderRecord(){
  const lanes=document.getElementById("v32RecLanes");
  if(lanes)lanes.innerHTML=(tr.lanes||[]).length?(tr.lanes||[]).map(l=>`<div class="v32Tile" style="border-top:3px solid ${colors[l.lane]||"#8B97A6"}"><span style="font-weight:700">${v32E(l.lane)}</span>
   <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px"><div><div class="k">Win rate</div><div class="v v32Num">${l.win_rate==null?"—":l.win_rate+"%"}</div></div><div><div class="k">Avg R</div><div class="v v32Num">${l.avg_r==null?"—":(l.avg_r>0?"+":"")+l.avg_r}</div></div>
-  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.short_n?`<div style="grid-column:1/-1"><div class="k">Calls vs puts</div><div class="v32Num">${l.long_n?`calls: ${(l.long_avg_r>0?"+":"")+l.long_avg_r}R · ${l.long_wins}/${l.long_n} won`:"calls: —"} · puts: ${(l.short_avg_r>0?"+":"")+l.short_avg_r}R · ${l.short_wins}/${l.short_n} won</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
+  <div><div class="k">Option avg</div><div class="v32Num">${l.option_avg_pct==null?"—":v32Pct(l.option_avg_pct,1)}</div></div><div><div class="k">Logged · filled</div><div class="v32Num">${l.logged} · ${l.filled}</div></div>${l.close_confirm_n?`<div style="grid-column:1/-1"><div class="k">If you'd waited for the close</div><div class="v32Num">${(l.close_confirm_avg_r>0?"+":"")+l.close_confirm_avg_r}R avg · ${l.close_confirm_n} closed</div></div>`:""}${l.grace_n?`<div style="grid-column:1/-1"><div class="k">If day 1 didn't count (failed-2U exit from day 2)</div><div class="v32Num">${(l.grace_avg_r>0?"+":"")+l.grace_avg_r}R avg · ${l.grace_n} closed</div></div>`:""}${l.tp1_n?`<div style="grid-column:1/-1"><div class="k">Option reached +50% (your first take-profit)</div><div class="v32Num">${l.tp1_rate}% of ${l.tp1_n} closed</div></div>`:""}${l.short_n?`<div style="grid-column:1/-1"><div class="k">Calls vs puts</div><div class="v32Num">${l.long_n?`calls: ${(l.long_avg_r>0?"+":"")+l.long_avg_r}R · ${l.long_wins}/${l.long_n} won`:"calls: —"} · puts: ${(l.short_avg_r>0?"+":"")+l.short_avg_r}R · ${l.short_wins}/${l.short_n} won</div></div>`:""}${l.dip_decided?`<div style="grid-column:1/-1"><div class="k">If you'd bought the dip instead (limit halfway to the stop, same size)</div><div class="v32Num">${l.dip_n?`${(l.dip_avg_r>0?"+":"")+l.dip_avg_r}R avg · ${l.dip_wins}/${l.dip_n} won`:"no closed trades yet"} · filled ${l.dip_filled} of ${l.dip_decided}${l.dip_missed_winners?` · missed ${l.dip_missed_winners} winner${l.dip_missed_winners===1?"":"s"}`:""}</div></div>`:""}${(l.with_n||l.against_n)?`<div style="grid-column:1/-1"><div class="k">With the group's money flow vs against</div><div class="v32Num">${l.with_n?`with: ${(l.with_avg_r>0?"+":"")+l.with_avg_r}R · ${l.with_wins}/${l.with_n} won`:"with: —"} · ${l.against_n?`against: ${(l.against_avg_r>0?"+":"")+l.against_avg_r}R · ${l.against_wins}/${l.against_n} won`:"against: —"}</div></div>`:""}</div></div>`).join(""):`<div class="v32Empty">Nothing logged yet.</div>`;
  const rows=document.getElementById("v32RecRows");
  if(rows)rows.innerHTML=(tr.recent||[]).length?`<div style="overflow-x:auto"><table class="v32Table"><thead><tr><th>Date</th><th>Ticker</th><th>Lane</th><th>Side</th><th>Entry</th><th>Stop</th><th>Target</th><th>Outcome</th><th>Option</th></tr></thead><tbody>${(tr.recent||[]).map(r=>{const o=r.outcome||{},c=o.status==="win"?"#3DD68C":o.status==="loss"?"#FF8A78":"#F2B84B";return `<tr><td class="v32Num v32Muted">${v32E(r.trade_date)}</td><td class="v32Num"><b>${v32E(r.ticker)}</b></td><td>${v32E(r.lane)}</td><td style="color:${r.direction==="bearish"?"#FF8A78":"#3DD68C"};font-weight:700;font-size:12px">${r.direction==="bearish"?"SHORT":"LONG"}</td><td class="v32Num">${v32$(r.entry)}</td><td class="v32Num v32Muted">${v32$(r.stop)}</td><td class="v32Num v32Muted">${v32$(r.target)}</td><td style="color:${c};font-weight:600">${v32E(o.status||"pending")}${o.r!=null?` ${o.r>0?"+":""}${o.r}R`:""}</td><td class="v32Num">${o.option_return_pct!=null?v32Pct(o.option_return_pct,1):"—"}</td></tr>`}).join("")}</tbody></table></div>`:`<div class="v32Empty">No setups logged yet.</div>`;
  const mine=document.getElementById("v32RecMine"),mt=tr.my_trades||{};
@@ -15166,6 +15207,23 @@ function v375Render(){
 const _v32RenderRecordV375=v32RenderRecord;
 v32RenderRecord=function(){const o=_v32RenderRecordV375.apply(this,arguments);try{v375Render()}catch(e){}return o};
 setTimeout(()=>{v375LoadStrangles()},5000);
+
+// ---- v37.11 reversal / counter-trend ideas hidden from Tonight's plan (still logged) -----
+// 11/12-11/24: VP + STRAT reversal 3-38, rejection 0-2. Tracked in the background in
+// case they start working; "show" brings them back for the session.
+window.__v3711ShowRev=false;
+const _v32CollectIdeasV3711=v32CollectIdeas;
+v32CollectIdeas=function(){const r=_v32CollectIdeasV3711();
+ const rev=r.ideas.filter(c=>c.kind==="counter"||c.lane==="vp_counter"||c.lane==="rejection");
+ window.__v3711Hidden=rev.map(c=>c.ticker);
+ if(!window.__v3711ShowRev)r.ideas=r.ideas.filter(c=>!rev.includes(c));
+ return r;};
+const _v32RenderTonightV3711=v32RenderTonight;
+v32RenderTonight=function(){const o=_v32RenderTonightV3711();
+ try{const sub=document.getElementById("v32PlanSub"),h=window.__v3711Hidden||[];
+   if(sub&&h.length&&!automaticTopSetupsRunning){sub.insertAdjacentHTML("beforeend",` · <a href="#" data-v3711-rev style="color:#8B97A6">${window.__v3711ShowRev?"hide":"show"} ${h.length} reversal idea${h.length===1?"":"s"} (losing lane, 3–38)</a>`);}}catch(e){}
+ return o;};
+document.addEventListener("click",e=>{const a=e.target?.closest?.("[data-v3711-rev]");if(!a)return;e.preventDefault();window.__v3711ShowRev=!window.__v3711ShowRev;try{v32RenderTonight()}catch(err){}});
 
 // ---- v37.9 the page follows the server's MAX_CONTRACT ---------------------------------
 setTimeout(async()=>{try{const j=await (await fetch("/api/nightly/status")).json();const mc=Number(j.max_contract);
