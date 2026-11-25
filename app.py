@@ -7424,6 +7424,20 @@ def build_digest(kind="nightly"):
     out.append(f"[digest {kind} {m.get('asof') or ''}] tape {server_regime(m)} · shorts {'allowed' if server_shorts_ok(m) else 'held back'} · "
                f"SPY {spy.get('value') and round(spy['value'],2)} ({spy.get('d1') and round(spy['d1'],2)}% d, {spy.get('d5') and round(spy['d5'],2)}% 5d, {spy.get('d20') and round(spy['d20'],2)}% 20d, above20={spy.get('above20')}) · VIX {vix.get('value') and round(vix['value'],1)} · "
                f"nightly {st.get('stage')} {st.get('started')}→{st.get('finished')} errors={len(st.get('errors') or [])}")
+    # v37.13: sector snapshot -- 1-day / 5-day return, RRG quadrant (fast), volume flow
+    try:
+        gf=(get("/api/group-flow").get("groups") or {}); secs=[]
+        quad={r.get("ticker"):(r.get("fast") or {}).get("quadrant") or r.get("quadrant") for r in (m.get("sectors") or [])}
+        for etf in SECTORS:
+            try:
+                c=dl_ohlc(etf,"1mo")["Close"].dropna()
+                d1=(float(c.iloc[-1])/float(c.iloc[-2])-1)*100; d5=(float(c.iloc[-1])/float(c.iloc[-6])-1)*100
+            except Exception: d1=d5=None
+            fl=(gf.get(etf) or {}).get("flow")
+            secs.append((d1 if d1 is not None else -99,f"{etf} {RRG_UNIVERSE.get(etf,etf)} {d1:+.1f}% d {d5:+.1f}% 5d · {quad.get(etf) or '?'} · flow {fl}" if d1 is not None else f"{etf} n/a"))
+        secs.sort(key=lambda z:-z[0])
+        out.append("[digest sectors] "+" | ".join(x for _,x in secs))
+    except Exception as e: out.append(f"[digest sectors error] {e!r}")
     flows=_kv_get("planflow-last",{}) or {}
     board=[]
     lanes=[("reversal",f"/api/reversal-scan?budget={budget}"),("put side",f"/api/put-side?budget={budget}"),("bases",f"/api/accumulation?budget={budget}"),("drift",f"/api/pead-scan?budget={budget}")]
