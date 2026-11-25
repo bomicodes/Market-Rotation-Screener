@@ -7486,7 +7486,8 @@ def win_rate_slices(days=60, min_n=3):
         pl=json.loads(rr["payload"]); x=_safe_float(pl.get("rr"))
         recs.append({"lane":rr["lane"],"dir":"put" if rr["direction"]=="bearish" else "call","group":pl.get("group_tag") or "untagged",
                      "tape":pl.get("regime") or "?","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
-                     "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50)})
+                     "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50),
+                     "mfe":_safe_float(oc.get("mfe_r")),"days":oc.get("days")})
     keys=("lane","dir","group","tape","rr")
     out=[]
     def add(name,sub):
@@ -7499,7 +7500,11 @@ def win_rate_slices(days=60, min_n=3):
                 for v2 in {z[k2] for z in recs}:
                     add(f"{k1}={v1}+{k2}={v2}",[z for z in recs if z[k1]==v1 and z[k2]==v2])
     out.sort(key=lambda t:(-t[2],-t[1]))
-    return {"closed":len(recs),"overall_win":round(100*sum(z["win"] for z in recs)/len(recs)) if recs else None,
+    mf=[z for z in recs if z["mfe"] is not None]
+    reach=lambda sub,x:round(100*sum(1 for z in sub if z["mfe"]>=x)/len(sub)) if sub else None
+    mfe={"n":len(mf),**{f"reached_{x}R":reach(mf,x) for x in (0.25,0.5,0.75,1.0,1.5,2.0)},
+         "by_lane":{ln:{"n":len([z for z in mf if z["lane"]==ln]),"0.5R":reach([z for z in mf if z["lane"]==ln],.5),"1R":reach([z for z in mf if z["lane"]==ln],1.0)} for ln in sorted({z["lane"] for z in mf})}}
+    return {"mfe":mfe,"closed":len(recs),"overall_win":round(100*sum(z["win"] for z in recs)/len(recs)) if recs else None,
             "overall_tp1":round(100*sum(z["tp1"] for z in recs)/len(recs)) if recs else None,"slices":out}
 
 
@@ -7509,6 +7514,7 @@ def print_digest(kind="nightly"):
         try:
             w=win_rate_slices(); sl=w["slices"]
             print(f"[digest edge] {w['closed']} closed · win {w['overall_win']}% · option +50% hit {w['overall_tp1']}% · best: "+" | ".join(f"{n} n{c} win {wr}% avg {ar}R tp1 {t}%" for n,c,wr,ar,t in sl[:14]),flush=True)
+            print(f"[digest edge mfe] best move in your favour before exit: {json.dumps(w['mfe'])}",flush=True)
             print("[digest edge worst] "+" | ".join(f"{n} n{c} win {wr}% avg {ar}R" for n,c,wr,ar,t in sorted(sl,key=lambda t:(t[2],-t[1]))[:10]),flush=True)
         except Exception as e: print(f"[digest edge error] {e!r}",flush=True)
     except Exception as e:
