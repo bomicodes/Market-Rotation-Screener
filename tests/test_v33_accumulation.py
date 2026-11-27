@@ -400,3 +400,31 @@ def test_v3715_partial_then_breakeven_variant():
                         "Low": [50.5, 48.9, 49.2, 49.3, 49.5], "Close": [50.8, 49.7, 49.5, 49.6, 49.9]}, index=idx)
     pp = A.evaluate_setup_outcome(rowp, dfp)["pbe"]
     assert pp["status"] == "win" and pp["r"] == 0.25 and pp["exit"] == "break-even"
+
+
+def test_v38_index_pullback_signal():
+    import app as A, pandas as pd, numpy as np
+    n = 120
+    idx = pd.bdate_range("2026-01-01", periods=n)
+    # steady uptrend; day -2 dips into the zone (SMA20 + 0.25 ATR) and closes weak;
+    # the last day closes near its high above the zone -> signal at that close
+    c = list(100 + np.arange(n - 3) * 0.5); last = c[-1]
+    c += [last - 1.5, last - 3.3, last - 1.2]; c = np.array(c)
+    h = c + 0.6; l = c - 0.6; o = c - 0.1
+    h[-2] = c[-2] + 1.6; l[-2] = c[-2] - 0.9
+    l[-1] = c[-1] - 1.6; h[-1] = c[-1] + 0.2
+    df = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c}, index=idx)
+    # (lookback=3 starts the replay at day -3; the live scan replays ~2 years so the
+    #  one-order-at-a-time chain lines up with the backtest)
+    r = A.index_pullback_signals(df, df, lookback=3)
+    st = r["state"]
+    assert st["status"] == "signal today", st
+    assert st["direction"] == "bullish" and st["stop"] < st["entry"] < st["target"]
+    assert abs(st["half_at"] - (st["entry"] + 0.5 * (st["entry"] - st["stop"]))) < 0.02
+    rows = A.index_pullback_log_rows({"symbols": {"SPY": r}})
+    assert rows and rows[0]["lane"] == "index_pullback" and rows[0]["entry"] == st["entry"]
+    assert A.index_pullback_lines({"symbols": {"SPY": r}}).startswith("[digest index] SPY: SIGNAL (calls)")
+    # Filter 3: SPY below its 50-day blocks the long confirmation
+    spy_down = df.copy()
+    spy_down[["Open", "High", "Low", "Close"]] = spy_down[["Open", "High", "Low", "Close"]].values[::-1]
+    assert A.index_pullback_signals(df, spy_down, lookback=3)["state"].get("status") != "signal today"

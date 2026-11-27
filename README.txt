@@ -1,3 +1,8 @@
+v38.0 — SPY/QQQ index pullback lane, the rules backtested in Vela 2018-2026 (trend setup, touch of SMA20 +/- 0.25 ATR within
+10 days, a close in the top 40% of the bar beyond the zone within 3 bars, SPY on the right side of its 50-day; half at +0.5R then
+break-even). SPY +9.6R / QQQ +4.5R; single stocks and XLP were about break-even, so the lane is index-only. Nightly stage
+"index pullback" logs signals as lane index_pullback; the digest prints [digest index] (alert level, in the zone, signal, in a trade).
+
 v37.15 — every filled setup is also graded with a "half at +0.5R, stop to break-even" exit on the same fill (before the partial:
 the plan's stop and, for trigger plans, the failed-2U/2D close; after it: break-even, target or time). Shown in the Track record panel
 and printed in the digest ([digest pbe]) next to the plan as-is, by lane and calls vs puts. Closed trades are regraded once by the nightly.
