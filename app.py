@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "37.15"
+APP_VERSION = "38.0"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7130,6 +7130,128 @@ def api_put_side():
 
 
 # ---------------------------------------------------------------------------
+# v38.0 INDEX PULLBACK (SPY / QQQ) -- the backtested version
+# Backtested 2018-2026 in Vela on daily bars ("Version B + Filters 1 & 3"):
+# SPY +9.6R on ~44 setups (69% of half-positions won), QQQ +4.5R (66%); the same
+# rules were about break-even on single stocks and sector funds (KO, JNJ, GILD, XLP),
+# so this lane is index-only.
+# Rules: trend setup at a close (close>SMA20>SMA50, 20d and 50d returns > 0; shorts
+# mirror). Levels frozen that day: zone = SMA20 +/- 0.25 ATR14, stop = SMA20 -/+ 1 ATR,
+# target = 20-bar extreme or zone +/- 2 ATR. Within 10 sessions price must touch the
+# zone; then, within 3 bars, a bar must CLOSE in the top 40% of its range beyond the
+# zone (Filter 1), with SPY on the same side of its own 50-day average (Filter 3).
+# Entry is that close. Exit: half at +0.5R, stop to break-even, rest at target or 15 days.
+# ---------------------------------------------------------------------------
+INDEX_PULLBACK_SYMBOLS=("SPY","QQQ")
+
+
+def _ip_frame(df):
+    df=df.dropna(subset=["Open","High","Low","Close"]).copy()
+    c=df["Close"].astype(float); h=df["High"].astype(float); l=df["Low"].astype(float); prev=c.shift(1)
+    tr=pd.concat([(h-l).abs(),(h-prev).abs(),(l-prev).abs()],axis=1).max(axis=1)
+    return pd.DataFrame({"o":df["Open"].astype(float),"h":h,"l":l,"c":c,"atr":tr.rolling(14).mean(),
+                         "s20":c.rolling(20).mean(),"s50":c.rolling(50).mean(),
+                         "r20":c/c.shift(20)-1,"r50":c/c.shift(50)-1,
+                         "hh20":h.rolling(20).max(),"ll20":l.rolling(20).min()},index=df.index)
+
+
+def index_pullback_signals(df, spy_df, lookback=600, max_wait=10, confirm_bars=3, max_hold=15):
+    """Pure. Replays the rules over the last `lookback` bars (one order or trade at a
+    time, as in the backtest -- replaying ~2 years keeps that chain in step with it)
+    and returns {"events":[confirmed entries], "state":{...latest status...}}."""
+    f=_ip_frame(df); n=len(f)
+    if n<70: return {"events":[],"state":{"status":"no data"}}
+    sp=_ip_frame(spy_df)[["c","s50"]].reindex(f.index).ffill()
+    tide=lambda k,bull:(bool(sp["c"].iloc[k]>sp["s50"].iloc[k]) if bull else bool(sp["c"].iloc[k]<sp["s50"].iloc[k])) if pd.notna(sp["s50"].iloc[k]) else False
+    d=lambda k:str(f.index[k])[:10]
+    events=[]; state={"status":"no setup"}; busy=-1
+    for s in range(max(60,n-lookback),n):
+        if s<=busy: continue
+        r=f.iloc[s]
+        if any(pd.isna(r[x]) for x in ("atr","s20","s50","r20","r50")) or r.atr<=0: continue
+        if r.c>r.s20>r.s50 and r.r20>0 and r.r50>0: bull=True
+        elif r.c<r.s20<r.s50 and r.r20<0 and r.r50<0: bull=False
+        else: continue
+        zone=r.s20+.25*r.atr if bull else r.s20-.25*r.atr
+        stop=r.s20-r.atr if bull else r.s20+r.atr
+        target=max(r.hh20,zone+2*r.atr) if bull else min(r.ll20,zone-2*r.atr)
+        if (bull and not r.c>zone) or ((not bull) and not r.c<zone): continue
+        base={"direction":"bullish" if bull else "bearish","setup_date":d(s),"zone":round(zone,2),"stop":round(stop,2),"target":round(target,2)}
+        touch=None
+        for j in range(s+1,min(n,s+1+max_wait)):
+            if (f.l.iloc[j]<=zone) if bull else (f.h.iloc[j]>=zone): touch=j; break
+        if touch is None:
+            busy=min(n-1,s+max_wait)
+            if s+max_wait>=n: state={"status":"waiting for the zone",**base,"expires_after":max(0,s+max_wait-(n-1))}
+            continue
+        conf=None; stopped=False
+        for k in range(touch,min(n,touch+confirm_bars)):
+            b=f.iloc[k]; rng=b.h-b.l
+            if (b.l<=stop) if bull else (b.h>=stop): stopped=True; break
+            strong=(b.c>=b.l+.6*rng) if bull else (b.c<=b.h-.6*rng)
+            beyond=(b.c>zone) if bull else (b.c<zone)
+            if rng>0 and strong and beyond and tide(k,bull): conf=k; break
+        if conf is None:
+            busy=min(n-1,touch+confirm_bars-1)
+            if not stopped and touch+confirm_bars>n:
+                state={"status":"in the zone, waiting for a strong close",**base,"touched":d(touch),"bars_left":touch+confirm_bars-n}
+            continue
+        entry=float(f.c.iloc[conf]); risk=abs(entry-stop)
+        if risk<=0 or (bull and target<=entry) or ((not bull) and target>=entry): continue
+        ev={**base,"entry_date":d(conf),"entry":round(entry,2),"half_at":round(entry+.5*risk if bull else entry-.5*risk,2),
+            "rr":round(abs(target-entry)/risk,2),"tide_ok":True}
+        events.append(ev); busy=min(n-1,conf+max_hold)
+        state={"status":"signal today" if conf==n-1 else "in a trade",**ev,"days_in":n-1-conf}
+    return {"events":events,"state":state}
+
+
+def index_pullback_payload():
+    spy=dl_ohlc("SPY","2y"); out={}
+    for t in INDEX_PULLBACK_SYMBOLS:
+        try:
+            df=spy if t=="SPY" else dl_ohlc(t,"2y")
+            r=index_pullback_signals(df,spy); out[t]={**r,"last_bar":str(df.index[-1])[:10]}
+        except Exception as e: out[t]={"error":str(e)}
+    return {"symbols":out,"asof":_et_now().isoformat(timespec="minutes")}
+
+
+def index_pullback_log_rows(payload, regime=None):
+    """Confirmed signals on the latest bar, as setup_log rows (graded like the rest,
+    including the half-at-+0.5R variant)."""
+    rows=[]
+    for t,v in ((payload or {}).get("symbols") or {}).items():
+        st=(v or {}).get("state") or {}
+        if st.get("status")!="signal today": continue
+        rows.append({"ticker":t,"trade_date":st["entry_date"],"lane":"index_pullback","direction":st["direction"],"fill":"limit",
+                     "entry":st["entry"],"stop":st["stop"],"target":st["target"],"rr":st.get("rr"),"regime":regime,
+                     "logged_by":"nightly","source":"index pullback v38","half_at":st.get("half_at"),"zone":st.get("zone")})
+    return rows
+
+
+def index_pullback_lines(payload, provisional=False):
+    parts=[]
+    for t,v in ((payload or {}).get("symbols") or {}).items():
+        st=(v or {}).get("state") or {}; s=st.get("status")
+        side="calls" if st.get("direction")=="bullish" else "puts"
+        if v.get("error"): parts.append(f"{t}: error {v['error']}")
+        elif s=="signal today": parts.append(f"{t}: SIGNAL ({side}){' (bar not closed yet)' if provisional else ''} entry {st['entry']} stop {st['stop']} half at {st['half_at']} target {st['target']} rr {st.get('rr')}")
+        elif s=="in a trade": parts.append(f"{t}: in a trade ({side}) since {st['entry_date']} entry {st['entry']} stop {st['stop']} (break-even after {st['half_at']}) target {st['target']} day {st['days_in']}/15")
+        elif s=="in the zone, waiting for a strong close": parts.append(f"{t}: in the zone ({side}) -- signal if a bar closes in the top 40% of its range beyond {st['zone']} (stop {st['stop']}, target {st['target']}), {st['bars_left']} bar(s) left")
+        elif s=="waiting for the zone": parts.append(f"{t}: set an alert at {st['zone']} ({side} setup from {st['setup_date']}, stop {st['stop']}, target {st['target']})")
+        else: parts.append(f"{t}: no setup")
+    return "[digest index] "+" | ".join(parts)
+
+
+@app.get("/api/index-pullback")
+def api_index_pullback():
+    try:
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe("index-pullback-v38",index_pullback_payload,force=force,ttl=1800)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
 # v37.4 SERVER-SIDE BOARD LOGGING
 # The board used to be logged only by the page (when someone opened the site), so
 # nights nobody visited -- 11/18 and 11/19 -- and the whole put side were missing
@@ -7498,6 +7620,9 @@ def build_digest(kind="nightly"):
     out.append(f"[digest {kind} {m.get('asof') or ''}] tape {server_regime(m)} · shorts {'allowed' if server_shorts_ok(m) else 'held back'} · "
                f"SPY {spy.get('value') and round(spy['value'],2)} ({spy.get('d1') and round(spy['d1'],2)}% d, {spy.get('d5') and round(spy['d5'],2)}% 5d, {spy.get('d20') and round(spy['d20'],2)}% 20d, above20={spy.get('above20')}) · VIX {vix.get('value') and round(vix['value'],1)} · "
                f"nightly {st.get('stage')} {st.get('started')}→{st.get('finished')} errors={len(st.get('errors') or [])}")
+    # v38.0: SPY/QQQ pullback signal (the backtested lane)
+    try: out.append(index_pullback_lines(get("/api/index-pullback"+("?refresh=1" if kind!="nightly" else "")),provisional=(kind=="midday")))
+    except Exception as e: out.append(f"[digest index error] {e!r}")
     # v37.13: sector snapshot -- 1-day / 5-day return, RRG quadrant (fast), volume flow
     try:
         gf=(get("/api/group-flow").get("groups") or {}); secs=[]
@@ -7810,6 +7935,13 @@ def nightly_run():
             ps=get(f"/api/put-side?refresh=1&budget={budget}"); st["counts"]["put_side"]=len(ps.get("rows") or [])
         except Exception as e: st["errors"].append(f"put side: {e}")
         _nightly_free_memory(("putside-",))
+        st["stage"]="index pullback"
+        try:
+            ip=get("/api/index-pullback?refresh=1")
+            _kv_put("index-pullback-latest",{k:ip.get(k) for k in ("symbols","asof")})
+            st["counts"]["index_pullback"]={t:((v or {}).get("state") or {}).get("status") for t,v in (ip.get("symbols") or {}).items()}
+            st["counts"]["index_logged"]=log_setups(index_pullback_log_rows(ip,server_regime(m)))
+        except Exception as e: st["errors"].append(f"index pullback: {e}")
         # v37.4: log the board server-side (nights nobody opens the page were missing)
         st["stage"]="log board"
         try:
