@@ -428,3 +428,21 @@ def test_v38_index_pullback_signal():
     spy_down = df.copy()
     spy_down[["Open", "High", "Low", "Close"]] = spy_down[["Open", "High", "Low", "Close"]].values[::-1]
     assert A.index_pullback_signals(df, spy_down, lookback=3)["state"].get("status") != "signal today"
+
+
+def test_v381_index_pullback_trade_closes():
+    import app as A, pandas as pd, numpy as np
+    n = 126
+    idx = pd.bdate_range("2026-01-01", periods=n)
+    c = list(100 + np.arange(n - 9) * 0.5); last = c[-1]
+    c += [last - 1.5, last - 3.3, last - 1.2]
+    c += [c[-1] + 1.5 * k for k in range(1, 7)]       # rally through the target
+    c = np.array(c)
+    h = c + 0.6; l = c - 0.6; o = c - 0.1
+    h[-8] = c[-8] + 1.6; l[-8] = c[-8] - 0.9
+    l[-7] = c[-7] - 1.6; h[-7] = c[-7] + 0.2
+    df = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c}, index=idx)
+    r = A.index_pullback_signals(df, df, lookback=9)
+    ev = r["events"][0]
+    assert ev["exit"] == "target" and ev["r"] == ev["rr"] > 0   # target inside +0.5R: whole position exits there
+    assert "last trade" in A.index_pullback_lines({"symbols": {"SPY": {"state": {**ev, "status": "closed"}}}})

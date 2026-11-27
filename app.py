@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.0"
+APP_VERSION = "38.0.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7198,10 +7198,26 @@ def index_pullback_signals(df, spy_df, lookback=600, max_wait=10, confirm_bars=3
             continue
         entry=float(f.c.iloc[conf]); risk=abs(entry-stop)
         if risk<=0 or (bull and target<=entry) or ((not bull) and target>=entry): continue
-        ev={**base,"entry_date":d(conf),"entry":round(entry,2),"half_at":round(entry+.5*risk if bull else entry-.5*risk,2),
+        half=entry+.5*risk if bull else entry-.5*risk
+        ev={**base,"entry_date":d(conf),"entry":round(entry,2),"half_at":round(half,2),
             "rr":round(abs(target-entry)/risk,2),"tide_ok":True}
-        events.append(ev); busy=min(n-1,conf+max_hold)
-        state={"status":"signal today" if conf==n-1 else "in a trade",**ev,"days_in":n-1-conf}
+        # walk the trade: stop first on a shared bar; half at +0.5R then break-even; target; 15-day time stop
+        partial=False; ex=None
+        for j in range(conf+1,min(n,conf+1+max_hold)):
+            b=f.iloc[j]; stp=entry if partial else stop
+            if (b.l<=stp) if bull else (b.h>=stp): ex=(j,"break-even" if partial else "stop",.25 if partial else -1.0); break
+            if not partial and ((b.h>=half) if bull else (b.l<=half)): partial=True
+            if (b.h>=target) if bull else (b.l<=target):
+                ex=(j,"target",round(.25+.5*abs(target-entry)/risk if partial else abs(target-entry)/risk,2)); break
+        if ex is None and conf+max_hold<=n-1:
+            j=conf+max_hold; cr=((f.c.iloc[j]-entry) if bull else (entry-f.c.iloc[j]))/risk
+            ex=(j,"time",round(.25+.5*cr if partial else cr,2))
+        if ex:
+            ev.update({"exit_date":d(ex[0]),"exit":ex[1],"r":ex[2],"half_taken":partial}); busy=ex[0]
+            events.append(ev); state={"status":"closed",**ev}
+        else:
+            events.append(ev); busy=n-1
+            state={"status":"signal today" if conf==n-1 else "in a trade",**ev,"days_in":n-1-conf,"half_taken":partial}
     return {"events":events,"state":state}
 
 
@@ -7235,8 +7251,12 @@ def index_pullback_lines(payload, provisional=False):
         side="calls" if st.get("direction")=="bullish" else "puts"
         if v.get("error"): parts.append(f"{t}: error {v['error']}")
         elif s=="signal today": parts.append(f"{t}: SIGNAL ({side}){' (bar not closed yet)' if provisional else ''} entry {st['entry']} stop {st['stop']} half at {st['half_at']} target {st['target']} rr {st.get('rr')}")
-        elif s=="in a trade": parts.append(f"{t}: in a trade ({side}) since {st['entry_date']} entry {st['entry']} stop {st['stop']} (break-even after {st['half_at']}) target {st['target']} day {st['days_in']}/15")
+        elif s=="in a trade":
+            note=" (half taken, stop at break-even)" if st.get("half_taken") else f" (sell half at {st['half_at']})"
+            stp=st["entry"] if st.get("half_taken") else st["stop"]
+            parts.append(f"{t}: in a trade ({side}) since {st['entry_date']} entry {st['entry']} stop {stp}{note} target {st['target']} day {st['days_in']}/15")
         elif s=="in the zone, waiting for a strong close": parts.append(f"{t}: in the zone ({side}) -- signal if a bar closes in the top 40% of its range beyond {st['zone']} (stop {st['stop']}, target {st['target']}), {st['bars_left']} bar(s) left")
+        elif s=="closed": parts.append(f"{t}: last trade ({side}) {st['entry_date']}→{st['exit_date']} {st['exit']} {st['r']:+}R; no new setup yet")
         elif s=="waiting for the zone": parts.append(f"{t}: set an alert at {st['zone']} ({side} setup from {st['setup_date']}, stop {st['stop']}, target {st['target']})")
         else: parts.append(f"{t}: no setup")
     return "[digest index] "+" | ".join(parts)
