@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.9"
+APP_VERSION = "38.10"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7251,12 +7251,58 @@ def rotation_strat_signal(df, sector_df, spy_df, weekly=True):
     if risk<=0: return {"ok":False,"checks":checks}
     r20=lambda s:float(s.iloc[i]/s.iloc[i-20]-1)*100
     ff=_ftfc_flags(d.index,o.values,c.values,i)
+    try: udr=_ud_ratio(c.values,d["Volume"].astype(float).fillna(0).values,i)
+    except Exception: udr=None
     try: vpr=_vp_room(h.values,l.values,d["Volume"].astype(float).fillna(0).values,i,entry,risk)
     except Exception: vpr=None
-    return {"ok":True,"checks":checks,"signal":sig,"signal_date":str(d.index[i])[:10],"entry":entry,"stop":stop,"vp_room_r":vpr,
+    return {"ok":True,"checks":checks,"signal":sig,"signal_date":str(d.index[i])[:10],"entry":entry,"stop":stop,"vp_room_r":vpr,"ud":udr,
             "ftfc":ff,"ftfc_full":all(ff.values()),"ftfc_count":sum(ff.values()),
             "target":round(entry+2*risk,2),"half_at":round(entry+.5*risk,2),"rr":2.0,
             "risk_pct":round(100*risk/entry,2),"rs_vs_sector_20d":round(r20(c)-r20(sec),1),"sector_vs_spy_20d":round(r20(sec)-r20(spy),1)}
+
+
+ROT_UD_QUIET=1.4; ROT_CP_UNCROWDED=1.8
+try: ROT_BASE_HIT=float(os.environ.get("BASE_HIT_PCT") or 0.30)
+except Exception: ROT_BASE_HIT=0.30
+
+
+def _rotation_rank_score(z):
+    """Pure. FTFC full 3, post-earnings 2, quiet 20d volume 1, uncrowded calls 1 (backtested 11/28)."""
+    sc=0
+    if z.get("ftfc_full"): sc+=3
+    if z.get("earn_bucket")=="post": sc+=2
+    if z.get("ud") is not None and z["ud"]<=ROT_UD_QUIET: sc+=1
+    if z.get("cp5") is not None and z["cp5"]<=ROT_CP_UNCROWDED: sc+=1
+    return sc
+
+
+def _rotation_reasons(z):
+    out=[]
+    if z.get("ftfc_full"): out.append("FTFC")
+    if z.get("earn_bucket")=="post": out.append("fresh earnings")
+    if z.get("ud") is not None and z["ud"]<=ROT_UD_QUIET: out.append(f"quiet volume (up/down {z['ud']})")
+    if z.get("cp5") is not None: out.append(("uncrowded calls" if z["cp5"]<=ROT_CP_UNCROWDED else "crowded calls")+f" (C/P {z['cp5']})")
+    return out
+
+
+def _weekly_otm_pick(t, entry, spot, today=None):
+    """First call strike at/above the entry on the nearest expiry 7-16 days after the next session
+    (what the 11/28 options backtest used). Returns dict or None."""
+    today=pd.Timestamp(today or pd.Timestamp.now()).normalize()
+    nxt=today+pd.offsets.BDay(1)
+    snaps=alpaca_option_chain(t,(nxt+pd.Timedelta(days=7)).strftime("%Y-%m-%d"),(nxt+pd.Timedelta(days=16)).strftime("%Y-%m-%d"),spot)
+    best=None
+    for sym,sn in (snaps or {}).items():
+        try:
+            root_len=len(sym)-15; exp=pd.Timestamp("20"+sym[root_len:root_len+6]); cp=sym[root_len+6]; k=int(sym[-8:])/1000
+            if cp!="C" or k<entry*0.995: continue
+            q=sn.get("latestQuote") or {}; bp=_safe_float(q.get("bp")); ap=_safe_float(q.get("ap"))
+            if not ap or ap<=0: continue
+            mid=((bp or 0)+ap)/2 if bp else ap
+            key=(exp,k)
+            if best is None or key<best[0]: best=(key,{"symbol":sym,"expiration":str(exp.date()),"strike":k,"bid":bp,"ask":ap,"mid":round(mid,2),"cost":round(mid*100)})
+        except Exception: continue
+    return best[1] if best else None
 
 
 def rotation_strat_payload(budget=250, top=8, weekly=True):
@@ -7276,8 +7322,16 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
             except Exception: r=None
             if r and r.get("ok"):
                 cands.append({"ticker":t,"parent":g,"sector":SECTORS.get(g),**r}); break
-    # v38.6: full timeframe continuity (D/W/M/Q all green) first, as the user trades it
-    cands.sort(key=lambda z:(not z.get("ftfc_full"),-(z.get("ftfc_count") or 0),-z["sector_vs_spy_20d"],-z["rs_vs_sector_20d"]))
+    # v38.10: catalyst/positioning ranking (backtests 11/28): FTFC, a fresh earnings report (signal 0-10
+    # sessions after it), quiet volume before the signal (20d up/down volume <= 1.4), and later uncrowded calls.
+    for z in cands:
+        try:
+            df=data.get(z["ticker"]); E=[pd.Timestamp(x).normalize() for x in (earnings_dates_cached(z["ticker"]) or [])]
+            E=sorted(set(x.tz_localize(None) if x.tzinfo else x for x in E))
+            z["earn_bucket"]=_earn_bucket(df.index,E,len(df)-1) if E else "unknown"
+        except Exception: z["earn_bucket"]="unknown"
+        z["rank_score"]=_rotation_rank_score(z)
+    cands.sort(key=lambda z:(-z["rank_score"],-(z.get("ftfc_count") or 0),-z["sector_vs_spy_20d"],-z["rs_vs_sector_20d"]))
     rows=[]; rejected=[]
     for z in cands:
         if len(rows)>=top: break
@@ -7300,6 +7354,30 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
                 z["call_wall_r"]=round((cw-z["entry"])/rk,2) if cw and rk>0 else None
                 z["put_wall_vs_stop"]=("below stop" if pw<z["stop"] else "above stop") if pw else None
             except Exception: pass
+            # v38.10: uncrowded-calls read, the weekly OTM contract, the base-hit + runner exit plan, events ahead
+            try:
+                spot=float(data[t]["Close"].astype(float).iloc[-1])
+                pos=_opt_positioning(t,pd.Timestamp.now().normalize(),spot); z["cp5"]=pos.get("cp5"); z["cacc"]=pos.get("cacc")
+            except Exception: pass
+            try:
+                wk=_weekly_otm_pick(t,z["entry"],float(data[t]["Close"].astype(float).iloc[-1]))
+                if wk:
+                    bp=ROT_BASE_HIT
+                    wk["base_hit_at"]=round(wk["mid"]*(1+bp),2); wk["base_hit_pct"]=int(bp*100)
+                    wk["over_budget"]=bool(wk["cost"]>budget)
+                z["weekly_pick"]=wk
+            except Exception as e: z["weekly_pick"]={"error":str(e)[:60]}
+            try:
+                evs=[e for e in news_catalysts(alpaca_company_news([t],days=30),[t],pd.Timestamp.now().normalize(),21)
+                     if e.get("kind") in ("product","investor_day","sales") and e.get("date")]
+                if evs:
+                    e0=sorted(evs,key=lambda e:e["date"])[0]
+                    ea=_rotation_earnings_action(z.get("signal_date"),e0["date"])
+                    z["event_ahead"]={"label":e0["label"],"date":e0["date"],"headline":e0.get("headline","")[:120],**ea}
+                    if ea.get("earnings_action")=="sell_before" and (not z.get("sell_by") or ea["sell_by"]<z["sell_by"]):
+                        z["sell_by"]=ea["sell_by"]; z["max_hold"]=ea["max_hold"]
+            except Exception: pass
+            z["rank_score"]=_rotation_rank_score(z); z["reasons"]=_rotation_reasons(z)
             # v38.2: the free options-flow read (opening-size prints, held next day) + earnings timing
             try:
                 f=cached_refresh_safe(f"planflow-v2:{t}",lambda t=t:plan_flow_read(t),ttl=(3600 if market_open_now() else 12*3600))[0] or {}
@@ -7321,10 +7399,11 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
             if NIGHTLY.get("running"):
                 try: _nightly_free_memory(("visible-","alpaca-intraday","alpaca-hour","yf-","chart-","strat-","options-scan","options-v"))
                 except Exception: pass
+    rows.sort(key=lambda z:(-(z.get("rank_score") or 0),-(z.get("ftfc_count") or 0),-z["sector_vs_spy_20d"]))
     return {"available":True,"rows":rows,"candidates":len(cands),"scanned":seen,"rejected":rejected[:15],"weekly":weekly,
             "rules":"Leader (beats its SPDR sector, above the 50-day) in a sector beating SPY and improving; weekly candle green; "
                     "STRAT 2U-1 inside bar or failed 2D on the latest bar. Buy-stop over the signal high for the next session only, "
-                    "stop at the signal low, target 2R, half at +0.5R then break-even; if earnings fall inside the 15-day hold, sell by the close the session before the report. Check footprint delta on the trigger bar before entering."}
+                    "stop at the signal low. Options: weekly OTM call; sell half at +30% premium (base hit), runner with a break-even stop; if earnings or a product/investor event falls inside the hold, sell by the close the session before. Ranked by FTFC, fresh earnings, quiet volume and uncrowded calls. Check footprint delta on the trigger bar before entering."}
 
 
 def _rotation_earnings_action(signal_date, next_earnings, max_hold=15):
@@ -7353,7 +7432,8 @@ def rotation_strat_log_rows(payload, date, regime=None):
                      "regime":regime,"parent":z.get("parent"),"signal":z.get("signal"),"half_at":z.get("half_at"),"logged_by":"nightly",
                      "flow_bias":(z.get("flow") or {}).get("bias"),"flow_score":(z.get("flow") or {}).get("score"),
                      "days_to_earnings":z.get("days_to_earnings"),"earnings_in_hold":z.get("earnings_in_hold"),
-                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),"ftfc_full":z.get("ftfc_full"),"vp_room_r":z.get("vp_room_r"),"call_wall":z.get("call_wall"),"call_wall_r":z.get("call_wall_r"),"put_wall":z.get("put_wall"),
+                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),"ftfc_full":z.get("ftfc_full"),"vp_room_r":z.get("vp_room_r"),"rank_score":z.get("rank_score"),"earn_bucket":z.get("earn_bucket"),"ud":z.get("ud"),"cp5":z.get("cp5"),
+                     "weekly_pick":z.get("weekly_pick"),"event_ahead":z.get("event_ahead"),"call_wall":z.get("call_wall"),"call_wall_r":z.get("call_wall_r"),"put_wall":z.get("put_wall"),
                      "contract":{"label":_contract_label(zz),"cost":zz.get("cost"),"entry_premium":zz.get("entry_premium"),"symbol":(zz.get("leg") or {}).get("symbol")} if zz else None})
     return rows
 
@@ -7373,6 +7453,13 @@ def _room_label(z):
     return a+b+c
 
 
+def _weekly_label(z):
+    w=z.get("weekly_pick") or {}
+    if not w or w.get("error"): return ""
+    return (f" · weekly {w['expiration'][5:]} ${w['strike']}C ≈${w['mid']} (${w['cost']})"
+            f"{' OVER BUDGET' if w.get('over_budget') else ''} → sell half at ${w['base_hit_at']} (+{w['base_hit_pct']}% of your fill); runner: stop at your fill price, hold to the day before expiration or the sell-by date")
+
+
 def rotation_strat_lines(payload):
     rows=(payload or {}).get("rows") or []
     if not rows: return [f"[digest rotation] no setups tonight ({(payload or {}).get('candidates',0)} signals, {(payload or {}).get('scanned',0)} stocks scanned)"]
@@ -7382,6 +7469,8 @@ def rotation_strat_lines(payload):
             f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · {_ftfc_label(z)} · {_room_label(z)} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
             f" · flow: {(z.get('flow') or {}).get('read')} (score {(z.get('flow') or {}).get('score')}, {(z.get('flow') or {}).get('bias')})"
             f" · earnings {z.get('next_earnings')} ({z.get('days_to_earnings')}d){(' · SELL BY '+str(z.get('sell_by'))+' close') if z.get('sell_by') else ''}"
+            f" · score {z.get('rank_score')} ({', '.join(z.get('reasons') or []) or 'no extras'})"
+            f"{_weekly_label(z)}{(' · EVENT '+z['event_ahead']['label']+' '+z['event_ahead']['date']) if z.get('event_ahead') else ''}"
             for z in rows[k:k+2]))
     return out
 
@@ -7392,7 +7481,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v387:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v3810:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
