@@ -560,3 +560,14 @@ def test_v3851_weekly_expiry_pick():
     assert e and e[0]==pd.Timestamp("2024-03-15")
     m=A._expiry_candidates(pd.Timestamp("2024-03-04"),28,60)
     assert m[0]==pd.Timestamp("2024-04-05")
+
+
+def test_v386_ftfc_flags():
+    import app as A, pandas as pd, numpy as np
+    idx=pd.bdate_range("2026-09-28", periods=10)   # spans Sep->Oct (new month+quarter on 10/1)
+    o=np.array([10,10,10,10,10,10,10,10,10,10],float); c=np.array([9,9,9,10.5,10.6,10.7,10.2,10.4,10.5,10.6],float)
+    o[3]=10.0  # 10/1 open
+    f=A._ftfc_flags(idx,o,c,9)
+    assert set(f)=={"D","W","M","Q"} and f["M"] and f["Q"] and f["D"]
+    f2=A._ftfc_flags(idx,o,c,2)  # 9/30: close 9 < opens
+    assert not any(f2.values())

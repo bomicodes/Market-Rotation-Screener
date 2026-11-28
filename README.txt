@@ -1,3 +1,7 @@
+v38.6 — rotation STRAT lane ranks setups with full timeframe continuity (close above the day, week, month and quarter
+opens) first and shows "FTFC full / partial" in the digest; logged as ftfc_full and sliced in win_rate_slices. The stock and
+options backtests now report results with vs without FTFC. v38.5/38.5.1: options-premium backtest (weekly vs monthly calls).
+
 v38.4 — rotation STRAT lane: if earnings fall inside the 15-day hold, the setup carries a SELL BY date (close of the
 session before the report) and grading caps the hold there; skipped only if the report is on the entry day or the next.
 Backtest (65 stocks, 2018+, server replay): hold through +$155k, skip +$164k, sell before +$184k. Backtest engine now
