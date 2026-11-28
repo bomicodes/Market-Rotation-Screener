@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.10.1"
+APP_VERSION = "38.11"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7834,10 +7834,8 @@ def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
             "leg_ret":[(x[3]-ent_p)/ent_p for x in legs],"last_exit":max(x[1] for x in legs)}
 
 
-OPT_BT_VARIANTS=(("weekly 7-16d OTM",7,16,"otm"),)
-OPT_BT_PLANS=(("current: half +0.5R then BE, rest 2R",0.5,2.0,None),("all out when stock hits +0.5R",None,0.5,None),
-              ("all out when stock hits +1R",None,1.0,None),("all out at premium +20%",None,99.0,0.20),("all out at premium +30%",None,99.0,0.30),
-              ("all out at premium +40%",None,99.0,0.40),("all out at premium +50%",None,99.0,0.50))
+OPT_BT_VARIANTS=(("weekly first strike above",7,16,0.0),("weekly ~3% OTM",7,16,0.03),("weekly ~6% OTM",7,16,0.06))
+OPT_BT_PLANS=(("all out at premium +30%",None,99.0,0.30),("all out at premium +50%",None,99.0,0.50),("all out at premium +100%",None,99.0,1.00))
 
 
 def _expiry_candidates(fdt, min_dte, max_dte):
@@ -7966,12 +7964,12 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                 # hold ends the session before expiration (or the stock plan's own cap, if sooner)
                 cap=min(cap0,(ex-pd.offsets.BDay(1)).date())
                 if cap<fdt.date(): continue
+                tgt_k=base["entry"]*(1+mode)
                 ks=set()
                 for inc in (0.5,1,2.5,5,10):
-                    up=np.ceil(base["entry"]/inc)*inc; dn=np.floor(base["entry"]/inc)*inc
-                    ks.update({round(up,2),round(up+inc,2),round(dn,2),round(dn-inc,2)})
+                    up=np.ceil(tgt_k*0.995/inc)*inc; ks.update({round(up,2),round(up+inc,2)})
                 ks=sorted(ks)
-                syms=[_occ(t,ex,k) for k in ks][:16]+[_occ(t,ex-pd.Timedelta(days=1),k) for k in ks if abs(k-base["entry"])<=base["entry"]*0.03][:4]
+                syms=[_occ(t,ex,k) for k in ks][:14]+[_occ(t,ex-pd.Timedelta(days=1),k) for k in ks][:6]
                 ob=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
                     {"symbols":",".join(syms),"timeframe":"1Day","start":(pd.Timestamp(sig)-pd.Timedelta(days=10)).strftime("%Y-%m-%dT00:00:00Z"),
                      "end":(pd.Timestamp(sig)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=2)
@@ -7980,8 +7978,7 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                     arr=ob.get(sym) or []
                     if not arr or pd.Timestamp(arr[-1]["t"]).tz_convert("America/New_York").date()!=sig: continue
                     k=int(sym[-8:])/1000
-                    if mode=="otm" and k>=base["entry"]*0.995: score=k
-                    elif mode=="itm" and k<base["entry"]: score=-k
+                    if k>=tgt_k*0.995: score=k
                     else: continue
                     if best is None or score<best[0]: best=(score,sym,k,arr)
                 if not best: continue
@@ -7991,11 +7988,11 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                      "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
                 obars=_rth(o30.get(sym))
                 sig_prem=float(pre[-1]["c"])
-                for bp in (0.20,0.30):
-                    for rn in ("be","trail","2r"):
+                for bp in (0.30,0.50):
+                    for rn in ("be",):
                         rr_=option_runner_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"fill_date":fd},cap,base_pct=bp,runner=rn)
                         if rr_:
-                            rows.append({"runner":True,"plan":f"half at +{int(bp*100)}%, runner {rn}","opt_ret":rr_["ret"],"run_ret":rr_["run_ret"],"based":rr_["based"],
+                            rows.append({"runner":True,"plan":f"half at +{int(bp*100)}%, runner {rn}","otm_pct":round(100*(K/base["entry"]-1),1),"opt_ret":rr_["ret"],"run_ret":rr_["run_ret"],"based":rr_["based"],
                                          "peak_ret":rr_.get("peak_ret"),"cost":rr_["ent"]*100,"eb":d.get("earn_bucket"),"ftfc":d.get("ftfc"),"t":t,"sig":str(sig),"variant":vname,"stock_r":0})
                 for pname,hr,tr,pt in OPT_BT_PLANS:
                     lv={"entry":base["entry"],"stop":base["stop"],"half":(base["entry"]+hr*risk) if hr else 1e12,
@@ -8003,7 +8000,7 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                     res=option_trade_replay(sbars,obars,lv,cap,prem_tgt=pt)
                     if not res: continue
                     iv=_implied_vol(res["ent_p"],res["stock_fill"],K,max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365)
-                    rows.append({"ftfc":d.get("ftfc"),"vp_room":d.get("vp_room"),"eb":d.get("earn_bucket"),"ud":d.get("ud"),
+                    rows.append({"otm_pct":round(100*(K/base["entry"]-1),1),"ftfc":d.get("ftfc"),"vp_room":d.get("vp_room"),"eb":d.get("earn_bucket"),"ud":d.get("ud"),
                                  "cp5":pos.get("cp5"),"cacc":pos.get("cacc"),"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
                                  "runup":res["ent_p"]/sig_prem-1,"opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],
                                  "ivrv":(iv/rv) if iv and rv else None,"cost":res["ent_p"]*100})
@@ -8037,8 +8034,22 @@ def print_options_backtest():
                 except Exception as e:
                     print(f"[bt opt err] {t} {e!r}"[:200],flush=True)
         P=lambda s: print("[bt opt] "+s,flush=True)
-        for bp in (20,30):
-            for rn in ("be","trail","2r"):
+        for vname,_,_,_ in OPT_BT_VARIANTS:
+            vr=[r for r in allr if r["variant"]==vname]
+            if not vr: continue
+            P(f"OTM {vname}: median strike {np.median([r['otm_pct'] for r in vr]):.1f}% above entry · median cost ${np.median([r['cost'] for r in vr]):.0f}")
+            for pname in [p[0] for p in OPT_BT_PLANS]+["half at +30%, runner be","half at +50%, runner be"]:
+                rr=[r for r in vr if r["plan"]==pname]
+                if not rr: continue
+                v=[r["opt_ret"] for r in rr]; runs=[r.get("run_ret") for r in rr if r.get("based")]
+                big=f" · runner >=+100% {sum(1 for x in runs if x>=1)} · >=+300% {sum(1 for x in runs if x>=3)} · >=+900% {sum(1 for x in runs if x>=9)} · best {100*max(runs) if runs else 0:+.0f}%" if rr[0].get("runner") else f" · best trade {100*max(v):+.0f}%"
+                P(f"OTM {vname} | {pname}: n {len(v)} win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · P&L 1 lot ${sum(r['opt_ret']*r['cost'] for r in rr):+,.0f} · P&L per $100 risked ${100*np.mean(v):+.1f}{big}")
+                for lab,sel in (("post-earnings",[r for r in rr if r.get("eb")=="post"]),("FTFC",[r for r in rr if r.get("ftfc")])):
+                    if sel:
+                        w=[r["opt_ret"] for r in sel]
+                        P(f"OTM {vname} | {pname} | {lab}: n {len(w)} win {100*np.mean([x>0 for x in w]):.0f}% avg {100*np.mean(w):+.0f}%")
+        for bp in ():
+            for rn in ():
                 pname=f"half at +{bp}%, runner {rn}"; rr=[r for r in allr if r.get("plan")==pname]
                 if not rr: continue
                 v=[r["opt_ret"] for r in rr]; runs=[r["run_ret"] for r in rr if r["based"]]
