@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.13.1"
+APP_VERSION = "38.13.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7913,17 +7913,19 @@ def option_runner_replay(sbars, obars, lv, day_cap, base_pct=0.30, runner="be", 
             stop_hit=l<=S0
             prem_hit=ob is not None and bid(ob[2])>=tp
             if stop_hit and (not prem_hit or not hi_first):
-                p=bid(opx(t) or 0); return {"ent":ent,"base":p,"run":p,"ret":(p-ent)/ent,"run_ret":(p-ent)/ent,"based":False}
+                m=opx(t)
+                if m is None: return None
+                p=bid(m); return {"ent":ent,"base":p,"run":p,"ret":(p-ent)/ent,"run_ret":(p-ent)/ent,"based":False}
             if prem_hit:
                 base=max(tp,bid(ob[1])); based=True; peak=max(peak,bid(ob[2]))
-                if runner=="2r" and h>=T2:
-                    run=bid(opx(t) or 0); break
+                if runner=="2r" and h>=T2 and opx(t) is not None:
+                    run=bid(opx(t)); break
                 continue
         else:
             if ob is not None:
                 peak=max(peak,bid(ob[2]))
-                if runner=="2r" and h>=T2:
-                    run=bid(opx(t) or 0); break
+                if runner=="2r" and h>=T2 and opx(t) is not None:
+                    run=bid(opx(t)); break
                 if runner=="trail" and bid(ob[3])<=peak*(1-trail) and peak*(1-trail)>ent:
                     run=min(bid(ob[1]),peak*(1-trail)); break
                 if bid(ob[3])<=ent:
