@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.8"
+APP_VERSION = "38.8.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7979,11 +7979,18 @@ def _ev_line(tag, name, rows):
     return f"[{tag}] {name}: n {len(rows)} · run-up 10d {f('pre10')} · reaction day {f('day')} · next 5d {f('post5')} · next 10d {f('post10')}"
 
 
-def _news_window(sym, start, end):
-    try:
-        r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/news",params={"symbols":sym,"start":start,"end":end,"limit":50,"sort":"asc","include_content":"false"},timeout=20)
-        return (r.json() or {}).get("news") or [] if r.status_code==200 else []
-    except Exception: return []
+def _news_window(sym, start, end, pages=6):
+    out=[]; tok=None
+    for _ in range(pages):
+        p={"symbols":sym,"start":start,"end":end,"limit":50,"sort":"asc","include_content":"false"}
+        if tok: p["page_token"]=tok
+        try:
+            r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/news",params=p,timeout=20)
+            if r.status_code!=200: break
+            j=r.json() or {}; out+=j.get("news") or []; tok=j.get("next_page_token")
+            if not tok: break
+        except Exception: break
+    return out
 
 
 def _reaction_index(idx, ts):
@@ -7995,14 +8002,22 @@ def _reaction_index(idx, ts):
     return i if i<len(idx) else None
 
 
-def _sales_release_dates(sym, rx, day_to=12):
-    out=[]; mon=pd.Timestamp("2018-01-01")
+_MONTHS_RX=r"(january|february|march|april|may|june|july|august|september|october|november|december|holiday|quarter|q[1-4])"
+
+
+def _sales_release_dates(sym, rx, day_to=12, must=None):
+    out=[]; mon=pd.Timestamp("2018-01-01"); seen=0
     while mon<pd.Timestamp.now():
         arts=_news_window(sym,mon.strftime("%Y-%m-%dT00:00:00Z"),(mon+pd.Timedelta(days=day_to)).strftime("%Y-%m-%dT23:59:59Z"))
+        seen+=len(arts)
         for a in arts:
-            if re.search(rx,str(a.get("headline") or ""),re.I):
-                out.append(a.get("created_at")); break
+            hl=str(a.get("headline") or "")
+            if re.search(rx,hl,re.I) and (must is None or re.search(must,hl,re.I)):
+                out.append(a.get("created_at"))
+                if len(out)<=3: print(f"[ev sales sample] {sym} {a.get('created_at')} {hl[:120]}",flush=True)
+                break
         mon=mon+pd.DateOffset(months=1)
+    print(f"[ev sales scan] {sym} articles scanned {seen}",flush=True)
     return out
 
 
@@ -8051,10 +8066,11 @@ def print_event_study():
             P(_ev_line("ev earn post",lab+" & weak close (bottom 30%)",[r for r in g if r["clv"]<=.3]))
         P(_ev_line("ev earn post","gap up >+2% & leader before",[r for r in earn if r["day"]>.02 and r["lead"]]))
         # Costco monthly sales and Ford sales
-        for sym,rx,day_to in (("COST",r"(reports .*sales results|comparable sales|comp sales|monthly sales)",12),("F",r"(u\.s\.|\bus\b|quarter|monthly).*sales|sales.*(rise|fall|rose|fell|up|down|increase|decline|jump|slip)",7)):
+        for sym,rx,must,day_to in (("COST",r"(sales results|comparable sales|comp sales|monthly sales|same-store sales|net sales)",r"costco",12),
+                                   ("F",r"sales",r"ford",7)):
             df=data.get(sym)
             if df is None: df=_yf_download_retry(sym,"10y","1d",timeout=20,attempts=2).dropna(subset=["Close"])
-            dates=_sales_release_dates(sym,rx,day_to); rows=[]
+            dates=_sales_release_dates(sym,rx,day_to,must=must); rows=[]
             for ts in dates:
                 R=_reaction_index(df.index,ts)
                 if R is None: continue
