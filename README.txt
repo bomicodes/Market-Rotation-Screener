@@ -1,3 +1,8 @@
+v38.7 — rotation setups carry VP room (R to the nearest 60-day POC / value-area high / high-volume node above the entry)
+and the 7-35 DTE call/put walls (call wall distance in R); shown in the digest, logged and sliced ("room", "cwall") to build a
+live record. Stock backtest adds VP-room filters; options backtest (weekly OTM) adds whole-position exits at stock +0.5R/+1R
+and at premium +30/+50/+100%, split by VP room and FTFC.
+
 v38.6 — rotation STRAT lane ranks setups with full timeframe continuity (close above the day, week, month and quarter
 opens) first and shows "FTFC full / partial" in the digest; logged as ftfc_full and sliced in win_rate_slices. The stock and
 options backtests now report results with vs without FTFC. v38.5/38.5.1: options-premium backtest (weekly vs monthly calls).
