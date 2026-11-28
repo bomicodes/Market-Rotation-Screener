@@ -478,3 +478,20 @@ def test_v381_rotation_strat_signal_and_grading():
                        "Low": [9.3, 9.7, 9.6, 10.2], "Close": [9.6, 9.8, 10.2, 12.1]}, index=gi)
     out = A.evaluate_setup_outcome(row, g2)
     assert out["status"] == "win" and out.get("exit") is None             # closed below 10 on day 1, no failed-2U exit
+
+
+def test_v383_rotation_backtest_runs_and_earnings_skip():
+    import app as A, pandas as pd, numpy as np
+    n = 400
+    idx = pd.bdate_range("2017-06-01", periods=n)
+    rng = np.random.default_rng(1)
+    c = 50 * np.exp(np.cumsum(rng.normal(0.001, 0.015, n)))
+    h = c * (1 + rng.uniform(0, 0.02, n)); l = c * (1 - rng.uniform(0, 0.02, n)); o = (h + l) / 2
+    df = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": 1e6}, index=idx)
+    spy = pd.DataFrame({"Close": 100 + np.arange(n) * 0.02}, index=idx)
+    sec = pd.DataFrame({"Close": 50 * np.exp(np.cumsum(rng.normal(0.0008, 0.01, n)))}, index=idx)
+    a = A.rotation_strat_backtest(df, sec, spy, None)
+    assert a["trades"] % 2 == 0
+    every_day = list(idx)
+    b = A.rotation_strat_backtest(df, sec, spy, every_day)
+    assert b["trades"] == 0 and (a["trades"] == 0 or b["skipped_earnings"] > 0)

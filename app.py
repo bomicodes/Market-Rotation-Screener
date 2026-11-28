@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.2"
+APP_VERSION = "38.3"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4438,7 +4438,7 @@ def auth_required():
 def protect_app():
     # v29: the nightly trigger/status endpoints are public but self-limiting
     # (one run per market close, no data returned beyond run status).
-    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print") or request.path.startswith("/static/"):
+    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print", "/api/backtest/rotation/print") or request.path.startswith("/static/"):
         return None
     if auth_required():
         if request.path.startswith("/api/"):
@@ -7275,6 +7275,136 @@ def api_rotation_strat():
         payload,stale,err=cached_refresh_safe(f"rotstrat-v382:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
+# v38.3 SERVER-SIDE ROTATION STRAT BACKTEST (earnings-filter test)
+# Vela Pine has no earnings data, so the same rules are replayed here on Yahoo
+# (split-adjusted) bars with Yahoo + Nasdaq historical report dates. The filter-off
+# run is the check against the Vela numbers. Output goes only to the server log.
+# ---------------------------------------------------------------------------
+ROTATION_BT_LIST={"XLK":"AAPL MSFT AMD ORCL CSCO ADBE QCOM TXN NVDA INTC","XLF":"BAC GS MS C SCHW AXP JPM WFC",
+                  "XLV":"UNH ABBV MRK TMO AMGN BMY CVS LLY PFE","XLI":"GE HON UNP DE LMT UPS MMM CAT BA",
+                  "XLY":"AMZN TSLA HD MCD SBUX LOW TGT NKE","XLE":"XOM CVX COP SLB EOG","XLP":"PG KO PEP WMT COST",
+                  "XLC":"GOOGL META NFLX DIS VZ","XLU":"NEE DUK SO","XLB":"LIN FCX NUE"}
+BT_STATE={"last":0.0,"running":False}
+
+
+def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16):
+    """Pure. Replays the rotation STRAT rules bar by bar; one trade at a time.
+    Exit B: half at +0.5R (planned risk), stop to break-even, rest at 2R or the
+    15-session time stop; on any bar the stop is checked first; on the fill bar
+    only the stop counts. Returns per-half P&L list in dollars + counts."""
+    d=df.dropna(subset=["Open","High","Low","Close"])
+    idx=d.index; n=len(d)
+    o=d["Open"].astype(float).values; h=d["High"].astype(float).values; l=d["Low"].astype(float).values; c=d["Close"].astype(float).values
+    S=sec["Close"].astype(float).reindex(idx).ffill().values; P=spy["Close"].astype(float).reindex(idx).ffill().values
+    cs=pd.Series(c,index=idx); sma20=cs.rolling(20).mean().values; sma50=cs.rolling(50).mean().values
+    rs=pd.Series(c/S,index=idx); rs20=rs.rolling(20).mean().values; rs=rs.values
+    rsec=pd.Series(S/P,index=idx); rsec20=rsec.rolling(20).mean().values; rsec=rsec.values
+    iso=[(t.isocalendar()[0],t.isocalendar()[1]) for t in idx]
+    wk_open=np.empty(n); cur=None; wo=0.0
+    for i in range(n):
+        if iso[i]!=cur: cur=iso[i]; wo=o[i]
+        wk_open[i]=wo
+    E=sorted(pd.Timestamp(x).normalize() for x in (earnings or []))
+    def earn_near(i):
+        if not E: return False
+        a=idx[i].normalize(); b=idx[min(n-1,i+earn_window)].normalize() if i+earn_window<n else a+pd.Timedelta(days=int(earn_window*1.45)+1)
+        return any(a<=e<=b for e in E)
+    st=max(60,int(np.searchsorted(idx.values,np.datetime64(pd.Timestamp(start)))))
+    halves=[]; skipped=0; i=st
+    while i<n-1:
+        def T(a,b): return _strat_type(h[a],l[a],h[b],l[b])
+        if i<2 or any(np.isnan(x) for x in (sma20[i],sma50[i],rs20[i],rsec20[i])) or i<10: i+=1; continue
+        t0=T(i,i-1); t1=T(i-1,i-2); rng=h[i]-l[i]
+        sig=(t0=="1" and t1=="2U") or (t0=="2D" and rng>0 and c[i]>=l[i]+.5*rng and c[i]>sma20[i])
+        ok=sig and rs[i]>rs20[i] and c[i]>sma50[i] and rsec[i]>rsec20[i] and rsec[i]>rsec[i-10] and (not weekly or c[i]>wk_open[i])
+        if not ok: i+=1; continue
+        if earnings is not None and earn_near(i): skipped+=1; i+=1; continue
+        entry=h[i]+.01; stop=l[i]; risk=entry-stop
+        j=i+1
+        if risk<=0 or h[j]<entry: i+=1; continue
+        fill=max(o[j],entry)
+        if fill<=stop: i+=1; continue
+        qty=int(risk_usd//risk); qty-=qty%2
+        if qty<2: i+=1; continue
+        half_px=entry+.5*risk; tgt=entry+2*risk
+        q1=q2=qty//2; open1=open2=True; stp=stop; k=j; last=min(n-1,j+max_hold-1)
+        while k<=last and (open1 or open2):
+            if l[k]<=stp:
+                px=min(o[k],stp) if k>j else stp
+                if open1: halves.append((px-fill)*q1); open1=False
+                if open2: halves.append((px-fill)*q2); open2=False
+                break
+            if k>j:
+                if open1 and h[k]>=half_px: halves.append((max(o[k],half_px)-fill)*q1); open1=False; stp=max(stp,fill)
+                if open2 and h[k]>=tgt: halves.append((max(o[k],tgt)-fill)*q2); open2=False
+            k+=1
+        k=min(k,last)
+        if open1: halves.append((c[k]-fill)*q1)
+        if open2: halves.append((c[k]-fill)*q2)
+        i=k+1
+    w=sum(x for x in halves if x>0); ls=-sum(x for x in halves if x<0)
+    return {"net":round(sum(halves),2),"trades":len(halves),"win":round(100*sum(1 for x in halves if x>0)/len(halves),1) if halves else None,
+            "pf":round(w/ls,2) if ls>0 else None,"skipped_earnings":skipped}
+
+
+def _bt_earnings(t):
+    out=[]
+    try: out+=get_earnings_dates(t,48) or []
+    except Exception: pass
+    try: out+=nasdaq_earnings_history_dates(t) or []
+    except Exception: pass
+    cl=[]
+    for x in out:
+        try:
+            tx=pd.Timestamp(x)
+            if tx.tzinfo is not None: tx=tx.tz_convert(None)
+            cl.append(tx.normalize())
+        except Exception: pass
+    return sorted(set(cl))
+
+
+def print_rotation_backtest():
+    BT_STATE["running"]=True
+    try:
+        etfs=list(ROTATION_BT_LIST)+["SPY"]
+        data={t:_yf_download_retry(t,"10y","1d",timeout=20,attempts=2) for t in etfs}
+        tot={"off":[0,0,0.0,0.0],"on":[0,0,0.0,0.0]}; rows=[]
+        for etf,names in ROTATION_BT_LIST.items():
+            for t in names.split():
+                try:
+                    df=_yf_download_retry(t,"10y","1d",timeout=20,attempts=2)
+                    if df is None or len(df)<300: print(f"[bt rot] {t} no data",flush=True); continue
+                    E=_bt_earnings(t)
+                    a=rotation_strat_backtest(df,data[etf],data["SPY"],None)
+                    b=rotation_strat_backtest(df,data[etf],data["SPY"],E)
+                    e18=[x for x in E if x>=pd.Timestamp("2018-01-01")]
+                    print(f"[bt rot] {t} {etf} OFF net {a['net']:+.0f} n {a['trades']} win {a['win']} pf {a['pf']} | EARN-FILTER net {b['net']:+.0f} n {b['trades']} win {b['win']} pf {b['pf']} skipped {b['skipped_earnings']} | earnings dates since 2018: {len(e18)} first {e18[0].date() if e18 else None}",flush=True)
+                    for k,r in (("off",a),("on",b)):
+                        tot[k][0]+=1; tot[k][1]+=int(r["net"]>0); tot[k][2]+=r["net"]; tot[k][3]+=r["trades"]
+                    rows.append((t,a["net"],b["net"],len(e18)))
+                except Exception as e:
+                    print(f"[bt rot] {t} error {e!r}",flush=True)
+                time.sleep(0.4)
+        for k in ("off","on"):
+            n_,p_,net_,tr_=tot[k]
+            print(f"[bt rot total {k}] {p_}/{n_} profitable · net {net_:+,.0f} · halves {int(tr_)} · per half {net_/tr_ if tr_ else 0:+.1f}",flush=True)
+        thin=[r[0] for r in rows if r[3]<20]
+        print(f"[bt rot note] names with <20 earnings dates since 2018 (filter only partly applied): {', '.join(thin) or 'none'}",flush=True)
+    except Exception as e:
+        print(f"[bt rot error] {e!r}",flush=True)
+    finally:
+        BT_STATE["running"]=False
+
+
+@app.get("/api/backtest/rotation/print")
+def api_backtest_rotation_print():
+    if BT_STATE["running"] or time.time()-BT_STATE["last"]<600: return jsonify({"ok":True,"queued":False})
+    BT_STATE["last"]=time.time()
+    threading.Thread(target=print_rotation_backtest,daemon=True,name="bt-rot").start()
+    return jsonify({"ok":True,"queued":True})
 
 
 # ---------------------------------------------------------------------------
