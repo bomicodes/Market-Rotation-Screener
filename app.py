@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.5"
+APP_VERSION = "38.5.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7633,6 +7633,20 @@ def option_trade_replay(sbars, obars, lv, day_cap):
             "leg_ret":[(x[3]-ent_p)/ent_p for x in legs],"last_exit":max(x[1] for x in legs)}
 
 
+OPT_BT_VARIANTS=(("weekly 7-16d, first strike above",7,16,"otm"),
+                 ("weekly 7-16d, first strike below (ITM)",7,16,"itm"),
+                 ("monthly 28-60d, first strike above",28,60,"otm"))
+OPT_BT_PLANS=(("half +0.5R then BE, rest 2R",0.5,2.0),("all out at 1R",None,1.0),("all out at 2R",None,2.0))
+
+
+def _expiry_candidates(fdt, min_dte, max_dte):
+    out=[]
+    for k in range(0,70):
+        d=fdt+pd.Timedelta(days=k)
+        if d.weekday()==4 and min_dte<=k<=max_dte: out.append(d)
+    return out[:1]
+
+
 def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
     lg=[]
     rotation_strat_backtest(data[t],data[etf],data["SPY"],E,earn_mode="exit",log=lg)
@@ -7647,63 +7661,58 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
     for b in sbars: daily_close[b[0].date()]=b[4]
     rows=[]
     for fd,xd,_,_,d in trades:
-        try:
-            sig=pd.Timestamp(d["sig"]).date(); cap=pd.Timestamp(d["cap"]).date()
-            if pd.Timestamp(cap)>=pd.Timestamp.now().normalize()-pd.Timedelta(days=1): continue
-            raw_sig=daily_close.get(sig)
-            if not raw_sig: continue
-            f=raw_sig/d["adj_close"]
-            lv={k:d[k]*f for k in ("entry","stop","half","tgt")}; lv["fill_date"]=fd
-            # candidate contracts: first monthly 28-60 DTE (Friday and Thursday-holiday variants), strikes around the entry
-            fdt=pd.Timestamp(fd); exps=[]
-            for k in range(0,4):
-                y,m=(fdt+pd.DateOffset(months=k)).year,(fdt+pd.DateOffset(months=k)).month
-                tf=_third_friday(y,m)
-                if 28<=(tf-fdt).days<=60: exps.append(tf)
-            if not exps: continue
-            ex=exps[0]; ks=set()
-            for inc in (0.5,1,2.5,5,10):
-                up=np.ceil(lv["entry"]/inc)*inc; ks.add(round(up,2)); ks.add(round(up+inc,2))
-            ks=sorted(k for k in ks if k>=lv["entry"]*0.995)[:7]
-            syms=[_occ(t,ex,k) for k in ks]+[_occ(t,ex-pd.Timedelta(days=1),k) for k in ks[:3]]
-            ob=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
-                {"symbols":",".join(syms),"timeframe":"1Day","start":(pd.Timestamp(sig)-pd.Timedelta(days=50)).strftime("%Y-%m-%dT00:00:00Z"),
-                 "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
-            best=None
-            for sym in syms:
-                arr=ob.get(sym) or []
-                pre=[b for b in arr if pd.Timestamp(b["t"]).tz_convert("America/New_York").date()<=sig]
-                if not pre or pd.Timestamp(pre[-1]["t"]).tz_convert("America/New_York").date()!=sig: continue
-                k=int(sym[-8:])/1000
-                if best is None or k<best[1]: best=(sym,k,pre)
-            if not best: continue
-            sym,K,pre=best
-            sup=_premium_support_metrics(pre, current_mid=float(pre[-1]["c"]))
-            o30=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
-                {"symbols":sym,"timeframe":"30Min","start":pd.Timestamp(fd).strftime("%Y-%m-%dT00:00:00Z"),
-                 "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
-            obars=_rth(o30.get(sym))
-            res=option_trade_replay(sbars,obars,lv,cap)
-            if not res: continue
-            sig_prem=float(pre[-1]["c"])
-            Tyr=max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365
-            iv=_implied_vol(res["ent_p"],res["stock_fill"],K,Tyr)
-            closes=pd.Series([daily_close[x] for x in sorted(daily_close) if x<=sig][-21:])
-            rv=float(np.log(closes/closes.shift(1)).dropna().std()*np.sqrt(252)) if len(closes)>=15 else None
-            # limit at the signal-day closing premium, live from the stock trigger until the first leg exits
-            lim=None
-            for b in obars:
-                if b[0]<res["fill_t"]: continue
-                if str(b[0])[:16]>min(x[1] for x in res["legs"]): break
-                if b[3]<=sig_prem: lim=sig_prem; break
-            rows.append({"t":t,"sig":str(sig),"sym":sym,"ent_p":res["ent_p"],"sig_prem":sig_prem,"runup":res["ent_p"]/sig_prem-1,
-                         "opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],"iv":iv,"rv":rv,
-                         "ivrv":(iv/rv) if iv and rv else None,"sup_state":(sup or {}).get("state") if (sup or {}).get("available") else "n/a",
-                         "sup_score":(sup or {}).get("score"),"sup_dist":(sup or {}).get("distance_from_support_pct"),
-                         "lim_fill":lim is not None,
-                         "lim_ret":((sum(x[3] for x in res["legs"])-2*lim)/(2*lim)) if lim else None})
-        except Exception as e:
-            print(f"[bt opt err] {t} {fd} {e!r}"[:220],flush=True)
+        sig=pd.Timestamp(d["sig"]).date(); cap0=pd.Timestamp(d["cap"]).date()
+        if pd.Timestamp(cap0)>=pd.Timestamp.now().normalize()-pd.Timedelta(days=1): continue
+        raw_sig=daily_close.get(sig)
+        if not raw_sig: continue
+        f=raw_sig/d["adj_close"]
+        base={k:d[k]*f for k in ("entry","stop")}; risk=base["entry"]-base["stop"]
+        closes=pd.Series([daily_close[x] for x in sorted(daily_close) if x<=sig][-21:])
+        rv=float(np.log(closes/closes.shift(1)).dropna().std()*np.sqrt(252)) if len(closes)>=15 else None
+        for vname,mn,mx,mode in OPT_BT_VARIANTS:
+            try:
+                fdt=pd.Timestamp(fd); exps=_expiry_candidates(fdt,mn,mx)
+                if not exps: continue
+                ex=exps[0]
+                # hold ends the session before expiration (or the stock plan's own cap, if sooner)
+                cap=min(cap0,(ex-pd.offsets.BDay(1)).date())
+                if cap<fdt.date(): continue
+                ks=set()
+                for inc in (0.5,1,2.5,5,10):
+                    up=np.ceil(base["entry"]/inc)*inc; dn=np.floor(base["entry"]/inc)*inc
+                    ks.update({round(up,2),round(up+inc,2),round(dn,2),round(dn-inc,2)})
+                ks=sorted(ks)
+                syms=[_occ(t,ex,k) for k in ks][:16]+[_occ(t,ex-pd.Timedelta(days=1),k) for k in ks if abs(k-base["entry"])<=base["entry"]*0.03][:4]
+                ob=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
+                    {"symbols":",".join(syms),"timeframe":"1Day","start":(pd.Timestamp(sig)-pd.Timedelta(days=10)).strftime("%Y-%m-%dT00:00:00Z"),
+                     "end":(pd.Timestamp(sig)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=2)
+                best=None
+                for sym in syms:
+                    arr=ob.get(sym) or []
+                    if not arr or pd.Timestamp(arr[-1]["t"]).tz_convert("America/New_York").date()!=sig: continue
+                    k=int(sym[-8:])/1000
+                    if mode=="otm" and k>=base["entry"]*0.995: score=k
+                    elif mode=="itm" and k<base["entry"]: score=-k
+                    else: continue
+                    if best is None or score<best[0]: best=(score,sym,k,arr)
+                if not best: continue
+                _,sym,K,pre=best
+                o30=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
+                    {"symbols":sym,"timeframe":"30Min","start":fdt.strftime("%Y-%m-%dT00:00:00Z"),
+                     "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
+                obars=_rth(o30.get(sym))
+                sig_prem=float(pre[-1]["c"])
+                for pname,hr,tr in OPT_BT_PLANS:
+                    lv={"entry":base["entry"],"stop":base["stop"],"half":(base["entry"]+hr*risk) if hr else 1e12,
+                        "tgt":base["entry"]+tr*risk,"fill_date":fd}
+                    res=option_trade_replay(sbars,obars,lv,cap)
+                    if not res: continue
+                    iv=_implied_vol(res["ent_p"],res["stock_fill"],K,max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365)
+                    rows.append({"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
+                                 "runup":res["ent_p"]/sig_prem-1,"opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],
+                                 "ivrv":(iv/rv) if iv and rv else None,"cost":res["ent_p"]*100})
+            except Exception as e:
+                print(f"[bt opt err] {t} {fd} {vname} {e!r}"[:220],flush=True)
     return rows
 
 
@@ -7727,43 +7736,26 @@ def print_options_backtest():
                     if data[t] is None or len(data[t])<300: continue
                     rows=_opt_bt_stock(t,etf,data,_bt_earnings(t))
                     allr+=rows
-                    for r in rows:
-                        lr="" if r["lim_ret"] is None else f"{100*r['lim_ret']:+.0f}%"
-                        print(f"[bt opt t] {r['t']} {r['sig']} {r['sym']} in {r['ent_p']:.2f} sigclose {r['sig_prem']:.2f} opt {100*r['opt_ret']:+.0f}% stockR {r['stock_r']:+.2f} "
-                              f"iv/rv {r['ivrv'] and round(r['ivrv'],2)} sup {r['sup_state']} {r['sup_dist']} lim {'Y' if r['lim_fill'] else 'N'} {lr} legs {r['legs']}",flush=True)
                     data.pop(t,None)
+                    print(f"[bt opt prog] {t} rows {len(rows)}",flush=True)
                 except Exception as e:
                     print(f"[bt opt err] {t} {e!r}"[:200],flush=True)
         P=lambda s: print("[bt opt] "+s,flush=True)
-        P(_opt_bucket_line("ALL option trades",allr))
-        P(_opt_bucket_line("ALL same trades, stock R",allr,"stock_r"))
-        for st in sorted(set(r["sup_state"] for r in allr)):
-            P(_opt_bucket_line(f"premium support {st}",[r for r in allr if r["sup_state"]==st]))
-        sc=[r for r in allr if r.get("sup_dist") is not None]
-        if sc:
-            q=np.percentile([r["sup_dist"] for r in sc],[33.3,66.7])
-            P(_opt_bucket_line(f"premium within {q[0]:.0f}% of its 30d floor (low third)",[r for r in sc if r["sup_dist"]<=q[0]]))
-            P(_opt_bucket_line(f"premium {q[0]:.0f}-{q[1]:.0f}% above floor",[r for r in sc if q[0]<r["sup_dist"]<=q[1]]))
-            P(_opt_bucket_line(f"premium >{q[1]:.0f}% above floor",[r for r in sc if r["sup_dist"]>q[1]]))
-        iv=[r for r in allr if r.get("ivrv")]
-        if iv:
-            q=np.percentile([r["ivrv"] for r in iv],[33.3,66.7])
-            P(_opt_bucket_line(f"IV/RV low (<={q[0]:.2f}, cheap)",[r for r in iv if r["ivrv"]<=q[0]]))
-            P(_opt_bucket_line(f"IV/RV mid",[r for r in iv if q[0]<r["ivrv"]<=q[1]]))
-            P(_opt_bucket_line(f"IV/RV high (>{q[1]:.2f}, expensive)",[r for r in iv if r["ivrv"]>q[1]]))
-        ru=[r for r in allr if r.get("runup") is not None]
-        if ru:
-            q=np.percentile([r["runup"] for r in ru],[33.3,66.7])
-            P(_opt_bucket_line(f"run-up into entry small (<={100*q[0]:.0f}%)",[r for r in ru if r["runup"]<=q[0]]))
-            P(_opt_bucket_line(f"run-up mid",[r for r in ru if q[0]<r["runup"]<=q[1]]))
-            P(_opt_bucket_line(f"run-up big (>{100*q[1]:.0f}%)",[r for r in ru if r["runup"]>q[1]]))
-        lf=[r for r in allr if r["lim_fill"]]
-        P(f"limit at signal-day closing premium: filled {len(lf)}/{len(allr)}")
-        P(_opt_bucket_line("  limit fills, at limit price",lf,"lim_ret"))
-        P(_opt_bucket_line("  limit fills, same trades at market",lf))
-        P(_opt_bucket_line("  limit misses (market result)",[r for r in allr if not r["lim_fill"]]))
-        P(_opt_bucket_line("stock won (R>0)",[r for r in allr if r["stock_r"]>0]))
-        P(_opt_bucket_line("stock lost/flat (R<=0)",[r for r in allr if r["stock_r"]<=0]))
+        for vname,_,_,_ in OPT_BT_VARIANTS:
+            for pname,_,_ in OPT_BT_PLANS:
+                rr=[r for r in allr if r["variant"]==vname and r["plan"]==pname]
+                if not rr: continue
+                v=[r["opt_ret"] for r in rr]; sr=[r["stock_r"] for r in rr]
+                dollars=sum(r["opt_ret"]*min(r["cost"],1e9) for r in rr)
+                P(f"{vname} | {pname}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% median {100*np.median(v):+.0f}% "
+                  f"· stock win {100*np.mean([x>0 for x in sr]):.0f}% · avg cost ${np.median([r['cost'] for r in rr]):.0f} · P&L 1 lot/trade ${dollars:+,.0f}")
+        main=[r for r in allr if r["variant"]==OPT_BT_VARIANTS[0][0] and r["plan"]==OPT_BT_PLANS[0][0]]
+        for lab,key in (("IV/RV","ivrv"),("run-up","runup")):
+            xs=[r for r in main if r.get(key) is not None]
+            if len(xs)>=30:
+                q=np.percentile([r[key] for r in xs],[33.3,66.7])
+                for nm,sel in (("low",[r for r in xs if r[key]<=q[0]]),("mid",[r for r in xs if q[0]<r[key]<=q[1]]),("high",[r for r in xs if r[key]>q[1]])):
+                    P(_opt_bucket_line(f"weekly OTM, current exits, {lab} {nm} ({q[0]:.2f}/{q[1]:.2f})",sel))
     except Exception as e:
         print(f"[bt opt error] {e!r}",flush=True)
     finally:
