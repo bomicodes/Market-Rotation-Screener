@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.12"
+APP_VERSION = "38.13"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7775,7 +7775,7 @@ def _opt_price_at(obars, t, side="vw"):
     return None
 
 
-def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
+def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None, hs=None):
     """Pure. sbars/obars: RTH 30-min lists (stock raw, option). lv: raw entry/stop/half/tgt + fill_date.
     Two contracts: one sold at +0.5R (stop to break-even after), one at 2R / stop / time.
     Returns dict with option + stock results, or None if no fill / no option prints."""
@@ -7783,7 +7783,8 @@ def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
     fd=pd.Timestamp(lv["fill_date"]).date(); cap=pd.Timestamp(day_cap).date()
     bars=[b for b in sbars if fd<=b[0].date()<=cap]
     if not bars: return None
-    filled=None; legs=[]; stp=S0; open1=open2=True; ent_p=None; stock_fill=None
+    filled=None; legs=[]; stp=S0; open1=open2=True; ent_p=None; stock_fill=None; paid=None
+    sp=(lambda p: hs(p) if (hs and p) else 0.0)
     def opx(t):
         return _opt_price_at(obars,t)
     obmap={x[0]:x for x in obars}
@@ -7794,15 +7795,16 @@ def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
             if h>=E:
                 stock_fill=max(o,E); filled=t; ent_p=opx(t)
                 if ent_p is None: return None
+                paid=ent_p+sp(ent_p)
             continue
         hi_first=abs(h-o)<=abs(o-l)
         if prem_tgt is not None:
             ob=obmap.get(t)
-            tp=ent_p*(1+prem_tgt)
-            if ob is not None and ob[2]>=tp:
+            tp=paid*(1+prem_tgt)
+            if ob is not None and ob[2]-sp(ob[2])>=tp:
                 stop_first=(not hi_first) and l<=stp
                 if not stop_first:
-                    px=max(tp,ob[1])
+                    px=max(tp,ob[1]-sp(ob[1]))
                     if open1: legs.append(("prem",t,c,px)); open1=False
                     if open2: legs.append(("prem",t,c,px)); open2=False
                     break
@@ -7830,11 +7832,12 @@ def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
         if open1: legs.append(("time",lb[0],lb[4],lp))
         if open2: legs.append(("time",lb[0],lb[4],lp))
     if any(x[3] is None for x in legs) or len(legs)!=2: return None
-    opt_ret=(sum(x[3] for x in legs)-2*ent_p)/(2*ent_p)
+    legs=[(k,tt,px,(op if k=="prem" else max(0.0,op-sp(op)))) for k,tt,px,op in legs]
+    opt_ret=(sum(x[3] for x in legs)-2*paid)/(2*paid)
     st_r=(sum(x[2] for x in legs)-2*stock_fill)/(2*risk)
-    return {"fill_t":filled,"stock_fill":stock_fill,"ent_p":ent_p,"opt_ret":opt_ret,"stock_r":st_r,
+    return {"fill_t":filled,"stock_fill":stock_fill,"ent_p":paid,"opt_ret":opt_ret,"stock_r":st_r,
             "legs":[(k,str(tt)[:16],round(px,2),round(op,2)) for k,tt,px,op in legs],
-            "leg_ret":[(x[3]-ent_p)/ent_p for x in legs],"last_exit":max(x[1] for x in legs)}
+            "leg_ret":[(x[3]-paid)/paid for x in legs],"last_exit":max(x[1] for x in legs)}
 
 
 OPT_BT_VARIANTS=(("weekly first strike above",7,16,0.0),("weekly ~3% OTM",7,16,0.03),("weekly ~6% OTM",7,16,0.06))
@@ -7880,16 +7883,17 @@ def _opt_positioning(t, sig, spot):
         return {}
 
 
-def option_runner_replay(sbars, obars, lv, day_cap, base_pct=0.30, runner="be", trail=0.5):
+def option_runner_replay(sbars, obars, lv, day_cap, base_pct=0.30, runner="be", trail=0.5, hs=None):
     """Pure. Two contracts. Before the base hit both share the stock stop. Contract 1 is sold when the
-    premium reaches entry*(1+base_pct) (the base hit). Contract 2 (the runner) then gets a break-even
-    premium stop and exits by its rule: 'be' = hold to the last session (day before expiry) unless it falls
-    back to entry; 'trail' = also exit if it gives back `trail` of its peak; '2r' = exit at the stock's 2R
-    target. Returns dict or None."""
+    premium (bid, if hs gives a half-spread) reaches the price paid*(1+base_pct). Contract 2 (the runner)
+    then gets a break-even stop and exits by its rule: 'be' = hold to the last session unless it falls back
+    to the price paid; 'trail' = also exit after giving back `trail` of its peak; '2r' = exit at the stock's
+    2R target. Buys at mid+half-spread, sells at mid-half-spread. Returns dict or None."""
     E,S0=lv["entry"],lv["stop"]; risk=E-S0; T2=E+2*risk
     fd=pd.Timestamp(lv["fill_date"]).date(); cap=pd.Timestamp(day_cap).date()
     bars=[b for b in sbars if fd<=b[0].date()<=cap]
     if not bars: return None
+    sp=(lambda p: hs(p) if (hs and p) else 0.0); bid=lambda p: max(0.0,p-sp(p))
     om={x[0]:x for x in obars}
     def opx(t): return _opt_price_at(obars,t)
     ent=None; filled=None; base=None; run=None; peak=None; based=False
@@ -7898,42 +7902,75 @@ def option_runner_replay(sbars, obars, lv, day_cap, base_pct=0.30, runner="be", 
         if filled is None:
             if b[0].date()!=fd: return None
             if h>=E:
-                filled=t; ent=opx(t)
-                if ent is None: return None
-                peak=ent
+                filled=t; m=opx(t)
+                if m is None: return None
+                ent=m+sp(m); peak=ent
             continue
         ob=om.get(t)
         hi_first=abs(h-o)<=abs(o-l)
         if not based:
             tp=ent*(1+base_pct)
             stop_hit=l<=S0
-            prem_hit=ob is not None and ob[2]>=tp
+            prem_hit=ob is not None and bid(ob[2])>=tp
             if stop_hit and (not prem_hit or not hi_first):
-                p=opx(t); return {"ent":ent,"base":p,"run":p,"ret":(2*p-2*ent)/(2*ent),"run_ret":(p-ent)/ent,"based":False}
+                p=bid(opx(t) or 0); return {"ent":ent,"base":p,"run":p,"ret":(p-ent)/ent,"run_ret":(p-ent)/ent,"based":False}
             if prem_hit:
-                base=max(tp,ob[1]); based=True; peak=max(peak,ob[2])
+                base=max(tp,bid(ob[1])); based=True; peak=max(peak,bid(ob[2]))
                 if runner=="2r" and h>=T2:
-                    run=opx(t); break
+                    run=bid(opx(t) or 0); break
                 continue
         else:
             if ob is not None:
-                peak=max(peak,ob[2])
+                peak=max(peak,bid(ob[2]))
                 if runner=="2r" and h>=T2:
-                    run=opx(t); break
-                if runner=="trail" and ob[3]<=peak*(1-trail) and peak*(1-trail)>ent:
-                    run=min(ob[1],peak*(1-trail)) if ob[1]<peak*(1-trail) else peak*(1-trail); break
-                if ob[3]<=ent:
-                    run=min(ob[1],ent); break
+                    run=bid(opx(t) or 0); break
+                if runner=="trail" and bid(ob[3])<=peak*(1-trail) and peak*(1-trail)>ent:
+                    run=min(bid(ob[1]),peak*(1-trail)); break
+                if bid(ob[3])<=ent:
+                    run=min(bid(ob[1]),ent); break
     if filled is None: return None
     if not based:
         lb=bars[-1]; lo=[x for x in obars if x[0].date()==lb[0].date()]
-        p=lo[-1][4] if lo else None
-        if p is None: return None
+        if not lo: return None
+        p=bid(lo[-1][4])
         return {"ent":ent,"base":p,"run":p,"ret":(p-ent)/ent,"run_ret":(p-ent)/ent,"based":False}
     if run is None:
         lb=bars[-1]; lo=[x for x in obars if x[0].date()==lb[0].date()]
-        run=lo[-1][4] if lo else ent
+        run=bid(lo[-1][4]) if lo else ent
     return {"ent":ent,"base":base,"run":run,"ret":(base+run-2*ent)/(2*ent),"run_ret":(run-ent)/ent,"based":True,"peak_ret":(peak-ent)/ent}
+
+
+SPREAD_TABLE=None
+
+
+def _spread_calibration(tickers):
+    """Live weekly-chain bid/ask for the backtest names: median half-spread ($) by premium size."""
+    pts=[]
+    nxt=pd.Timestamp.now().normalize()+pd.offsets.BDay(1)
+    for t in tickers:
+        try:
+            spot=float(dl_ohlc(t,"5d")["Close"].dropna().iloc[-1])
+            snaps=alpaca_option_chain(t,(nxt+pd.Timedelta(days=7)).strftime("%Y-%m-%d"),(nxt+pd.Timedelta(days=16)).strftime("%Y-%m-%d"),spot)
+            for sym,sn in (snaps or {}).items():
+                rl=len(sym)-15
+                if sym[rl+6]!="C": continue
+                k=int(sym[-8:])/1000
+                if not (spot<=k<=spot*1.09): continue
+                q=sn.get("latestQuote") or {}; bp=_safe_float(q.get("bp")); ap=_safe_float(q.get("ap"))
+                if not bp or not ap or ap<=bp: continue
+                pts.append(((bp+ap)/2,(ap-bp)/2))
+        except Exception: continue
+    edges=[0,0.25,0.5,1,2,5,1e9]; table=[]
+    for lo,hi in zip(edges[:-1],edges[1:]):
+        v=[h_ for m,h_ in pts if lo<=m<hi]
+        if v: table.append((lo,hi,float(np.median(v)),len(v)))
+    return table,len(pts)
+
+
+def _half_spread(p):
+    for lo,hi,h_,n in (SPREAD_TABLE or []):
+        if lo<=p<hi: return h_
+    return max(0.01,0.03*p)
 
 
 def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
@@ -7993,14 +8030,14 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                 sig_prem=float(pre[-1]["c"])
                 for bp in (0.30,0.50):
                     for rn in ("be",):
-                        rr_=option_runner_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"fill_date":fd},cap,base_pct=bp,runner=rn)
+                        rr_=option_runner_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"fill_date":fd},cap,base_pct=bp,runner=rn,hs=_half_spread if SPREAD_TABLE else None)
                         if rr_:
                             rows.append({"runner":True,"plan":f"half at +{int(bp*100)}%, runner {rn}","otm_pct":round(100*(K/base["entry"]-1),1),"opt_ret":rr_["ret"],"run_ret":rr_["run_ret"],"based":rr_["based"],
                                          "peak_ret":rr_.get("peak_ret"),"cost":rr_["ent"]*100,"eb":d.get("earn_bucket"),"ftfc":d.get("ftfc"),"t":t,"sig":str(sig),"variant":vname,"stock_r":0})
                 for pname,hr,tr,pt in OPT_BT_PLANS:
                     lv={"entry":base["entry"],"stop":base["stop"],"half":(base["entry"]+hr*risk) if hr else 1e12,
                         "tgt":base["entry"]+tr*risk,"fill_date":fd}
-                    res=option_trade_replay(sbars,obars,lv,cap,prem_tgt=pt)
+                    res=option_trade_replay(sbars,obars,lv,cap,prem_tgt=pt,hs=_half_spread if SPREAD_TABLE else None)
                     if not res: continue
                     iv=_implied_vol(res["ent_p"],res["stock_fill"],K,max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365)
                     rows.append({"otm_pct":round(100*(K/base["entry"]-1),1),"ftfc":d.get("ftfc"),"vp_room":d.get("vp_room"),"eb":d.get("earn_bucket"),"ud":d.get("ud"),
@@ -8020,8 +8057,13 @@ def _opt_bucket_line(name, rows, key="opt_ret"):
 
 
 def print_options_backtest():
+    global SPREAD_TABLE
     OPT_BT_STATE["running"]=True
     try:
+        names=[t for v in ROTATION_BT_LIST.values() for t in v.split()]
+        SPREAD_TABLE,npts=_spread_calibration(names)
+        print("[bt opt] SPREAD calibration from live weekly call quotes ("+str(npts)+" contracts, "+ALPACA_OPTIONS_FEED+" feed): "+
+              " · ".join(f"${lo:g}-{'' if hi>1e8 else f'${hi:g}'} mid: half-spread ${h_:.3f} (n {n})" for lo,hi,h_,n in SPREAD_TABLE),flush=True)
         etfs=list(ROTATION_BT_LIST)+["SPY"]
         data={x:_yf_download_retry(x,"10y","1d",timeout=20,attempts=2) for x in etfs}
         allr=[]
