@@ -1,3 +1,6 @@
+v38.3 — server-side replay of the rotation STRAT rules on split-adjusted Yahoo bars, with and without an earnings filter (skip a
+signal if a report falls within the next 16 sessions; Yahoo + Nasdaq dates). GET /api/backtest/rotation/print (public trigger, log only).
+
 v38.2 — each rotation STRAT setup carries the free options-flow read (opening-size prints held next day, score, bias) and earnings
 timing (flagged if inside ~21 days); both are logged with the setup and flow is a win-rate slice, so results can be split by flow agreement.
 
