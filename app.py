@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.1"
+APP_VERSION = "38.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7218,7 +7218,16 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
             if not st or not st.get("available"): continue
             st["put_plans"]={"bullish":{"name":"rotation_strat","entry":z["entry"],"stop":z["stop"],"target":z["target"],"rr":2.0}}
             z["entry_plan"]=option_entry_plan(t,"bullish",budget,"rotation_strat",structure=st)
-            z["options_liquidity"]=liq.get("liquidity"); rows.append(z)
+            z["options_liquidity"]=liq.get("liquidity")
+            # v38.2: the free options-flow read (opening-size prints, held next day) + earnings timing
+            try:
+                f=cached_refresh_safe(f"planflow-v2:{t}",lambda t=t:plan_flow_read(t),ttl=(3600 if market_open_now() else 12*3600))[0] or {}
+                z["flow"]={"read":f.get("read"),"score":f.get("score"),"bias":f.get("bias"),"lean":f.get("lean")}
+                z["days_to_earnings"]=f.get("days_to_earnings"); z["next_earnings"]=f.get("next_earnings")
+            except Exception as e: z["flow"]={"read":f"unavailable ({str(e)[:40]})","score":None,"bias":None}
+            dte=z.get("days_to_earnings")
+            z["earnings_in_hold"]=bool(dte is not None and 0<=int(dte)<=21)
+            rows.append(z)
         except Exception as e:
             rejected.append({"ticker":t,"reason":str(e)[:80]})
         finally:
@@ -7238,6 +7247,8 @@ def rotation_strat_log_rows(payload, date, regime=None):
         rows.append({"ticker":z["ticker"],"trade_date":date,"lane":"rotation_strat","direction":"bullish","fill":"stop",
                      "entry":z["entry"],"stop":z["stop"],"target":z["target"],"rr":2.0,"max_wait":1,"no_fail_exit":True,
                      "regime":regime,"parent":z.get("parent"),"signal":z.get("signal"),"half_at":z.get("half_at"),"logged_by":"nightly",
+                     "flow_bias":(z.get("flow") or {}).get("bias"),"flow_score":(z.get("flow") or {}).get("score"),
+                     "days_to_earnings":z.get("days_to_earnings"),"earnings_in_hold":z.get("earnings_in_hold"),
                      "contract":{"label":_contract_label(zz),"cost":zz.get("cost"),"entry_premium":zz.get("entry_premium"),"symbol":(zz.get("leg") or {}).get("symbol")} if zz else None})
     return rows
 
@@ -7246,10 +7257,12 @@ def rotation_strat_lines(payload):
     rows=(payload or {}).get("rows") or []
     if not rows: return [f"[digest rotation] no setups tonight ({(payload or {}).get('candidates',0)} signals, {(payload or {}).get('scanned',0)} stocks scanned)"]
     out=[]
-    for k in range(0,len(rows),4):
-        out.append(f"[digest rotation {k//4+1}] "+" | ".join(
+    for k in range(0,len(rows),2):
+        out.append(f"[digest rotation {k//2+1}] "+" | ".join(
             f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
-            for z in rows[k:k+4]))
+            f" · flow: {(z.get('flow') or {}).get('read')} (score {(z.get('flow') or {}).get('score')}, {(z.get('flow') or {}).get('bias')})"
+            f" · earnings {z.get('next_earnings')} ({z.get('days_to_earnings')}d){' INSIDE THE HOLD' if z.get('earnings_in_hold') else ''}"
+            for z in rows[k:k+2]))
     return out
 
 
@@ -7259,7 +7272,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v381:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v382:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7855,11 +7868,11 @@ def win_rate_slices(days=60, min_n=3):
         if oc.get("status") not in ("win","loss","timeout") or oc.get("r") is None: continue
         pl=json.loads(rr["payload"]); x=_safe_float(pl.get("rr"))
         recs.append({"lane":rr["lane"],"dir":"put" if rr["direction"]=="bearish" else "call","group":pl.get("group_tag") or "untagged",
-                     "tape":pl.get("regime") or "?","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
+                     "tape":pl.get("regime") or "?","flow":pl.get("flow_bias") or "none","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
                      "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50),
                      "mfe":_safe_float(oc.get("mfe_r")),"days":oc.get("days"),
                      "pbe":(oc.get("pbe") or {}) if (oc.get("pbe") or {}).get("status") in ("win","loss") else None})
-    keys=("lane","dir","group","tape","rr")
+    keys=("lane","dir","group","tape","rr","flow")
     out=[]
     def add(name,sub):
         if len(sub)>=min_n: out.append((name,len(sub),round(100*sum(z["win"] for z in sub)/len(sub)),round(float(np.mean([z["r"] for z in sub])),2),round(100*sum(z["tp1"] for z in sub)/len(sub))))

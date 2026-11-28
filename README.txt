@@ -1,3 +1,6 @@
+v38.2 — each rotation STRAT setup carries the free options-flow read (opening-size prints held next day, score, bias) and earnings
+timing (flagged if inside ~21 days); both are logged with the setup and flow is a win-rate slice, so results can be split by flow agreement.
+
 v38.1 — rotation STRAT lane for single stocks (the Vela-backtested leader rules): leader in a sector beating SPY, weekly candle green,
 STRAT 2U-1 or failed 2D on the latest bar; buy-stop over the signal high for the next session only, stop at the signal low, 2R target,
 half at +0.5R then break-even. Nightly stage "rotation strat" logs lane rotation_strat (graded next-bar-only, no failed-2U exit);
