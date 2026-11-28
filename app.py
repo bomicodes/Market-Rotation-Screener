@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.5.1"
+APP_VERSION = "38.6"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7156,6 +7156,20 @@ def _strat_type(h, l, ph, pl):
     return "1"
 
 
+def _ftfc_flags(index, o, c, i):
+    """Pure. Full timeframe continuity (bullish): the close above the open of the current
+    day, week, month and quarter. Returns {"D":bool,"W":bool,"M":bool,"Q":bool}."""
+    t=index[i]; out={"D":bool(c[i]>o[i])}
+    keys={"W":lambda x:(x.isocalendar()[0],x.isocalendar()[1]),"M":lambda x:(x.year,x.month),"Q":lambda x:(x.year,(x.month-1)//3)}
+    for k,fn in keys.items():
+        cur=fn(t); po=None
+        for j in range(i,-1,-1):
+            if fn(index[j])!=cur: break
+            po=o[j]
+        out[k]=bool(po is not None and c[i]>po)
+    return out
+
+
 def rotation_strat_signal(df, sector_df, spy_df, weekly=True):
     """Pure. Checks the latest bar of `df`; returns a plan dict or None."""
     if df is None or sector_df is None or spy_df is None or len(df)<60: return None
@@ -7186,7 +7200,9 @@ def rotation_strat_signal(df, sector_df, spy_df, weekly=True):
     entry=round(float(h.iloc[i])+.01,2); stop=round(float(l.iloc[i]),2); risk=entry-stop
     if risk<=0: return {"ok":False,"checks":checks}
     r20=lambda s:float(s.iloc[i]/s.iloc[i-20]-1)*100
+    ff=_ftfc_flags(d.index,o.values,c.values,i)
     return {"ok":True,"checks":checks,"signal":sig,"signal_date":str(d.index[i])[:10],"entry":entry,"stop":stop,
+            "ftfc":ff,"ftfc_full":all(ff.values()),"ftfc_count":sum(ff.values()),
             "target":round(entry+2*risk,2),"half_at":round(entry+.5*risk,2),"rr":2.0,
             "risk_pct":round(100*risk/entry,2),"rs_vs_sector_20d":round(r20(c)-r20(sec),1),"sector_vs_spy_20d":round(r20(sec)-r20(spy),1)}
 
@@ -7208,7 +7224,8 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
             except Exception: r=None
             if r and r.get("ok"):
                 cands.append({"ticker":t,"parent":g,"sector":SECTORS.get(g),**r}); break
-    cands.sort(key=lambda z:(-z["sector_vs_spy_20d"],-z["rs_vs_sector_20d"]))
+    # v38.6: full timeframe continuity (D/W/M/Q all green) first, as the user trades it
+    cands.sort(key=lambda z:(not z.get("ftfc_full"),-(z.get("ftfc_count") or 0),-z["sector_vs_spy_20d"],-z["rs_vs_sector_20d"]))
     rows=[]; rejected=[]
     for z in cands:
         if len(rows)>=top: break
@@ -7275,9 +7292,16 @@ def rotation_strat_log_rows(payload, date, regime=None):
                      "regime":regime,"parent":z.get("parent"),"signal":z.get("signal"),"half_at":z.get("half_at"),"logged_by":"nightly",
                      "flow_bias":(z.get("flow") or {}).get("bias"),"flow_score":(z.get("flow") or {}).get("score"),
                      "days_to_earnings":z.get("days_to_earnings"),"earnings_in_hold":z.get("earnings_in_hold"),
-                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),
+                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),"ftfc_full":z.get("ftfc_full"),
                      "contract":{"label":_contract_label(zz),"cost":zz.get("cost"),"entry_premium":zz.get("entry_premium"),"symbol":(zz.get("leg") or {}).get("symbol")} if zz else None})
     return rows
+
+
+def _ftfc_label(z):
+    f=z.get("ftfc") or {}
+    if not f: return "FTFC ?"
+    if all(f.values()): return "FTFC full (D W M Q green)"
+    return "FTFC partial ("+" ".join(k+(" green" if v else " red") for k,v in f.items())+")"
 
 
 def rotation_strat_lines(payload):
@@ -7286,7 +7310,7 @@ def rotation_strat_lines(payload):
     out=[]
     for k in range(0,len(rows),2):
         out.append(f"[digest rotation {k//2+1}] "+" | ".join(
-            f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
+            f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · {_ftfc_label(z)} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
             f" · flow: {(z.get('flow') or {}).get('read')} (score {(z.get('flow') or {}).get('score')}, {(z.get('flow') or {}).get('bias')})"
             f" · earnings {z.get('next_earnings')} ({z.get('days_to_earnings')}d){(' · SELL BY '+str(z.get('sell_by'))+' close') if z.get('sell_by') else ''}"
             for z in rows[k:k+2]))
@@ -7299,7 +7323,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v384:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v386:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7317,7 +7341,7 @@ ROTATION_BT_LIST={"XLK":"AAPL MSFT AMD ORCL CSCO ADBE QCOM TXN NVDA INTC","XLF":
 BT_STATE={"last":0.0,"running":False}
 
 
-def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None, earn_mode="skip"):
+def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None, earn_mode="skip", ftfc=None):
     """Pure. Replays the rotation STRAT rules bar by bar; one trade at a time.
     Exit B: half at +0.5R (planned risk), stop to break-even, rest at 2R or the
     15-session time stop; on any bar the stop is checked first; on the fill bar
@@ -7340,7 +7364,7 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         a=idx[i].normalize(); b=idx[min(n-1,i+earn_window)].normalize() if i+earn_window<n else a+pd.Timedelta(days=int(earn_window*1.45)+1)
         return any(a<=e<=b for e in E)
     st=max(60,int(np.searchsorted(idx.values,np.datetime64(pd.Timestamp(start)))))
-    halves=[]; skipped=0; i=st
+    halves=[]; tsum=[]; skipped=0; i=st
     while i<n-1:
         def T(a,b): return _strat_type(h[a],l[a],h[b],l[b])
         if i<2 or any(np.isnan(x) for x in (sma20[i],sma50[i],rs20[i],rsec20[i])) or i<10: i+=1; continue
@@ -7348,6 +7372,8 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         sig=(t0=="1" and t1=="2U") or (t0=="2D" and rng>0 and c[i]>=l[i]+.5*rng and c[i]>sma20[i])
         ok=sig and rs[i]>rs20[i] and c[i]>sma50[i] and rsec[i]>rsec20[i] and rsec[i]>rsec[i-10] and (not weekly or c[i]>wk_open[i])
         if not ok: i+=1; continue
+        ffl=_ftfc_flags(idx,o,c,i) if (ftfc or log is not None) else None
+        if ftfc=="full" and not all(ffl.values()): i+=1; continue
         earn_cap=None
         if earnings is not None and earn_near(i):
             if earn_mode=="exit":
@@ -7400,8 +7426,8 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
             k=min(k,last)
             if open1: tr.append((c[k]-fill)*q)
             if open2: tr.append((c[k]-fill)*q)
-            halves+=tr
-            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
+            halves+=tr; tsum.append(sum(tr))
+            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"ftfc":all(ffl.values()) if ffl else None,"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
             i=k+1; continue
         fill=max(o[j],entry)
         if fill<=stop: i+=1; continue
@@ -7422,7 +7448,8 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         i=k+1
     w=sum(x for x in halves if x>0); ls=-sum(x for x in halves if x<0)
     return {"net":round(sum(halves),2),"trades":len(halves),"win":round(100*sum(1 for x in halves if x>0)/len(halves),1) if halves else None,
-            "pf":round(w/ls,2) if ls>0 else None,"skipped_earnings":skipped}
+            "pf":round(w/ls,2) if ls>0 else None,"skipped_earnings":skipped,
+            "tn":len(tsum),"twin":round(100*sum(1 for x in tsum if x>0)/len(tsum),1) if tsum else None}
 
 
 def _bt_earnings(t):
@@ -7456,6 +7483,10 @@ def print_rotation_backtest():
                     a=rotation_strat_backtest(df,data[etf],data["SPY"],None)
                     b=rotation_strat_backtest(df,data[etf],data["SPY"],E)
                     x=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit")
+                    y=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit",ftfc="full")
+                    print(f"[bt ftfc] {t} EXIT-BEFORE net {x['net']:+.0f} trades {x['tn']} trade-win {x['twin']} halves-win {x['win']} pf {x['pf']} | +FTFC net {y['net']:+.0f} trades {y['tn']} trade-win {y['twin']} halves-win {y['win']} pf {y['pf']}",flush=True)
+                    for k_,r_ in (("xb",x),("ff",y)):
+                        tot.setdefault(k_,[0,0,0.0,0.0,0,0]); tot[k_][0]+=1; tot[k_][1]+=int(r_["net"]>0); tot[k_][2]+=r_["net"]; tot[k_][3]+=r_["trades"]; tot[k_][4]+=r_["tn"]; tot[k_][5]+=r_["tn"]*(r_["twin"] or 0)/100
                     e18=[x for x in E if x>=pd.Timestamp("2018-01-01")]
                     print(f"[bt rot] {t} {etf} OFF net {a['net']:+.0f} n {a['trades']} win {a['win']} pf {a['pf']} | EARN-FILTER net {b['net']:+.0f} n {b['trades']} win {b['win']} pf {b['pf']} skipped {b['skipped_earnings']} | EXIT-BEFORE net {x['net']:+.0f} n {x['trades']} win {x['win']} pf {x['pf']} | earnings dates since 2018: {len(e18)} first {e18[0].date() if e18 else None}",flush=True)
                     for k,r in (("off",a),("on",b),("exit",x)):
@@ -7467,6 +7498,10 @@ def print_rotation_backtest():
         for k in ("off","on","exit"):
             n_,p_,net_,tr_=tot[k]
             print(f"[bt rot total {k}] {p_}/{n_} profitable · net {net_:+,.0f} · halves {int(tr_)} · per half {net_/tr_ if tr_ else 0:+.1f}",flush=True)
+        for k_,lab in (("xb","sell-before-earnings baseline"),("ff","baseline + FTFC full")):
+            if k_ in tot:
+                n_,p_,net_,h_,tn_,tw_=tot[k_]
+                print(f"[bt ftfc total] {lab}: {p_}/{n_} profitable · net {net_:+,.0f} · trades {tn_} · trade win {100*tw_/max(1,tn_):.1f}% · per trade {net_/max(1,tn_):+.1f}",flush=True)
         thin=[r[0] for r in rows if r[3]<20]
         print(f"[bt rot note] names with <20 earnings dates since 2018 (filter only partly applied): {', '.join(thin) or 'none'}",flush=True)
     except Exception as e:
@@ -7708,7 +7743,7 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                     res=option_trade_replay(sbars,obars,lv,cap)
                     if not res: continue
                     iv=_implied_vol(res["ent_p"],res["stock_fill"],K,max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365)
-                    rows.append({"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
+                    rows.append({"ftfc":d.get("ftfc"),"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
                                  "runup":res["ent_p"]/sig_prem-1,"opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],
                                  "ivrv":(iv/rv) if iv and rv else None,"cost":res["ent_p"]*100})
             except Exception as e:
@@ -7749,6 +7784,13 @@ def print_options_backtest():
                 dollars=sum(r["opt_ret"]*min(r["cost"],1e9) for r in rr)
                 P(f"{vname} | {pname}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% median {100*np.median(v):+.0f}% "
                   f"· stock win {100*np.mean([x>0 for x in sr]):.0f}% · avg cost ${np.median([r['cost'] for r in rr]):.0f} · P&L 1 lot/trade ${dollars:+,.0f}")
+        for vname,_,_,_ in OPT_BT_VARIANTS:
+            for pname,_,_ in OPT_BT_PLANS:
+                rr=[r for r in allr if r["variant"]==vname and r["plan"]==pname]
+                for lab,sel in (("FTFC full",[r for r in rr if r.get("ftfc")]),("not full",[r for r in rr if r.get("ftfc") is False])):
+                    if sel:
+                        v=[r["opt_ret"] for r in sel]
+                        P(f"{vname} | {pname} | {lab}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · stock win {100*np.mean([r['stock_r']>0 for r in sel]):.0f}% · P&L 1 lot ${sum(r['opt_ret']*r['cost'] for r in sel):+,.0f}")
         main=[r for r in allr if r["variant"]==OPT_BT_VARIANTS[0][0] and r["plan"]==OPT_BT_PLANS[0][0]]
         for lab,key in (("IV/RV","ivrv"),("run-up","runup")):
             xs=[r for r in main if r.get(key) is not None]
@@ -8363,9 +8405,10 @@ def win_rate_slices(days=60, min_n=3):
         recs.append({"lane":rr["lane"],"dir":"put" if rr["direction"]=="bearish" else "call","group":pl.get("group_tag") or "untagged",
                      "tape":pl.get("regime") or "?","flow":pl.get("flow_bias") or "none","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
                      "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50),
+                     "ftfc":("full" if pl.get("ftfc_full") else "partial") if pl.get("ftfc_full") is not None else "n/a",
                      "mfe":_safe_float(oc.get("mfe_r")),"days":oc.get("days"),
                      "pbe":(oc.get("pbe") or {}) if (oc.get("pbe") or {}).get("status") in ("win","loss") else None})
-    keys=("lane","dir","group","tape","rr","flow")
+    keys=("lane","dir","group","tape","rr","flow","ftfc")
     out=[]
     def add(name,sub):
         if len(sub)>=min_n: out.append((name,len(sub),round(100*sum(z["win"] for z in sub)/len(sub)),round(float(np.mean([z["r"] for z in sub])),2),round(100*sum(z["tp1"] for z in sub)/len(sub))))
