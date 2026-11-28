@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.3.1"
+APP_VERSION = "38.3.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7290,7 +7290,7 @@ ROTATION_BT_LIST={"XLK":"AAPL MSFT AMD ORCL CSCO ADBE QCOM TXN NVDA INTC","XLF":
 BT_STATE={"last":0.0,"running":False}
 
 
-def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None):
+def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None, earn_mode="skip"):
     """Pure. Replays the rotation STRAT rules bar by bar; one trade at a time.
     Exit B: half at +0.5R (planned risk), stop to break-even, rest at 2R or the
     15-session time stop; on any bar the stop is checked first; on the fill bar
@@ -7321,7 +7321,15 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         sig=(t0=="1" and t1=="2U") or (t0=="2D" and rng>0 and c[i]>=l[i]+.5*rng and c[i]>sma20[i])
         ok=sig and rs[i]>rs20[i] and c[i]>sma50[i] and rsec[i]>rsec20[i] and rsec[i]>rsec[i-10] and (not weekly or c[i]>wk_open[i])
         if not ok: i+=1; continue
-        if earnings is not None and earn_near(i): skipped+=1; i+=1; continue
+        earn_cap=None
+        if earnings is not None and earn_near(i):
+            if earn_mode=="exit":
+                a_=idx[i].normalize(); nxt=[e for e in E if e>a_]
+                e_i=int(np.searchsorted(idx.values,np.datetime64(nxt[0]))) if nxt else n
+                if e_i-1<=i+1: skipped+=1; i+=1; continue   # report on the fill day or the day after: no room
+                earn_cap=e_i-1
+            else:
+                skipped+=1; i+=1; continue
         entry=h[i]+.01; stop=l[i]; risk=entry-stop
         j=i+1
         if risk<=0 or h[j]<entry: i+=1; continue
@@ -7329,6 +7337,7 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         if qty<2: i+=1; continue
         half_px=entry+.5*risk; tgt=entry+2*risk; q=qty//2
         last=min(n-1,j+max_hold-1)
+        if earn_cap is not None: last=min(last,earn_cap)
         if intrabar=="tv":
             # TradingView broker-emulator path: open -> nearer extreme -> farther extreme -> close
             fill=None; open1=open2=True; stp=stop; tr=[]; k=j
@@ -7410,7 +7419,7 @@ def print_rotation_backtest():
     try:
         etfs=list(ROTATION_BT_LIST)+["SPY"]
         data={t:_yf_download_retry(t,"10y","1d",timeout=20,attempts=2) for t in etfs}
-        tot={"off":[0,0,0.0,0.0],"on":[0,0,0.0,0.0]}; rows=[]
+        tot={"off":[0,0,0.0,0.0],"on":[0,0,0.0,0.0],"exit":[0,0,0.0,0.0]}; rows=[]
         for etf,names in ROTATION_BT_LIST.items():
             for t in names.split():
                 try:
@@ -7419,15 +7428,16 @@ def print_rotation_backtest():
                     E=_bt_earnings(t)
                     a=rotation_strat_backtest(df,data[etf],data["SPY"],None)
                     b=rotation_strat_backtest(df,data[etf],data["SPY"],E)
+                    x=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit")
                     e18=[x for x in E if x>=pd.Timestamp("2018-01-01")]
-                    print(f"[bt rot] {t} {etf} OFF net {a['net']:+.0f} n {a['trades']} win {a['win']} pf {a['pf']} | EARN-FILTER net {b['net']:+.0f} n {b['trades']} win {b['win']} pf {b['pf']} skipped {b['skipped_earnings']} | earnings dates since 2018: {len(e18)} first {e18[0].date() if e18 else None}",flush=True)
-                    for k,r in (("off",a),("on",b)):
+                    print(f"[bt rot] {t} {etf} OFF net {a['net']:+.0f} n {a['trades']} win {a['win']} pf {a['pf']} | EARN-FILTER net {b['net']:+.0f} n {b['trades']} win {b['win']} pf {b['pf']} skipped {b['skipped_earnings']} | EXIT-BEFORE net {x['net']:+.0f} n {x['trades']} win {x['win']} pf {x['pf']} | earnings dates since 2018: {len(e18)} first {e18[0].date() if e18 else None}",flush=True)
+                    for k,r in (("off",a),("on",b),("exit",x)):
                         tot[k][0]+=1; tot[k][1]+=int(r["net"]>0); tot[k][2]+=r["net"]; tot[k][3]+=r["trades"]
                     rows.append((t,a["net"],b["net"],len(e18)))
                 except Exception as e:
                     print(f"[bt rot] {t} error {e!r}",flush=True)
                 time.sleep(0.4)
-        for k in ("off","on"):
+        for k in ("off","on","exit"):
             n_,p_,net_,tr_=tot[k]
             print(f"[bt rot total {k}] {p_}/{n_} profitable · net {net_:+,.0f} · halves {int(tr_)} · per half {net_/tr_ if tr_ else 0:+.1f}",flush=True)
         thin=[r[0] for r in rows if r[3]<20]
