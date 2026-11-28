@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.4"
+APP_VERSION = "38.5"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4438,7 +4438,7 @@ def auth_required():
 def protect_app():
     # v29: the nightly trigger/status endpoints are public but self-limiting
     # (one run per market close, no data returned beyond run status).
-    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print", "/api/backtest/rotation/print") or request.path.startswith("/static/"):
+    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print", "/api/backtest/rotation/print", "/api/backtest/options/print") or request.path.startswith("/static/"):
         return None
     if auth_required():
         if request.path.startswith("/api/"):
@@ -7401,7 +7401,7 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
             if open1: tr.append((c[k]-fill)*q)
             if open2: tr.append((c[k]-fill)*q)
             halves+=tr
-            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr]))
+            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
             i=k+1; continue
         fill=max(o[j],entry)
         if fill<=stop: i+=1; continue
@@ -7484,7 +7484,7 @@ def print_rotation_backtest_one(t, etf):
             print(f"[bt one] {t} {etf} {mode} net {r['net']:+.0f} n {r['trades']} win {r['win']} pf {r['pf']}",flush=True)
         lg=[]; rotation_strat_backtest(d[t],d[etf],d["SPY"],None,intrabar="tv",log=lg)
         for z in range(0,len(lg),6):
-            print("[bt one trades] "+" ; ".join(f"{a}>{b} {f} {p}" for a,b,f,p in lg[z:z+6]),flush=True)
+            print("[bt one trades] "+" ; ".join(f"{a}>{b} {f} {p}" for a,b,f,p,*_ in lg[z:z+6]),flush=True)
     except Exception as e:
         print(f"[bt one error] {e!r}",flush=True)
     finally:
@@ -7502,6 +7502,279 @@ def api_backtest_rotation_print():
     if BT_STATE["running"] or time.time()-BT_STATE["last"]<600: return jsonify({"ok":True,"queued":False})
     BT_STATE["last"]=time.time()
     threading.Thread(target=print_rotation_backtest,daemon=True,name="bt-rot").start()
+    return jsonify({"ok":True,"queued":True})
+
+
+# ---------------------------------------------------------------------------
+# v38.5 OPTIONS-PREMIUM BACKTEST of the rotation STRAT trades (2024+)
+# Alpaca OPRA history starts ~Feb 2024. Each stock-signal trade is replayed on 30-minute
+# bars with a real call (first monthly 28-60 DTE, first strike at/above the entry),
+# so the option P&L and the "discount" measures at entry can be compared:
+#   premium support state (the scanner's _premium_support_metrics on the contract's
+#   daily bars up to the signal close), IV/RV at entry, premium run-up into entry, and a
+#   limit order at the signal-day closing premium. Output: server log only.
+# ---------------------------------------------------------------------------
+OPT_BT_STATE={"running":False,"last":0.0}
+
+
+def _third_friday(y, m):
+    d=pd.Timestamp(year=y, month=m, day=1)
+    d=d+pd.Timedelta(days=(4-d.weekday())%7)
+    return d+pd.Timedelta(days=14)
+
+
+def _occ(root, exp, strike, cp="C"):
+    return f"{root}{exp.strftime('%y%m%d')}{cp}{int(round(strike*1000)):08d}"
+
+
+def _bs_call(S, K, T, sig, r=0.045):
+    from math import log, sqrt, exp, erf
+    if T<=0 or sig<=0: return max(0.0, S-K)
+    d1=(log(S/K)+(r+.5*sig*sig)*T)/(sig*sqrt(T)); d2=d1-sig*sqrt(T)
+    N=lambda x: .5*(1+erf(x/sqrt(2)))
+    return S*N(d1)-K*exp(-r*T)*N(d2)
+
+
+def _implied_vol(price, S, K, T):
+    if not price or price<=0 or T<=0: return None
+    if price<max(0.0,S-K)*0.999: return None
+    lo,hi=0.01,5.0
+    for _ in range(60):
+        mid=(lo+hi)/2
+        if _bs_call(S,K,T,mid)>price: hi=mid
+        else: lo=mid
+    return (lo+hi)/2
+
+
+def _alpaca_bars_paged(url, params, key="bars", pages=8):
+    out=[] if key=="bars" and "symbols" not in params else {}
+    tok=None
+    for _ in range(pages):
+        p=dict(params)
+        if tok: p["page_token"]=tok
+        r=alpaca_get(url,params=p,timeout=30)
+        if r.status_code==429: time.sleep(1.0); r=alpaca_get(url,params=p,timeout=30)
+        if not r.ok: raise RuntimeError(f"HTTP {r.status_code} {(r.text or '')[:160]}")
+        j=r.json() or {}; b=j.get(key)
+        if isinstance(out,list): out.extend(b or [])
+        else:
+            for sym,arr in (b or {}).items(): out.setdefault(sym,[]).extend(arr or [])
+        tok=j.get("next_page_token")
+        if not tok: break
+    return out
+
+
+def _rth(bars):
+    """Alpaca bars -> regular-hours list of (NY timestamp, o,h,l,c,vw)."""
+    out=[]
+    for b in bars or []:
+        try:
+            t=pd.Timestamp(b["t"]).tz_convert("America/New_York")
+            if (t.hour,t.minute)<(9,30) or t.hour>=16: continue
+            out.append((t,float(b["o"]),float(b["h"]),float(b["l"]),float(b["c"]),float(b.get("vw") or (b["o"]+b["c"])/2)))
+        except Exception: pass
+    return out
+
+
+def _opt_price_at(obars, t, side="vw"):
+    """Option price in the 30-min bar at t, else the next bar the same day."""
+    for b in obars:
+        if b[0]>=t and b[0].date()==t.date():
+            return b[5] if side=="vw" else b[4]
+    return None
+
+
+def option_trade_replay(sbars, obars, lv, day_cap):
+    """Pure. sbars/obars: RTH 30-min lists (stock raw, option). lv: raw entry/stop/half/tgt + fill_date.
+    Two contracts: one sold at +0.5R (stop to break-even after), one at 2R / stop / time.
+    Returns dict with option + stock results, or None if no fill / no option prints."""
+    E,S0,H,T=lv["entry"],lv["stop"],lv["half"],lv["tgt"]; risk=E-S0
+    fd=pd.Timestamp(lv["fill_date"]).date(); cap=pd.Timestamp(day_cap).date()
+    bars=[b for b in sbars if fd<=b[0].date()<=cap]
+    if not bars: return None
+    filled=None; legs=[]; stp=S0; open1=open2=True; ent_p=None; stock_fill=None
+    def opx(t):
+        return _opt_price_at(obars,t)
+    for b in bars:
+        t,o,h,l,c,_=b
+        if filled is None:
+            if b[0].date()!=fd: return None
+            if h>=E:
+                stock_fill=max(o,E); filled=t; ent_p=opx(t)
+                if ent_p is None: return None
+            continue
+        hi_first=abs(h-o)<=abs(o-l)
+        def ups():
+            nonlocal open1,open2,stp
+            if open1 and h>=H:
+                legs.append(("half",t,max(o,H),opx(t))); open1=False; stp=max(stp,stock_fill)
+            if open2 and h>=T:
+                legs.append(("tgt",t,max(o,T),opx(t))); open2=False
+        def downs():
+            nonlocal open1,open2
+            if (open1 or open2) and l<=stp:
+                px=min(o,stp); kind="be" if stp>=stock_fill else "stop"
+                if open1: legs.append((kind,t,px,opx(t))); open1=False
+                if open2: legs.append((kind,t,px,opx(t))); open2=False
+        if hi_first: ups(); downs()
+        else: downs(); ups()
+        if not (open1 or open2): break
+    if filled is None: return None
+    if open1 or open2:
+        lb=bars[-1]; lo=[x for x in obars if x[0].date()==lb[0].date()]
+        lp=lo[-1][4] if lo else None
+        if open1: legs.append(("time",lb[0],lb[4],lp))
+        if open2: legs.append(("time",lb[0],lb[4],lp))
+    if any(x[3] is None for x in legs) or len(legs)!=2: return None
+    opt_ret=(sum(x[3] for x in legs)-2*ent_p)/(2*ent_p)
+    st_r=(sum(x[2] for x in legs)-2*stock_fill)/(2*risk)
+    return {"fill_t":filled,"stock_fill":stock_fill,"ent_p":ent_p,"opt_ret":opt_ret,"stock_r":st_r,
+            "legs":[(k,str(tt)[:16],round(px,2),round(op,2)) for k,tt,px,op in legs],
+            "leg_ret":[(x[3]-ent_p)/ent_p for x in legs],"last_exit":max(x[1] for x in legs)}
+
+
+def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
+    lg=[]
+    rotation_strat_backtest(data[t],data[etf],data["SPY"],E,earn_mode="exit",log=lg)
+    trades=[x for x in lg if x[0]>=start]
+    if not trades: return []
+    end=(pd.Timestamp.now(tz="UTC")-pd.Timedelta(minutes=20))
+    sb=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v2/stocks/{t}/bars",
+        {"timeframe":"30Min","start":"2024-02-15T00:00:00Z","end":end.isoformat().replace("+00:00","Z"),"adjustment":"raw","feed":ALPACA_STOCK_FEED,"limit":10000,"sort":"asc"},pages=10)
+    sbars=_rth(sb)
+    if not sbars: return []
+    daily_close={}
+    for b in sbars: daily_close[b[0].date()]=b[4]
+    rows=[]
+    for fd,xd,_,_,d in trades:
+        try:
+            sig=pd.Timestamp(d["sig"]).date(); cap=pd.Timestamp(d["cap"]).date()
+            if pd.Timestamp(cap)>=pd.Timestamp.now().normalize()-pd.Timedelta(days=1): continue
+            raw_sig=daily_close.get(sig)
+            if not raw_sig: continue
+            f=raw_sig/d["adj_close"]
+            lv={k:d[k]*f for k in ("entry","stop","half","tgt")}; lv["fill_date"]=fd
+            # candidate contracts: first monthly 28-60 DTE (Friday and Thursday-holiday variants), strikes around the entry
+            fdt=pd.Timestamp(fd); exps=[]
+            for k in range(0,4):
+                y,m=(fdt+pd.DateOffset(months=k)).year,(fdt+pd.DateOffset(months=k)).month
+                tf=_third_friday(y,m)
+                if 28<=(tf-fdt).days<=60: exps.append(tf)
+            if not exps: continue
+            ex=exps[0]; ks=set()
+            for inc in (0.5,1,2.5,5,10):
+                up=np.ceil(lv["entry"]/inc)*inc; ks.add(round(up,2)); ks.add(round(up+inc,2))
+            ks=sorted(k for k in ks if k>=lv["entry"]*0.995)[:7]
+            syms=[_occ(t,ex,k) for k in ks]+[_occ(t,ex-pd.Timedelta(days=1),k) for k in ks[:3]]
+            ob=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
+                {"symbols":",".join(syms),"timeframe":"1Day","start":(pd.Timestamp(sig)-pd.Timedelta(days=50)).strftime("%Y-%m-%dT00:00:00Z"),
+                 "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
+            best=None
+            for sym in syms:
+                arr=ob.get(sym) or []
+                pre=[b for b in arr if pd.Timestamp(b["t"]).tz_convert("America/New_York").date()<=sig]
+                if not pre or pd.Timestamp(pre[-1]["t"]).tz_convert("America/New_York").date()!=sig: continue
+                k=int(sym[-8:])/1000
+                if best is None or k<best[1]: best=(sym,k,pre)
+            if not best: continue
+            sym,K,pre=best
+            sup=_premium_support_metrics(pre, current_mid=float(pre[-1]["c"]))
+            o30=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
+                {"symbols":sym,"timeframe":"30Min","start":pd.Timestamp(fd).strftime("%Y-%m-%dT00:00:00Z"),
+                 "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
+            obars=_rth(o30.get(sym))
+            res=option_trade_replay(sbars,obars,lv,cap)
+            if not res: continue
+            sig_prem=float(pre[-1]["c"])
+            Tyr=max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365
+            iv=_implied_vol(res["ent_p"],res["stock_fill"],K,Tyr)
+            closes=pd.Series([daily_close[x] for x in sorted(daily_close) if x<=sig][-21:])
+            rv=float(np.log(closes/closes.shift(1)).dropna().std()*np.sqrt(252)) if len(closes)>=15 else None
+            # limit at the signal-day closing premium, live from the stock trigger until the first leg exits
+            lim=None
+            for b in obars:
+                if b[0]<res["fill_t"]: continue
+                if str(b[0])[:16]>min(x[1] for x in res["legs"]): break
+                if b[3]<=sig_prem: lim=sig_prem; break
+            rows.append({"t":t,"sig":str(sig),"sym":sym,"ent_p":res["ent_p"],"sig_prem":sig_prem,"runup":res["ent_p"]/sig_prem-1,
+                         "opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],"iv":iv,"rv":rv,
+                         "ivrv":(iv/rv) if iv and rv else None,"sup_state":(sup or {}).get("state") if (sup or {}).get("available") else "n/a",
+                         "sup_score":(sup or {}).get("score"),"sup_dist":(sup or {}).get("distance_from_support_pct"),
+                         "lim_fill":lim is not None,
+                         "lim_ret":((sum(x[3] for x in res["legs"])-2*lim)/(2*lim)) if lim else None})
+        except Exception as e:
+            print(f"[bt opt err] {t} {fd} {e!r}"[:220],flush=True)
+    return rows
+
+
+def _opt_bucket_line(name, rows, key="opt_ret"):
+    v=[r[key] for r in rows if r.get(key) is not None]
+    if not v: return f"{name}: n 0"
+    w=sum(1 for x in v if x>0)
+    return f"{name}: n {len(v)} win {100*w/len(v):.0f}% avg {100*np.mean(v):+.0f}% median {100*np.median(v):+.0f}%"
+
+
+def print_options_backtest():
+    OPT_BT_STATE["running"]=True
+    try:
+        etfs=list(ROTATION_BT_LIST)+["SPY"]
+        data={x:_yf_download_retry(x,"10y","1d",timeout=20,attempts=2) for x in etfs}
+        allr=[]
+        for etf,names in ROTATION_BT_LIST.items():
+            for t in names.split():
+                try:
+                    data[t]=_yf_download_retry(t,"10y","1d",timeout=20,attempts=2)
+                    if data[t] is None or len(data[t])<300: continue
+                    rows=_opt_bt_stock(t,etf,data,_bt_earnings(t))
+                    allr+=rows
+                    for r in rows:
+                        lr="" if r["lim_ret"] is None else f"{100*r['lim_ret']:+.0f}%"
+                        print(f"[bt opt t] {r['t']} {r['sig']} {r['sym']} in {r['ent_p']:.2f} sigclose {r['sig_prem']:.2f} opt {100*r['opt_ret']:+.0f}% stockR {r['stock_r']:+.2f} "
+                              f"iv/rv {r['ivrv'] and round(r['ivrv'],2)} sup {r['sup_state']} {r['sup_dist']} lim {'Y' if r['lim_fill'] else 'N'} {lr} legs {r['legs']}",flush=True)
+                    data.pop(t,None)
+                except Exception as e:
+                    print(f"[bt opt err] {t} {e!r}"[:200],flush=True)
+        P=lambda s: print("[bt opt] "+s,flush=True)
+        P(_opt_bucket_line("ALL option trades",allr))
+        P(_opt_bucket_line("ALL same trades, stock R",allr,"stock_r"))
+        for st in sorted(set(r["sup_state"] for r in allr)):
+            P(_opt_bucket_line(f"premium support {st}",[r for r in allr if r["sup_state"]==st]))
+        sc=[r for r in allr if r.get("sup_dist") is not None]
+        if sc:
+            q=np.percentile([r["sup_dist"] for r in sc],[33.3,66.7])
+            P(_opt_bucket_line(f"premium within {q[0]:.0f}% of its 30d floor (low third)",[r for r in sc if r["sup_dist"]<=q[0]]))
+            P(_opt_bucket_line(f"premium {q[0]:.0f}-{q[1]:.0f}% above floor",[r for r in sc if q[0]<r["sup_dist"]<=q[1]]))
+            P(_opt_bucket_line(f"premium >{q[1]:.0f}% above floor",[r for r in sc if r["sup_dist"]>q[1]]))
+        iv=[r for r in allr if r.get("ivrv")]
+        if iv:
+            q=np.percentile([r["ivrv"] for r in iv],[33.3,66.7])
+            P(_opt_bucket_line(f"IV/RV low (<={q[0]:.2f}, cheap)",[r for r in iv if r["ivrv"]<=q[0]]))
+            P(_opt_bucket_line(f"IV/RV mid",[r for r in iv if q[0]<r["ivrv"]<=q[1]]))
+            P(_opt_bucket_line(f"IV/RV high (>{q[1]:.2f}, expensive)",[r for r in iv if r["ivrv"]>q[1]]))
+        ru=[r for r in allr if r.get("runup") is not None]
+        if ru:
+            q=np.percentile([r["runup"] for r in ru],[33.3,66.7])
+            P(_opt_bucket_line(f"run-up into entry small (<={100*q[0]:.0f}%)",[r for r in ru if r["runup"]<=q[0]]))
+            P(_opt_bucket_line(f"run-up mid",[r for r in ru if q[0]<r["runup"]<=q[1]]))
+            P(_opt_bucket_line(f"run-up big (>{100*q[1]:.0f}%)",[r for r in ru if r["runup"]>q[1]]))
+        lf=[r for r in allr if r["lim_fill"]]
+        P(f"limit at signal-day closing premium: filled {len(lf)}/{len(allr)}")
+        P(_opt_bucket_line("  limit fills, at limit price",lf,"lim_ret"))
+        P(_opt_bucket_line("  limit fills, same trades at market",lf))
+        P(_opt_bucket_line("  limit misses (market result)",[r for r in allr if not r["lim_fill"]]))
+        P(_opt_bucket_line("stock won (R>0)",[r for r in allr if r["stock_r"]>0]))
+        P(_opt_bucket_line("stock lost/flat (R<=0)",[r for r in allr if r["stock_r"]<=0]))
+    except Exception as e:
+        print(f"[bt opt error] {e!r}",flush=True)
+    finally:
+        OPT_BT_STATE["running"]=False
+
+
+@app.get("/api/backtest/options/print")
+def api_backtest_options_print():
+    if OPT_BT_STATE["running"] or BT_STATE["running"] or time.time()-OPT_BT_STATE["last"]<600: return jsonify({"ok":True,"queued":False})
+    OPT_BT_STATE["last"]=time.time()
+    threading.Thread(target=print_options_backtest,daemon=True,name="bt-opt").start()
     return jsonify({"ok":True,"queued":True})
 
 

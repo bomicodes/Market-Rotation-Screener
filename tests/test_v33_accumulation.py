@@ -522,7 +522,7 @@ def test_v3832_earnings_exit_mode_caps_hold():
     E=list(idx[::40])
     lg=[]; r=A.rotation_strat_backtest(df,sec,spy,E,earn_mode="exit",log=lg)
     assert r["trades"]%2==0
-    for a,b,f,p in lg:
+    for a,b,f,p,*_ in lg:
         nxt=[e for e in E if e>pd.Timestamp(a)]
         if nxt: assert pd.Timestamp(b)<nxt[0]
 
@@ -535,3 +535,20 @@ def test_v384_rotation_earnings_action():
     assert r["earnings_action"] == "sell_before" and r["sell_by"] == "2026-12-17" and r["max_hold"] == 14
     assert A._rotation_earnings_action("2026-11-27", "2026-12-01")["earnings_action"] == "skip"
     assert A._rotation_earnings_action("2026-11-27", "2027-01-27")["earnings_action"] == "none"
+
+
+def test_v385_option_trade_replay_half_then_target():
+    import app as A, pandas as pd
+    tz="America/New_York"
+    def T(s): return pd.Timestamp(s, tz=tz)
+    # entry 10.01 stop 9.51 risk .5 half 10.26 tgt 11.01
+    lv={"entry":10.01,"stop":9.51,"half":10.26,"tgt":11.01,"fill_date":"2024-03-04"}
+    s=[(T("2024-03-04 09:30"),9.9,10.05,9.85,10.0,10.0),   # fills at 10.01
+       (T("2024-03-04 10:00"),10.0,10.30,9.98,10.2,10.2),  # half
+       (T("2024-03-05 09:30"),10.5,11.10,10.4,11.0,11.0)]  # target
+    o=[(T("2024-03-04 09:30"),1,1,1,1,1.00),(T("2024-03-04 10:00"),1.2,1.3,1.1,1.2,1.25),(T("2024-03-05 09:30"),1.6,1.9,1.5,1.8,1.75)]
+    r=A.option_trade_replay(s,o,lv,"2024-03-20")
+    assert r and abs(r["ent_p"]-1.0)<1e-9 and [x[0] for x in r["legs"]]==["half","tgt"]
+    assert abs(r["opt_ret"]-0.5)<1e-9 and r["stock_r"]>1
+    assert A._occ("T",pd.Timestamp("2026-12-31"),23.5)=="T261231C00023500"
+    assert abs(A._implied_vol(A._bs_call(100,100,.1,.3),100,100,.1)-.3)<1e-3
