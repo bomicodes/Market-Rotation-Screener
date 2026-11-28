@@ -620,3 +620,17 @@ def test_v3882_costco_rule_dates():
     import app as A
     d=A._costco_rule_dates("2025-06-01")
     assert d[0].startswith("2025-06-04") and any(x.startswith("2025-08-06") for x in d) and any(x.startswith("2025-10-08") for x in d) and any(x.startswith("2025-11-05") for x in d)
+
+
+def test_v389_runner_replay():
+    import app as A, pandas as pd
+    T=lambda x: pd.Timestamp(x,tz="America/New_York")
+    lv={"entry":10.01,"stop":9.51,"fill_date":"2024-03-04"}
+    s=[(T("2024-03-04 09:30"),9.9,10.05,9.85,10.0,10.0),(T("2024-03-04 10:00"),10.0,10.3,9.98,10.2,10.2),
+       (T("2024-03-05 09:30"),10.5,11.5,10.4,11.4,11.3),(T("2024-03-05 15:30"),11.4,11.6,11.3,11.5,11.5)]
+    o=[(T("2024-03-04 09:30"),1,1,1,1,1.0),(T("2024-03-04 10:00"),1.1,1.35,1.05,1.3,1.2),
+       (T("2024-03-05 09:30"),1.8,2.6,1.7,2.5,2.4),(T("2024-03-05 15:30"),2.5,2.9,2.4,2.8,2.7)]
+    r=A.option_runner_replay(s,o,lv,"2024-03-05",base_pct=0.30,runner="be")
+    assert r and r["based"] and abs(r["base"]-1.3)<1e-9 and abs(r["run"]-2.8)<1e-9
+    r2=A.option_runner_replay(s,o,lv,"2024-03-05",base_pct=0.30,runner="2r")
+    assert r2 and r2["run"]<2.8

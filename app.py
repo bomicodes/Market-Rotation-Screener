@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.8.2"
+APP_VERSION = "38.9"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7790,6 +7790,62 @@ def _opt_positioning(t, sig, spot):
         return {}
 
 
+def option_runner_replay(sbars, obars, lv, day_cap, base_pct=0.30, runner="be", trail=0.5):
+    """Pure. Two contracts. Before the base hit both share the stock stop. Contract 1 is sold when the
+    premium reaches entry*(1+base_pct) (the base hit). Contract 2 (the runner) then gets a break-even
+    premium stop and exits by its rule: 'be' = hold to the last session (day before expiry) unless it falls
+    back to entry; 'trail' = also exit if it gives back `trail` of its peak; '2r' = exit at the stock's 2R
+    target. Returns dict or None."""
+    E,S0=lv["entry"],lv["stop"]; risk=E-S0; T2=E+2*risk
+    fd=pd.Timestamp(lv["fill_date"]).date(); cap=pd.Timestamp(day_cap).date()
+    bars=[b for b in sbars if fd<=b[0].date()<=cap]
+    if not bars: return None
+    om={x[0]:x for x in obars}
+    def opx(t): return _opt_price_at(obars,t)
+    ent=None; filled=None; base=None; run=None; peak=None; based=False
+    for b in bars:
+        t,o,h,l,c,_=b
+        if filled is None:
+            if b[0].date()!=fd: return None
+            if h>=E:
+                filled=t; ent=opx(t)
+                if ent is None: return None
+                peak=ent
+            continue
+        ob=om.get(t)
+        hi_first=abs(h-o)<=abs(o-l)
+        if not based:
+            tp=ent*(1+base_pct)
+            stop_hit=l<=S0
+            prem_hit=ob is not None and ob[2]>=tp
+            if stop_hit and (not prem_hit or not hi_first):
+                p=opx(t); return {"ent":ent,"base":p,"run":p,"ret":(2*p-2*ent)/(2*ent),"run_ret":(p-ent)/ent,"based":False}
+            if prem_hit:
+                base=max(tp,ob[1]); based=True; peak=max(peak,ob[2])
+                if runner=="2r" and h>=T2:
+                    run=opx(t); break
+                continue
+        else:
+            if ob is not None:
+                peak=max(peak,ob[2])
+                if runner=="2r" and h>=T2:
+                    run=opx(t); break
+                if runner=="trail" and ob[3]<=peak*(1-trail) and peak*(1-trail)>ent:
+                    run=min(ob[1],peak*(1-trail)) if ob[1]<peak*(1-trail) else peak*(1-trail); break
+                if ob[3]<=ent:
+                    run=min(ob[1],ent); break
+    if filled is None: return None
+    if not based:
+        lb=bars[-1]; lo=[x for x in obars if x[0].date()==lb[0].date()]
+        p=lo[-1][4] if lo else None
+        if p is None: return None
+        return {"ent":ent,"base":p,"run":p,"ret":(p-ent)/ent,"run_ret":(p-ent)/ent,"based":False}
+    if run is None:
+        lb=bars[-1]; lo=[x for x in obars if x[0].date()==lb[0].date()]
+        run=lo[-1][4] if lo else ent
+    return {"ent":ent,"base":base,"run":run,"ret":(base+run-2*ent)/(2*ent),"run_ret":(run-ent)/ent,"based":True,"peak_ret":(peak-ent)/ent}
+
+
 def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
     lg=[]
     rotation_strat_backtest(data[t],data[etf],data["SPY"],E,earn_mode="exit",log=lg)
@@ -7846,6 +7902,12 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                      "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
                 obars=_rth(o30.get(sym))
                 sig_prem=float(pre[-1]["c"])
+                for bp in (0.20,0.30):
+                    for rn in ("be","trail","2r"):
+                        rr_=option_runner_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"fill_date":fd},cap,base_pct=bp,runner=rn)
+                        if rr_:
+                            rows.append({"runner":True,"plan":f"half at +{int(bp*100)}%, runner {rn}","opt_ret":rr_["ret"],"run_ret":rr_["run_ret"],"based":rr_["based"],
+                                         "peak_ret":rr_.get("peak_ret"),"cost":rr_["ent"]*100,"eb":d.get("earn_bucket"),"ftfc":d.get("ftfc"),"t":t,"sig":str(sig),"variant":vname,"stock_r":0})
                 for pname,hr,tr,pt in OPT_BT_PLANS:
                     lv={"entry":base["entry"],"stop":base["stop"],"half":(base["entry"]+hr*risk) if hr else 1e12,
                         "tgt":base["entry"]+tr*risk,"fill_date":fd}
@@ -7886,6 +7948,20 @@ def print_options_backtest():
                 except Exception as e:
                     print(f"[bt opt err] {t} {e!r}"[:200],flush=True)
         P=lambda s: print("[bt opt] "+s,flush=True)
+        for bp in (20,30):
+            for rn in ("be","trail","2r"):
+                pname=f"half at +{bp}%, runner {rn}"; rr=[r for r in allr if r.get("plan")==pname]
+                if not rr: continue
+                v=[r["opt_ret"] for r in rr]; runs=[r["run_ret"] for r in rr if r["based"]]
+                P(f"RUN {pname}: n {len(v)} win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · P&L 1 lot/trade ${sum(r['opt_ret']*r['cost'] for r in rr):+,.0f} "
+                  f"· base hit {100*np.mean([r['based'] for r in rr]):.0f}% · runner >=+100% {sum(1 for x in runs if x>=1)} · >=+300% {sum(1 for x in runs if x>=3)} · >=+900% {sum(1 for x in runs if x>=9)} · best runner {100*max(runs) if runs else 0:+.0f}%")
+                for lab,sel in (("post-earnings",[r for r in rr if r.get("eb")=="post"]),("FTFC",[r for r in rr if r.get("ftfc")])):
+                    if sel:
+                        w=[r["opt_ret"] for r in sel]
+                        P(f"RUN {pname} | {lab}: n {len(w)} win {100*np.mean([x>0 for x in w]):.0f}% avg {100*np.mean(w):+.0f}% · P&L ${sum(r['opt_ret']*r['cost'] for r in sel):+,.0f}")
+        pk=[r.get("peak_ret") for r in allr if r.get("plan")=="half at +30%, runner be" and r.get("peak_ret") is not None]
+        if pk: P(f"RUN peak premium after entry (trades that hit the base): n {len(pk)} · >=+100% {sum(1 for x in pk if x>=1)} · >=+300% {sum(1 for x in pk if x>=3)} · >=+900% {sum(1 for x in pk if x>=9)} · max {100*max(pk):+.0f}%")
+        allr=[r for r in allr if not r.get("runner")]
         for vname,_,_,_ in OPT_BT_VARIANTS:
             for pname,_,_,_ in OPT_BT_PLANS:
                 rr=[r for r in allr if r["variant"]==vname and r["plan"]==pname]
