@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.6"
+APP_VERSION = "38.7"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7156,6 +7156,33 @@ def _strat_type(h, l, ph, pl):
     return "1"
 
 
+def _vp_room(h, l, v, i, entry, risk, lookback=60, bins=40):
+    """Pure. 60-day volume profile from daily bars (each bar's volume spread evenly over its range).
+    Obstacles = POC, value-area high and high-volume-node peaks above the entry.
+    Returns (room in R to the nearest obstacle above entry, capped at 9; None if no data)."""
+    a=max(0,i-lookback+1)
+    hh=np.asarray(h[a:i+1],float); ll=np.asarray(l[a:i+1],float); vv=np.asarray(v[a:i+1],float)
+    if len(hh)<20 or risk<=0 or not np.isfinite(vv).all() or vv.sum()<=0: return None
+    lo,hi=float(ll.min()),float(hh.max())
+    if hi<=lo: return None
+    edges=np.linspace(lo,hi,bins+1); mids=(edges[:-1]+edges[1:])/2; prof=np.zeros(bins)
+    for x,y,z in zip(hh,ll,vv):
+        m=(mids>=y)&(mids<=x)
+        if m.any(): prof[m]+=z/m.sum()
+    poc=int(np.argmax(prof)); tot=prof.sum(); lo_i=hi_i=poc; acc=prof[poc]
+    while acc<0.7*tot and (lo_i>0 or hi_i<bins-1):
+        up=prof[hi_i+1] if hi_i<bins-1 else -1; dn=prof[lo_i-1] if lo_i>0 else -1
+        if up>=dn: hi_i+=1; acc+=up
+        else: lo_i-=1; acc+=dn
+    levels=[mids[poc],mids[hi_i]]
+    mean=prof.mean()
+    for k in range(1,bins-1):
+        if prof[k]>=prof[k-1] and prof[k]>=prof[k+1] and prof[k]>=1.3*mean: levels.append(mids[k])
+    above=[x for x in levels if x>entry]
+    if not above: return 9.0
+    return round(min(9.0,(min(above)-entry)/risk),2)
+
+
 def _ftfc_flags(index, o, c, i):
     """Pure. Full timeframe continuity (bullish): the close above the open of the current
     day, week, month and quarter. Returns {"D":bool,"W":bool,"M":bool,"Q":bool}."""
@@ -7201,7 +7228,9 @@ def rotation_strat_signal(df, sector_df, spy_df, weekly=True):
     if risk<=0: return {"ok":False,"checks":checks}
     r20=lambda s:float(s.iloc[i]/s.iloc[i-20]-1)*100
     ff=_ftfc_flags(d.index,o.values,c.values,i)
-    return {"ok":True,"checks":checks,"signal":sig,"signal_date":str(d.index[i])[:10],"entry":entry,"stop":stop,
+    try: vpr=_vp_room(h.values,l.values,d["Volume"].astype(float).fillna(0).values,i,entry,risk)
+    except Exception: vpr=None
+    return {"ok":True,"checks":checks,"signal":sig,"signal_date":str(d.index[i])[:10],"entry":entry,"stop":stop,"vp_room_r":vpr,
             "ftfc":ff,"ftfc_full":all(ff.values()),"ftfc_count":sum(ff.values()),
             "target":round(entry+2*risk,2),"half_at":round(entry+.5*risk,2),"rr":2.0,
             "risk_pct":round(100*risk/entry,2),"rs_vs_sector_20d":round(r20(c)-r20(sec),1),"sector_vs_spy_20d":round(r20(sec)-r20(spy),1)}
@@ -7239,6 +7268,15 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
             st["put_plans"]={"bullish":{"name":"rotation_strat","entry":z["entry"],"stop":z["stop"],"target":z["target"],"rr":2.0}}
             z["entry_plan"]=option_entry_plan(t,"bullish",budget,"rotation_strat",structure=st)
             z["options_liquidity"]=liq.get("liquidity")
+            # v38.7: call/put walls (7-35 DTE modeled dealer positioning), logged to build a live track record
+            try:
+                pos=liq.get("positioning") or {}
+                rk=z["entry"]-z["stop"]
+                cw=_safe_float(pos.get("call_wall")); pw=_safe_float(pos.get("put_wall"))
+                z["call_wall"]=cw; z["put_wall"]=pw
+                z["call_wall_r"]=round((cw-z["entry"])/rk,2) if cw and rk>0 else None
+                z["put_wall_vs_stop"]=("below stop" if pw<z["stop"] else "above stop") if pw else None
+            except Exception: pass
             # v38.2: the free options-flow read (opening-size prints, held next day) + earnings timing
             try:
                 f=cached_refresh_safe(f"planflow-v2:{t}",lambda t=t:plan_flow_read(t),ttl=(3600 if market_open_now() else 12*3600))[0] or {}
@@ -7292,7 +7330,7 @@ def rotation_strat_log_rows(payload, date, regime=None):
                      "regime":regime,"parent":z.get("parent"),"signal":z.get("signal"),"half_at":z.get("half_at"),"logged_by":"nightly",
                      "flow_bias":(z.get("flow") or {}).get("bias"),"flow_score":(z.get("flow") or {}).get("score"),
                      "days_to_earnings":z.get("days_to_earnings"),"earnings_in_hold":z.get("earnings_in_hold"),
-                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),"ftfc_full":z.get("ftfc_full"),
+                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),"ftfc_full":z.get("ftfc_full"),"vp_room_r":z.get("vp_room_r"),"call_wall":z.get("call_wall"),"call_wall_r":z.get("call_wall_r"),"put_wall":z.get("put_wall"),
                      "contract":{"label":_contract_label(zz),"cost":zz.get("cost"),"entry_premium":zz.get("entry_premium"),"symbol":(zz.get("leg") or {}).get("symbol")} if zz else None})
     return rows
 
@@ -7304,13 +7342,21 @@ def _ftfc_label(z):
     return "FTFC partial ("+" ".join(k+(" green" if v else " red") for k,v in f.items())+")"
 
 
+def _room_label(z):
+    vr=z.get("vp_room_r"); cr=z.get("call_wall_r")
+    a="VP room ?" if vr is None else ("VP clear above" if vr>=9 else f"VP level {vr}R above")
+    b="" if z.get("call_wall") is None else f" · call wall {z.get('call_wall')} ({cr:+}R)" if cr is not None else f" · call wall {z.get('call_wall')}"
+    c="" if z.get("put_wall") is None else f" · put wall {z.get('put_wall')}"
+    return a+b+c
+
+
 def rotation_strat_lines(payload):
     rows=(payload or {}).get("rows") or []
     if not rows: return [f"[digest rotation] no setups tonight ({(payload or {}).get('candidates',0)} signals, {(payload or {}).get('scanned',0)} stocks scanned)"]
     out=[]
     for k in range(0,len(rows),2):
         out.append(f"[digest rotation {k//2+1}] "+" | ".join(
-            f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · {_ftfc_label(z)} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
+            f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · {_ftfc_label(z)} · {_room_label(z)} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
             f" · flow: {(z.get('flow') or {}).get('read')} (score {(z.get('flow') or {}).get('score')}, {(z.get('flow') or {}).get('bias')})"
             f" · earnings {z.get('next_earnings')} ({z.get('days_to_earnings')}d){(' · SELL BY '+str(z.get('sell_by'))+' close') if z.get('sell_by') else ''}"
             for z in rows[k:k+2]))
@@ -7323,7 +7369,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v386:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v387:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7341,7 +7387,7 @@ ROTATION_BT_LIST={"XLK":"AAPL MSFT AMD ORCL CSCO ADBE QCOM TXN NVDA INTC","XLF":
 BT_STATE={"last":0.0,"running":False}
 
 
-def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None, earn_mode="skip", ftfc=None):
+def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None, earn_mode="skip", ftfc=None, vp_min_room=None):
     """Pure. Replays the rotation STRAT rules bar by bar; one trade at a time.
     Exit B: half at +0.5R (planned risk), stop to break-even, rest at 2R or the
     15-session time stop; on any bar the stop is checked first; on the fill bar
@@ -7349,6 +7395,7 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
     d=df.dropna(subset=["Open","High","Low","Close"])
     idx=d.index; n=len(d)
     o=d["Open"].astype(float).values; h=d["High"].astype(float).values; l=d["Low"].astype(float).values; c=d["Close"].astype(float).values
+    vol=d["Volume"].astype(float).fillna(0).values if "Volume" in d else np.zeros(len(d))
     S=sec["Close"].astype(float).reindex(idx).ffill().values; P=spy["Close"].astype(float).reindex(idx).ffill().values
     cs=pd.Series(c,index=idx); sma20=cs.rolling(20).mean().values; sma50=cs.rolling(50).mean().values
     rs=pd.Series(c/S,index=idx); rs20=rs.rolling(20).mean().values; rs=rs.values
@@ -7374,6 +7421,10 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         if not ok: i+=1; continue
         ffl=_ftfc_flags(idx,o,c,i) if (ftfc or log is not None) else None
         if ftfc=="full" and not all(ffl.values()): i+=1; continue
+        vpr=None
+        if vp_min_room is not None or log is not None:
+            vpr=_vp_room(h,l,vol,i,h[i]+.01,h[i]+.01-l[i])
+            if vp_min_room is not None and vpr is not None and vpr<vp_min_room: i+=1; continue
         earn_cap=None
         if earnings is not None and earn_near(i):
             if earn_mode=="exit":
@@ -7427,7 +7478,7 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
             if open1: tr.append((c[k]-fill)*q)
             if open2: tr.append((c[k]-fill)*q)
             halves+=tr; tsum.append(sum(tr))
-            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"ftfc":all(ffl.values()) if ffl else None,"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
+            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"ftfc":all(ffl.values()) if ffl else None,"vp_room":vpr,"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
             i=k+1; continue
         fill=max(o[j],entry)
         if fill<=stop: i+=1; continue
@@ -7484,6 +7535,9 @@ def print_rotation_backtest():
                     b=rotation_strat_backtest(df,data[etf],data["SPY"],E)
                     x=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit")
                     y=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit",ftfc="full")
+                    for k_,kw in (("vp05",{"vp_min_room":0.5}),("vp10",{"vp_min_room":1.0}),("ffvp",{"ftfc":"full","vp_min_room":1.0})):
+                        r_=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit",**kw)
+                        tot.setdefault(k_,[0,0,0.0,0.0,0,0]); tot[k_][0]+=1; tot[k_][1]+=int(r_["net"]>0); tot[k_][2]+=r_["net"]; tot[k_][3]+=r_["trades"]; tot[k_][4]+=r_["tn"]; tot[k_][5]+=r_["tn"]*(r_["twin"] or 0)/100
                     print(f"[bt ftfc] {t} EXIT-BEFORE net {x['net']:+.0f} trades {x['tn']} trade-win {x['twin']} halves-win {x['win']} pf {x['pf']} | +FTFC net {y['net']:+.0f} trades {y['tn']} trade-win {y['twin']} halves-win {y['win']} pf {y['pf']}",flush=True)
                     for k_,r_ in (("xb",x),("ff",y)):
                         tot.setdefault(k_,[0,0,0.0,0.0,0,0]); tot[k_][0]+=1; tot[k_][1]+=int(r_["net"]>0); tot[k_][2]+=r_["net"]; tot[k_][3]+=r_["trades"]; tot[k_][4]+=r_["tn"]; tot[k_][5]+=r_["tn"]*(r_["twin"] or 0)/100
@@ -7498,7 +7552,7 @@ def print_rotation_backtest():
         for k in ("off","on","exit"):
             n_,p_,net_,tr_=tot[k]
             print(f"[bt rot total {k}] {p_}/{n_} profitable · net {net_:+,.0f} · halves {int(tr_)} · per half {net_/tr_ if tr_ else 0:+.1f}",flush=True)
-        for k_,lab in (("xb","sell-before-earnings baseline"),("ff","baseline + FTFC full")):
+        for k_,lab in (("xb","sell-before-earnings baseline"),("ff","baseline + FTFC full"),("vp05","baseline + VP room >=0.5R"),("vp10","baseline + VP room >=1R"),("ffvp","baseline + FTFC + VP room >=1R")):
             if k_ in tot:
                 n_,p_,net_,h_,tn_,tw_=tot[k_]
                 print(f"[bt ftfc total] {lab}: {p_}/{n_} profitable · net {net_:+,.0f} · trades {tn_} · trade win {100*tw_/max(1,tn_):.1f}% · per trade {net_/max(1,tn_):+.1f}",flush=True)
@@ -7619,7 +7673,7 @@ def _opt_price_at(obars, t, side="vw"):
     return None
 
 
-def option_trade_replay(sbars, obars, lv, day_cap):
+def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
     """Pure. sbars/obars: RTH 30-min lists (stock raw, option). lv: raw entry/stop/half/tgt + fill_date.
     Two contracts: one sold at +0.5R (stop to break-even after), one at 2R / stop / time.
     Returns dict with option + stock results, or None if no fill / no option prints."""
@@ -7630,6 +7684,7 @@ def option_trade_replay(sbars, obars, lv, day_cap):
     filled=None; legs=[]; stp=S0; open1=open2=True; ent_p=None; stock_fill=None
     def opx(t):
         return _opt_price_at(obars,t)
+    obmap={x[0]:x for x in obars}
     for b in bars:
         t,o,h,l,c,_=b
         if filled is None:
@@ -7639,6 +7694,16 @@ def option_trade_replay(sbars, obars, lv, day_cap):
                 if ent_p is None: return None
             continue
         hi_first=abs(h-o)<=abs(o-l)
+        if prem_tgt is not None:
+            ob=obmap.get(t)
+            tp=ent_p*(1+prem_tgt)
+            if ob is not None and ob[2]>=tp:
+                stop_first=(not hi_first) and l<=stp
+                if not stop_first:
+                    px=max(tp,ob[1])
+                    if open1: legs.append(("prem",t,c,px)); open1=False
+                    if open2: legs.append(("prem",t,c,px)); open2=False
+                    break
         def ups():
             nonlocal open1,open2,stp
             if open1 and h>=H:
@@ -7668,10 +7733,10 @@ def option_trade_replay(sbars, obars, lv, day_cap):
             "leg_ret":[(x[3]-ent_p)/ent_p for x in legs],"last_exit":max(x[1] for x in legs)}
 
 
-OPT_BT_VARIANTS=(("weekly 7-16d, first strike above",7,16,"otm"),
-                 ("weekly 7-16d, first strike below (ITM)",7,16,"itm"),
-                 ("monthly 28-60d, first strike above",28,60,"otm"))
-OPT_BT_PLANS=(("half +0.5R then BE, rest 2R",0.5,2.0),("all out at 1R",None,1.0),("all out at 2R",None,2.0))
+OPT_BT_VARIANTS=(("weekly 7-16d OTM",7,16,"otm"),)
+OPT_BT_PLANS=(("current: half +0.5R then BE, rest 2R",0.5,2.0,None),("all out when stock hits +0.5R",None,0.5,None),
+              ("all out when stock hits +1R",None,1.0,None),("all out at premium +30%",None,99.0,0.30),
+              ("all out at premium +50%",None,99.0,0.50),("all out at premium +100%",None,99.0,1.00))
 
 
 def _expiry_candidates(fdt, min_dte, max_dte):
@@ -7737,13 +7802,13 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                      "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
                 obars=_rth(o30.get(sym))
                 sig_prem=float(pre[-1]["c"])
-                for pname,hr,tr in OPT_BT_PLANS:
+                for pname,hr,tr,pt in OPT_BT_PLANS:
                     lv={"entry":base["entry"],"stop":base["stop"],"half":(base["entry"]+hr*risk) if hr else 1e12,
                         "tgt":base["entry"]+tr*risk,"fill_date":fd}
-                    res=option_trade_replay(sbars,obars,lv,cap)
+                    res=option_trade_replay(sbars,obars,lv,cap,prem_tgt=pt)
                     if not res: continue
                     iv=_implied_vol(res["ent_p"],res["stock_fill"],K,max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365)
-                    rows.append({"ftfc":d.get("ftfc"),"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
+                    rows.append({"ftfc":d.get("ftfc"),"vp_room":d.get("vp_room"),"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
                                  "runup":res["ent_p"]/sig_prem-1,"opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],
                                  "ivrv":(iv/rv) if iv and rv else None,"cost":res["ent_p"]*100})
             except Exception as e:
@@ -7777,7 +7842,7 @@ def print_options_backtest():
                     print(f"[bt opt err] {t} {e!r}"[:200],flush=True)
         P=lambda s: print("[bt opt] "+s,flush=True)
         for vname,_,_,_ in OPT_BT_VARIANTS:
-            for pname,_,_ in OPT_BT_PLANS:
+            for pname,_,_,_ in OPT_BT_PLANS:
                 rr=[r for r in allr if r["variant"]==vname and r["plan"]==pname]
                 if not rr: continue
                 v=[r["opt_ret"] for r in rr]; sr=[r["stock_r"] for r in rr]
@@ -7785,12 +7850,20 @@ def print_options_backtest():
                 P(f"{vname} | {pname}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% median {100*np.median(v):+.0f}% "
                   f"· stock win {100*np.mean([x>0 for x in sr]):.0f}% · avg cost ${np.median([r['cost'] for r in rr]):.0f} · P&L 1 lot/trade ${dollars:+,.0f}")
         for vname,_,_,_ in OPT_BT_VARIANTS:
-            for pname,_,_ in OPT_BT_PLANS:
+            for pname,_,_,_ in OPT_BT_PLANS:
                 rr=[r for r in allr if r["variant"]==vname and r["plan"]==pname]
                 for lab,sel in (("FTFC full",[r for r in rr if r.get("ftfc")]),("not full",[r for r in rr if r.get("ftfc") is False])):
                     if sel:
                         v=[r["opt_ret"] for r in sel]
                         P(f"{vname} | {pname} | {lab}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · stock win {100*np.mean([r['stock_r']>0 for r in sel]):.0f}% · P&L 1 lot ${sum(r['opt_ret']*r['cost'] for r in sel):+,.0f}")
+        for pname,_,_,_ in OPT_BT_PLANS:
+            rr=[r for r in allr if r["plan"]==pname and r.get("vp_room") is not None]
+            for lab,sel in (("VP room <0.5R",[r for r in rr if r["vp_room"]<0.5]),("VP room 0.5-1R",[r for r in rr if 0.5<=r["vp_room"]<1]),
+                            ("VP room 1-2R",[r for r in rr if 1<=r["vp_room"]<2]),("VP room 2R+ / clear",[r for r in rr if r["vp_room"]>=2]),
+                            ("FTFC + VP room >=1R",[r for r in rr if r.get("ftfc") and r["vp_room"]>=1])):
+                if sel:
+                    v=[r["opt_ret"] for r in sel]
+                    P(f"{pname} | {lab}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · P&L 1 lot ${sum(r['opt_ret']*r['cost'] for r in sel):+,.0f}")
         main=[r for r in allr if r["variant"]==OPT_BT_VARIANTS[0][0] and r["plan"]==OPT_BT_PLANS[0][0]]
         for lab,key in (("IV/RV","ivrv"),("run-up","runup")):
             xs=[r for r in main if r.get(key) is not None]
@@ -8406,9 +8479,11 @@ def win_rate_slices(days=60, min_n=3):
                      "tape":pl.get("regime") or "?","flow":pl.get("flow_bias") or "none","rr":"rr<2" if (x or 0)<2 else ("rr2-3" if x<3 else "rr3+"),
                      "win":float(oc["r"])>0,"r":float(oc["r"]),"tp1":(oc.get("option_best_pct") is not None and float(oc["option_best_pct"])>=50),
                      "ftfc":("full" if pl.get("ftfc_full") else "partial") if pl.get("ftfc_full") is not None else "n/a",
+                     "room":("n/a" if pl.get("vp_room_r") is None else "vp<1R" if float(pl["vp_room_r"])<1 else "vp1R+"),
+                     "cwall":("n/a" if pl.get("call_wall_r") is None else "cw<1R" if float(pl["call_wall_r"])<1 else "cw1R+"),
                      "mfe":_safe_float(oc.get("mfe_r")),"days":oc.get("days"),
                      "pbe":(oc.get("pbe") or {}) if (oc.get("pbe") or {}).get("status") in ("win","loss") else None})
-    keys=("lane","dir","group","tape","rr","flow","ftfc")
+    keys=("lane","dir","group","tape","rr","flow","ftfc","room","cwall")
     out=[]
     def add(name,sub):
         if len(sub)>=min_n: out.append((name,len(sub),round(100*sum(z["win"] for z in sub)/len(sub)),round(float(np.mean([z["r"] for z in sub])),2),round(100*sum(z["tp1"] for z in sub)/len(sub))))
