@@ -552,3 +552,11 @@ def test_v385_option_trade_replay_half_then_target():
     assert abs(r["opt_ret"]-0.5)<1e-9 and r["stock_r"]>1
     assert A._occ("T",pd.Timestamp("2026-12-31"),23.5)=="T261231C00023500"
     assert abs(A._implied_vol(A._bs_call(100,100,.1,.3),100,100,.1)-.3)<1e-3
+
+
+def test_v3851_weekly_expiry_pick():
+    import app as A, pandas as pd
+    e=A._expiry_candidates(pd.Timestamp("2024-03-04"),7,16)   # Monday
+    assert e and e[0]==pd.Timestamp("2024-03-15")
+    m=A._expiry_candidates(pd.Timestamp("2024-03-04"),28,60)
+    assert m[0]==pd.Timestamp("2024-04-05")
