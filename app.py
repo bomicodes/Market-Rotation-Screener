@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.13"
+APP_VERSION = "38.13.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7941,6 +7941,7 @@ def option_runner_replay(sbars, obars, lv, day_cap, base_pct=0.30, runner="be", 
 
 
 SPREAD_TABLE=None
+SPREAD_LEVELS=(0.0,0.01,0.025,0.05)
 
 
 def _spread_calibration(tickers):
@@ -8028,13 +8029,22 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                      "end":(pd.Timestamp(cap)+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=3)
                 obars=_rth(o30.get(sym))
                 sig_prem=float(pre[-1]["c"])
-                for bp in (0.30,0.50):
+                for sp_pct in SPREAD_LEVELS:
+                    hsf=(lambda p,q=sp_pct: max(0.01,q*p)) if sp_pct else None
+                    for kind_,bp in (("all",0.30),("run",0.30)):
+                        if kind_=="all":
+                            res_=option_trade_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"half":1e12,"tgt":1e12,"fill_date":fd},cap,prem_tgt=bp,hs=hsf)
+                            if res_: rows.append({"sens":True,"plan":f"all out +30% @ {sp_pct*100:g}% half-spread","variant":vname,"opt_ret":res_["opt_ret"],"cost":res_["ent_p"]*100,"eb":d.get("earn_bucket")})
+                        else:
+                            r2_=option_runner_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"fill_date":fd},cap,base_pct=bp,runner="be",hs=hsf)
+                            if r2_: rows.append({"sens":True,"plan":f"half +30% runner @ {sp_pct*100:g}% half-spread","variant":vname,"opt_ret":r2_["ret"],"cost":r2_["ent"]*100,"eb":d.get("earn_bucket"),"run_ret":r2_["run_ret"],"based":r2_["based"]})
+                for bp in ():
                     for rn in ("be",):
                         rr_=option_runner_replay(sbars,obars,{"entry":base["entry"],"stop":base["stop"],"fill_date":fd},cap,base_pct=bp,runner=rn,hs=_half_spread if SPREAD_TABLE else None)
                         if rr_:
                             rows.append({"runner":True,"plan":f"half at +{int(bp*100)}%, runner {rn}","otm_pct":round(100*(K/base["entry"]-1),1),"opt_ret":rr_["ret"],"run_ret":rr_["run_ret"],"based":rr_["based"],
                                          "peak_ret":rr_.get("peak_ret"),"cost":rr_["ent"]*100,"eb":d.get("earn_bucket"),"ftfc":d.get("ftfc"),"t":t,"sig":str(sig),"variant":vname,"stock_r":0})
-                for pname,hr,tr,pt in OPT_BT_PLANS:
+                for pname,hr,tr,pt in ():
                     lv={"entry":base["entry"],"stop":base["stop"],"half":(base["entry"]+hr*risk) if hr else 1e12,
                         "tgt":base["entry"]+tr*risk,"fill_date":fd}
                     res=option_trade_replay(sbars,obars,lv,cap,prem_tgt=pt,hs=_half_spread if SPREAD_TABLE else None)
@@ -8061,8 +8071,8 @@ def print_options_backtest():
     OPT_BT_STATE["running"]=True
     try:
         names=[t for v in ROTATION_BT_LIST.values() for t in v.split()]
-        SPREAD_TABLE,npts=_spread_calibration(names)
-        print("[bt opt] SPREAD calibration from live weekly call quotes ("+str(npts)+" contracts, "+ALPACA_OPTIONS_FEED+" feed): "+
+        SPREAD_TABLE,npts=[],0
+        if False: print("[bt opt] SPREAD calibration from live weekly call quotes ("+str(npts)+" contracts, "+ALPACA_OPTIONS_FEED+" feed): "+
               " · ".join(f"${lo:g}-{'' if hi>1e8 else f'${hi:g}'} mid: half-spread ${h_:.3f} (n {n})" for lo,hi,h_,n in SPREAD_TABLE),flush=True)
         etfs=list(ROTATION_BT_LIST)+["SPY"]
         data={x:_yf_download_retry(x,"10y","1d",timeout=20,attempts=2) for x in etfs}
@@ -8079,6 +8089,17 @@ def print_options_backtest():
                 except Exception as e:
                     print(f"[bt opt err] {t} {e!r}"[:200],flush=True)
         P=lambda s: print("[bt opt] "+s,flush=True)
+        for vname,_,_,_ in OPT_BT_VARIANTS:
+            for sp_pct in SPREAD_LEVELS:
+                for base_ in ("all out +30%","half +30% runner"):
+                    pname=f"{base_} @ {sp_pct*100:g}% half-spread"; rr=[r for r in allr if r.get("sens") and r["variant"]==vname and r["plan"]==pname]
+                    if not rr: continue
+                    v=[r["opt_ret"] for r in rr]; pe=[r["opt_ret"] for r in rr if r.get("eb")=="post"]
+                    runs=[r.get("run_ret") for r in rr if r.get("based")]
+                    P(f"SENS {vname} | {pname}: n {len(v)} win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.1f}% per trade · median cost ${np.median([r['cost'] for r in rr]):.0f}"
+                      +(f" · post-earnings win {100*np.mean([x>0 for x in pe]):.0f}% avg {100*np.mean(pe):+.1f}%" if pe else "")
+                      +(f" · runners >=+300% {sum(1 for x in runs if x>=3)} best {100*max(runs):+.0f}%" if runs else ""))
+        allr=[r for r in allr if not r.get("sens")]
         for vname,_,_,_ in OPT_BT_VARIANTS:
             vr=[r for r in allr if r["variant"]==vname]
             if not vr: continue
