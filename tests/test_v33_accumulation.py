@@ -511,3 +511,17 @@ def test_v3831_tv_path_same_bar_half_and_breakeven():
     spy=pd.DataFrame({"Close":100+np.arange(n)*0.02},index=idx); sec=pd.DataFrame({"Close":50*np.exp(np.cumsum(rng.normal(0.0008,0.01,n)))},index=idx)
     a=A.rotation_strat_backtest(df,sec,spy,None,intrabar="tv",log=lg)
     assert a["trades"]%2==0 and len(lg)*2==a["trades"]
+
+
+def test_v3832_earnings_exit_mode_caps_hold():
+    import app as A, pandas as pd, numpy as np
+    n=400; rng=np.random.default_rng(5); idx=pd.bdate_range("2017-06-01", periods=n)
+    c=50*np.exp(np.cumsum(rng.normal(0.001,0.015,n))); h=c*(1+rng.uniform(0,0.02,n)); l=c*(1-rng.uniform(0,0.02,n)); o=(h+l)/2
+    df=pd.DataFrame({"Open":o,"High":h,"Low":l,"Close":c},index=idx)
+    spy=pd.DataFrame({"Close":100+np.arange(n)*0.02},index=idx); sec=pd.DataFrame({"Close":50*np.exp(np.cumsum(rng.normal(0.0008,0.01,n)))},index=idx)
+    E=list(idx[::40])
+    lg=[]; r=A.rotation_strat_backtest(df,sec,spy,E,earn_mode="exit",log=lg)
+    assert r["trades"]%2==0
+    for a,b,f,p in lg:
+        nxt=[e for e in E if e>pd.Timestamp(a)]
+        if nxt: assert pd.Timestamp(b)<nxt[0]
