@@ -1,3 +1,8 @@
+v38.4 — rotation STRAT lane: if earnings fall inside the 15-day hold, the setup carries a SELL BY date (close of the
+session before the report) and grading caps the hold there; skipped only if the report is on the entry day or the next.
+Backtest (65 stocks, 2018+, server replay): hold through +$155k, skip +$164k, sell before +$184k. Backtest engine now
+uses TradingView's intrabar path (v38.3.1) and has an exit-before-earnings mode (v38.3.2).
+
 v38.3 — server-side replay of the rotation STRAT rules on split-adjusted Yahoo bars, with and without an earnings filter (skip a
 signal if a report falls within the next 16 sessions; Yahoo + Nasdaq dates). GET /api/backtest/rotation/print (public trigger, log only).
 
