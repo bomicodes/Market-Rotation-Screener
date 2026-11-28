@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.7.1"
+APP_VERSION = "38.8"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -4438,7 +4438,7 @@ def auth_required():
 def protect_app():
     # v29: the nightly trigger/status endpoints are public but self-limiting
     # (one run per market close, no data returned beyond run status).
-    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print", "/api/backtest/rotation/print", "/api/backtest/options/print") or request.path.startswith("/static/"):
+    if request.path in ("/health", "/login", "/api/nightly/run", "/api/nightly/status", "/api/digest/print", "/api/backtest/rotation/print", "/api/backtest/options/print", "/api/backtest/events/print") or request.path.startswith("/static/"):
         return None
     if auth_required():
         if request.path.startswith("/api/"):
@@ -7183,6 +7183,29 @@ def _vp_room(h, l, v, i, entry, risk, lookback=60, bins=40):
     return round(min(9.0,(min(above)-entry)/risk),2)
 
 
+def _earn_bucket(idx, E, i, post_max=10, hold=16):
+    """Pure. Where the signal sits relative to earnings: 'post' (a report 0-10 sessions before),
+    'run-up' (next report 2-16 sessions ahead: held into the run-up, sold before), else 'none'."""
+    if not E: return "unknown"
+    t=idx[i].normalize(); prev=[e for e in E if e<=t]; nxt=[e for e in E if e>t]
+    if prev:
+        back=int(np.searchsorted(idx.values,np.datetime64(t)))-int(np.searchsorted(idx.values,np.datetime64(prev[-1])))
+        if back<=post_max: return "post"
+    if nxt:
+        ahead=int(np.searchsorted(idx.values,np.datetime64(nxt[0])))-i
+        if 2<=ahead<=hold: return "run-up"
+    return "none"
+
+
+def _ud_ratio(c, v, i, n=20):
+    """Pure. Up-day volume / down-day volume over the n sessions ending at i (accumulation)."""
+    a=max(1,i-n+1); up=dn=0.0
+    for k in range(a,i+1):
+        if c[k]>c[k-1]: up+=v[k]
+        elif c[k]<c[k-1]: dn+=v[k]
+    return round(up/dn,2) if dn>0 else None
+
+
 def _ftfc_flags(index, o, c, i):
     """Pure. Full timeframe continuity (bullish): the close above the open of the current
     day, week, month and quarter. Returns {"D":bool,"W":bool,"M":bool,"Q":bool}."""
@@ -7478,7 +7501,7 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
             if open1: tr.append((c[k]-fill)*q)
             if open2: tr.append((c[k]-fill)*q)
             halves+=tr; tsum.append(sum(tr))
-            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"ftfc":all(ffl.values()) if ffl else None,"vp_room":vpr,"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
+            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr],{"ftfc":all(ffl.values()) if ffl else None,"vp_room":vpr,"earn_bucket":_earn_bucket(idx,E,i),"ud":_ud_ratio(c,vol,i),"sig":str(idx[i].date()),"entry":float(entry),"stop":float(stop),"half":float(half_px),"tgt":float(tgt),"cap":str(idx[last].date()),"adj_close":float(c[i])}))
             i=k+1; continue
         fill=max(o[j],entry)
         if fill<=stop: i+=1; continue
@@ -7519,63 +7542,50 @@ def _bt_earnings(t):
     return sorted(set(cl))
 
 
+def _bt_split_lines(tag, trades, keyfn, label):
+    groups={}
+    for tr in trades:
+        k=keyfn(tr)
+        if k is None: continue
+        groups.setdefault(k,[]).append(tr["pnl"])
+    out=[]
+    for k in sorted(groups):
+        v=groups[k]
+        out.append(f"[{tag}] {label}={k}: trades {len(v)} · win {100*np.mean([x>0 for x in v]):.1f}% · per trade {np.mean(v):+.0f} · total {sum(v):+,.0f}")
+    return out
+
+
 def print_rotation_backtest():
     BT_STATE["running"]=True
     try:
         etfs=list(ROTATION_BT_LIST)+["SPY"]
         data={t:_yf_download_retry(t,"10y","1d",timeout=20,attempts=2) for t in etfs}
-        tot={"off":[0,0,0.0,0.0],"on":[0,0,0.0,0.0],"exit":[0,0,0.0,0.0]}; rows=[]
+        trades=[]
         for etf,names in ROTATION_BT_LIST.items():
             for t in names.split():
                 try:
                     df=_yf_download_retry(t,"10y","1d",timeout=20,attempts=2)
-                    if df is None or len(df)<300: print(f"[bt rot] {t} no data",flush=True); continue
-                    E=_bt_earnings(t)
-                    a=rotation_strat_backtest(df,data[etf],data["SPY"],None)
-                    b=rotation_strat_backtest(df,data[etf],data["SPY"],E)
-                    x=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit")
-                    y=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit",ftfc="full")
-                    for k_,kw in (("vp05",{"vp_min_room":0.5}),("vp10",{"vp_min_room":1.0}),("ffvp",{"ftfc":"full","vp_min_room":1.0})):
-                        r_=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit",**kw)
-                        tot.setdefault(k_,[0,0,0.0,0.0,0,0]); tot[k_][0]+=1; tot[k_][1]+=int(r_["net"]>0); tot[k_][2]+=r_["net"]; tot[k_][3]+=r_["trades"]; tot[k_][4]+=r_["tn"]; tot[k_][5]+=r_["tn"]*(r_["twin"] or 0)/100
-                    print(f"[bt ftfc] {t} EXIT-BEFORE net {x['net']:+.0f} trades {x['tn']} trade-win {x['twin']} halves-win {x['win']} pf {x['pf']} | +FTFC net {y['net']:+.0f} trades {y['tn']} trade-win {y['twin']} halves-win {y['win']} pf {y['pf']}",flush=True)
-                    for k_,r_ in (("xb",x),("ff",y)):
-                        tot.setdefault(k_,[0,0,0.0,0.0,0,0]); tot[k_][0]+=1; tot[k_][1]+=int(r_["net"]>0); tot[k_][2]+=r_["net"]; tot[k_][3]+=r_["trades"]; tot[k_][4]+=r_["tn"]; tot[k_][5]+=r_["tn"]*(r_["twin"] or 0)/100
-                    e18=[x for x in E if x>=pd.Timestamp("2018-01-01")]
-                    print(f"[bt rot] {t} {etf} OFF net {a['net']:+.0f} n {a['trades']} win {a['win']} pf {a['pf']} | EARN-FILTER net {b['net']:+.0f} n {b['trades']} win {b['win']} pf {b['pf']} skipped {b['skipped_earnings']} | EXIT-BEFORE net {x['net']:+.0f} n {x['trades']} win {x['win']} pf {x['pf']} | earnings dates since 2018: {len(e18)} first {e18[0].date() if e18 else None}",flush=True)
-                    for k,r in (("off",a),("on",b),("exit",x)):
-                        tot[k][0]+=1; tot[k][1]+=int(r["net"]>0); tot[k][2]+=r["net"]; tot[k][3]+=r["trades"]
-                    rows.append((t,a["net"],b["net"],len(e18)))
+                    if df is None or len(df)<300: continue
+                    E=_bt_earnings(t); lg=[]
+                    r=rotation_strat_backtest(df,data[etf],data["SPY"],E,earn_mode="exit",log=lg)
+                    for fd,xd,f,legs,d in lg:
+                        trades.append({"t":t,"pnl":sum(legs),"ftfc":d.get("ftfc"),"eb":d.get("earn_bucket"),"ud":d.get("ud")})
+                    print(f"[bt cat] {t} trades {r['tn']} win {r['twin']} net {r['net']:+.0f}",flush=True)
                 except Exception as e:
-                    print(f"[bt rot] {t} error {e!r}",flush=True)
-                time.sleep(0.4)
-        for k in ("off","on","exit"):
-            n_,p_,net_,tr_=tot[k]
-            print(f"[bt rot total {k}] {p_}/{n_} profitable · net {net_:+,.0f} · halves {int(tr_)} · per half {net_/tr_ if tr_ else 0:+.1f}",flush=True)
-        for k_,lab in (("xb","sell-before-earnings baseline"),("ff","baseline + FTFC full"),("vp05","baseline + VP room >=0.5R"),("vp10","baseline + VP room >=1R"),("ffvp","baseline + FTFC + VP room >=1R")):
-            if k_ in tot:
-                n_,p_,net_,h_,tn_,tw_=tot[k_]
-                print(f"[bt ftfc total] {lab}: {p_}/{n_} profitable · net {net_:+,.0f} · trades {tn_} · trade win {100*tw_/max(1,tn_):.1f}% · per trade {net_/max(1,tn_):+.1f}",flush=True)
-        thin=[r[0] for r in rows if r[3]<20]
-        print(f"[bt rot note] names with <20 earnings dates since 2018 (filter only partly applied): {', '.join(thin) or 'none'}",flush=True)
+                    print(f"[bt rot error] {t} {e!r}"[:200],flush=True)
+        P=lambda x: print(x,flush=True)
+        v=[x["pnl"] for x in trades]
+        P(f"[bt cat total] all trades {len(v)} · win {100*np.mean([x>0 for x in v]):.1f}% · per trade {np.mean(v):+.0f} · total {sum(v):+,.0f}")
+        for line in _bt_split_lines("bt cat",trades,lambda z:z["eb"],"earnings"): P(line)
+        uds=[z["ud"] for z in trades if z.get("ud")]
+        if uds:
+            q=np.percentile(uds,[33.3,66.7])
+            fn=lambda z: None if not z.get("ud") else ("1 low (<=%.2f)"%q[0] if z["ud"]<=q[0] else "2 mid" if z["ud"]<=q[1] else "3 high (>%.2f)"%q[1])
+            for line in _bt_split_lines("bt cat",trades,fn,"up/down volume 20d"): P(line)
+            for line in _bt_split_lines("bt cat",[z for z in trades if z.get("ftfc")],fn,"FTFC + up/down volume"): P(line)
+        for line in _bt_split_lines("bt cat",[z for z in trades if z.get("ftfc")],lambda z:z["eb"],"FTFC + earnings"): P(line)
     except Exception as e:
         print(f"[bt rot error] {e!r}",flush=True)
-    finally:
-        BT_STATE["running"]=False
-
-
-def print_rotation_backtest_one(t, etf):
-    try:
-        d={x:_yf_download_retry(x,"10y","1d",timeout=20,attempts=2) for x in (t,etf,"SPY")}
-        for mode in ("tv","strict"):
-            lg=[]
-            r=rotation_strat_backtest(d[t],d[etf],d["SPY"],None,intrabar=mode,log=lg)
-            print(f"[bt one] {t} {etf} {mode} net {r['net']:+.0f} n {r['trades']} win {r['win']} pf {r['pf']}",flush=True)
-        lg=[]; rotation_strat_backtest(d[t],d[etf],d["SPY"],None,intrabar="tv",log=lg)
-        for z in range(0,len(lg),6):
-            print("[bt one trades] "+" ; ".join(f"{a}>{b} {f} {p}" for a,b,f,p,*_ in lg[z:z+6]),flush=True)
-    except Exception as e:
-        print(f"[bt one error] {e!r}",flush=True)
     finally:
         BT_STATE["running"]=False
 
@@ -7749,6 +7759,37 @@ def _expiry_candidates(fdt, min_dte, max_dte):
     return out[:1]
 
 
+def _opt_positioning(t, sig, spot):
+    """Options positioning in the 5 sessions up to the signal (2024+): call/put volume ratio and
+    call-volume acceleration (last 5 sessions vs the 15 before) on the monthly 25-55 DTE chain,
+    the 3 strikes nearest the price. Returns {} if unavailable."""
+    try:
+        exp=None
+        for k in range(0,3):
+            m=sig+pd.DateOffset(months=k); tf=_third_friday(m.year,m.month)
+            if 25<=(tf-sig).days<=55: exp=tf; break
+        if exp is None: return {}
+        ks=set()
+        for inc in (1,2.5,5,10):
+            b=round(spot/inc)*inc; ks.update({b-inc,b,b+inc})
+        ks=sorted(ks,key=lambda k:abs(k-spot))[:3]
+        syms=[_occ(t,exp,k,"C") for k in ks]+[_occ(t,exp,k,"P") for k in ks]
+        ob=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
+            {"symbols":",".join(syms),"timeframe":"1Day","start":(sig-pd.Timedelta(days=35)).strftime("%Y-%m-%dT00:00:00Z"),
+             "end":(sig+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=2)
+        days=sorted({pd.Timestamp(b["t"]).tz_convert("America/New_York").date() for arr in ob.values() for b in arr})
+        days=[d for d in days if d<=sig.date()][-20:]
+        if len(days)<10: return {}
+        last5=set(days[-5:]); prev=set(days[:-5])
+        def vol(side,dset):
+            return sum(float(b.get("v") or 0) for sym,arr in ob.items() if sym[len(t)+6]==side for b in arr
+                       if pd.Timestamp(b["t"]).tz_convert("America/New_York").date() in dset)
+        c5,p5,cp=vol("C",last5),vol("P",last5),vol("C",prev)
+        return {"cp5":round(c5/p5,2) if p5>0 else None,"cacc":round(c5/(cp/max(1,len(prev))*5),2) if cp>0 else None}
+    except Exception:
+        return {}
+
+
 def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
     lg=[]
     rotation_strat_backtest(data[t],data[etf],data["SPY"],E,earn_mode="exit",log=lg)
@@ -7771,6 +7812,7 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
         base={k:d[k]*f for k in ("entry","stop")}; risk=base["entry"]-base["stop"]
         closes=pd.Series([daily_close[x] for x in sorted(daily_close) if x<=sig][-21:])
         rv=float(np.log(closes/closes.shift(1)).dropna().std()*np.sqrt(252)) if len(closes)>=15 else None
+        pos=_opt_positioning(t,pd.Timestamp(sig),raw_sig)
         for vname,mn,mx,mode in OPT_BT_VARIANTS:
             try:
                 fdt=pd.Timestamp(fd); exps=_expiry_candidates(fdt,mn,mx)
@@ -7810,7 +7852,8 @@ def _opt_bt_stock(t, etf, data, E, start="2024-03-01"):
                     res=option_trade_replay(sbars,obars,lv,cap,prem_tgt=pt)
                     if not res: continue
                     iv=_implied_vol(res["ent_p"],res["stock_fill"],K,max(1,(ex-pd.Timestamp(res["fill_t"].date())).days)/365)
-                    rows.append({"ftfc":d.get("ftfc"),"vp_room":d.get("vp_room"),"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
+                    rows.append({"ftfc":d.get("ftfc"),"vp_room":d.get("vp_room"),"eb":d.get("earn_bucket"),"ud":d.get("ud"),
+                                 "cp5":pos.get("cp5"),"cacc":pos.get("cacc"),"t":t,"sig":str(sig),"sym":sym,"variant":vname,"plan":pname,"ent_p":res["ent_p"],"sig_prem":sig_prem,
                                  "runup":res["ent_p"]/sig_prem-1,"opt_ret":res["opt_ret"],"stock_r":res["stock_r"],"legs":res["legs"],
                                  "ivrv":(iv/rv) if iv and rv else None,"cost":res["ent_p"]*100})
             except Exception as e:
@@ -7866,6 +7909,21 @@ def print_options_backtest():
                 if sel:
                     v=[r["opt_ret"] for r in sel]
                     P(f"{pname} | {lab}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · P&L 1 lot ${sum(r['opt_ret']*r['cost'] for r in sel):+,.0f}")
+        for pname in (OPT_BT_PLANS[0][0],"all out at premium +20%","all out at premium +30%"):
+            rr=[r for r in allr if r["plan"]==pname]
+            def show(lab,sel):
+                if sel:
+                    v=[r["opt_ret"] for r in sel]
+                    P(f"CAT {pname} | {lab}: n {len(v)} option win {100*np.mean([x>0 for x in v]):.0f}% avg {100*np.mean(v):+.0f}% · P&L 1 lot ${sum(r['opt_ret']*r['cost'] for r in sel):+,.0f}")
+            for eb in ("post","run-up","none","unknown"): show(f"earnings {eb}",[r for r in rr if r.get("eb")==eb])
+            for key,lab in (("ud","up/down volume"),("cp5","call/put volume 5d"),("cacc","call volume accel 5d")):
+                xs=[r for r in rr if r.get(key) is not None]
+                if len(xs)>=30:
+                    q=np.percentile([r[key] for r in xs],[33.3,66.7])
+                    show(f"{lab} low (<={q[0]:.2f})",[r for r in xs if r[key]<=q[0]])
+                    show(f"{lab} mid",[r for r in xs if q[0]<r[key]<=q[1]])
+                    show(f"{lab} high (>{q[1]:.2f})",[r for r in xs if r[key]>q[1]])
+            show("FTFC + call/put 5d high third",[r for r in rr if r.get("ftfc") and r.get("cp5") is not None and r["cp5"]>np.percentile([z["cp5"] for z in rr if z.get("cp5") is not None],66.7)])
         main=[r for r in allr if r["variant"]==OPT_BT_VARIANTS[0][0] and r["plan"]==OPT_BT_PLANS[0][0]]
         for lab,key in (("IV/RV","ivrv"),("run-up","runup")):
             xs=[r for r in main if r.get(key) is not None]
@@ -7884,6 +7942,151 @@ def api_backtest_options_print():
     if OPT_BT_STATE["running"] or BT_STATE["running"] or time.time()-OPT_BT_STATE["last"]<600: return jsonify({"ok":True,"queued":False})
     OPT_BT_STATE["last"]=time.time()
     threading.Thread(target=print_options_backtest,daemon=True,name="bt-opt").start()
+    return jsonify({"ok":True,"queued":True})
+
+
+# ---------------------------------------------------------------------------
+# v38.8 EVENT STUDY: earnings run-up vs post-earnings continuation/reversal, Costco monthly
+# sales and Ford sales releases (dated from Alpaca news headlines), investor/analyst days and
+# product events (verified dates). Returns are in excess of SPY. Output: server log only.
+# ---------------------------------------------------------------------------
+INVESTOR_DAYS=[("JPM","2022-05-23",0),("JPM","2023-05-22",0),("JPM","2024-05-20",0),("JPM","2025-05-19",0),
+    ("WMT","2023-04-04",0),("WMT","2025-04-09",0),("LOW","2022-12-07",0),("LOW","2024-12-11",0),("MCD","2023-12-06",0),
+    ("UNH","2022-11-29",0),("UNH","2023-11-29",0),("UNH","2024-12-04",0),("CAT","2022-05-17",0),("CAT","2025-11-04",0),
+    ("AMD","2022-06-09",0),("AMD","2025-11-11",0),("TSLA","2023-03-01",1),("GE","2024-03-07",0),("GE","2025-06-17",0),
+    ("F","2023-05-22",0),("C","2022-03-02",0),("INTC","2022-02-17",0),("DIS","2020-12-10",1),("SBUX","2022-09-13",0),
+    ("UPS","2021-06-09",0),("UPS","2024-03-28",0),("GS","2020-01-29",0)]
+PRODUCT_EVENTS=[("AAPL",d,0) for d in ("2018-06-04","2019-06-03","2020-06-22","2021-06-07","2022-06-06","2023-06-05","2024-06-10","2025-06-09",
+                                        "2018-09-12","2019-09-10","2020-09-15","2021-09-14","2022-09-07","2023-09-12","2024-09-09","2025-09-09")]+\
+    [("NVDA","2023-03-21",0),("NVDA","2024-03-18",1),("NVDA","2025-03-18",0),("TSLA","2020-09-22",1),("TSLA","2021-08-19",1),("TSLA","2022-09-30",1),("TSLA","2024-10-10",1)]
+EV_STATE={"running":False,"last":0.0}
+
+
+def _ev_returns(df, spy, R):
+    """Pure. Excess-of-SPY returns around reaction session index R."""
+    c=df["Close"].astype(float).values; s=spy["Close"].astype(float).reindex(df.index).ffill().values
+    n=len(c)
+    if R<11 or R+10>=n: return None
+    ex=lambda a,b: (c[b]/c[a]-1)-(s[b]/s[a]-1)
+    h=float(df["High"].iloc[R]); l=float(df["Low"].iloc[R])
+    return {"pre10":ex(R-11,R-1),"pre5":ex(R-6,R-1),"day":ex(R-1,R),"post5":ex(R,R+5),"post10":ex(R,R+10),
+            "raw_pre10":c[R-1]/c[R-11]-1,"clv":((c[R]-l)/(h-l)) if h>l else 0.5}
+
+
+def _ev_line(tag, name, rows):
+    if not rows: return f"[{tag}] {name}: n 0"
+    f=lambda k: f"{100*np.mean([r[k] for r in rows]):+.2f}% ({100*np.mean([r[k]>0 for r in rows]):.0f}% up)"
+    return f"[{tag}] {name}: n {len(rows)} · run-up 10d {f('pre10')} · reaction day {f('day')} · next 5d {f('post5')} · next 10d {f('post10')}"
+
+
+def _news_window(sym, start, end):
+    try:
+        r=alpaca_get(f"{ALPACA_DATA_BASE_URL}/v1beta1/news",params={"symbols":sym,"start":start,"end":end,"limit":50,"sort":"asc","include_content":"false"},timeout=20)
+        return (r.json() or {}).get("news") or [] if r.status_code==200 else []
+    except Exception: return []
+
+
+def _reaction_index(idx, ts):
+    t=pd.Timestamp(ts)
+    t=t.tz_convert("America/New_York") if t.tzinfo else t.tz_localize("UTC").tz_convert("America/New_York")
+    d=pd.Timestamp(t.date()); after=(t.hour,t.minute)>=(16,0)
+    i=int(np.searchsorted(idx.values,np.datetime64(d)))
+    if i<len(idx) and idx[i].normalize()==d and after: i+=1
+    return i if i<len(idx) else None
+
+
+def _sales_release_dates(sym, rx, day_to=12):
+    out=[]; mon=pd.Timestamp("2018-01-01")
+    while mon<pd.Timestamp.now():
+        arts=_news_window(sym,mon.strftime("%Y-%m-%dT00:00:00Z"),(mon+pd.Timedelta(days=day_to)).strftime("%Y-%m-%dT23:59:59Z"))
+        for a in arts:
+            if re.search(rx,str(a.get("headline") or ""),re.I):
+                out.append(a.get("created_at")); break
+        mon=mon+pd.DateOffset(months=1)
+    return out
+
+
+def print_event_study():
+    EV_STATE["running"]=True
+    P=lambda x: print(x,flush=True)
+    try:
+        spy=_yf_download_retry("SPY","10y","1d",timeout=20,attempts=2)
+        names=[t for v in ROTATION_BT_LIST.values() for t in v.split()]+["F"]
+        sec_of={t:etf for etf,v in ROTATION_BT_LIST.items() for t in v.split()}
+        secd={etf:_yf_download_retry(etf,"10y","1d",timeout=20,attempts=2) for etf in ROTATION_BT_LIST}
+        data={}; earn=[]
+        for t in names:
+            try:
+                df=_yf_download_retry(t,"10y","1d",timeout=20,attempts=2)
+                if df is None or len(df)<300: continue
+                df=df.dropna(subset=["Open","High","Low","Close"]); data[t]=df; idx=df.index
+                o=df["Open"].astype(float).values; c=df["Close"].astype(float).values
+                sec=secd.get(sec_of.get(t))
+                for e in _bt_earnings(t):
+                    if e<pd.Timestamp("2018-02-01"): continue
+                    i=int(np.searchsorted(idx.values,np.datetime64(e)))
+                    if i>=len(idx)-11 or i<12: continue
+                    cand=[k for k in (i,i+1) if k<len(idx)]
+                    R=max(cand,key=lambda k:abs(o[k]/c[k-1]-1))
+                    r=_ev_returns(df,spy,R)
+                    if not r: continue
+                    lead=None
+                    if sec is not None:
+                        sc=sec["Close"].astype(float).reindex(idx).ffill(); rs=pd.Series(c,index=idx)/sc
+                        sp=spy["Close"].astype(float).reindex(idx).ffill(); rsec=sc/sp; k=R-11
+                        lead=bool(rs.iloc[k]>rs.rolling(20).mean().iloc[k] and c[k]>pd.Series(c).rolling(50).mean().iloc[k] and rsec.iloc[k]>rsec.rolling(20).mean().iloc[k])
+                    r.update({"t":t,"lead":lead}); earn.append(r)
+            except Exception as e:
+                P(f"[ev error] {t} {e!r}"[:200])
+        P(_ev_line("ev earn","ALL earnings 2018+",earn))
+        P(_ev_line("ev earn","stock was a rotation leader 10d before",[r for r in earn if r["lead"]]))
+        P(_ev_line("ev earn","not a leader",[r for r in earn if r["lead"] is False]))
+        P(_ev_line("ev earn","run-up into report was positive",[r for r in earn if r["pre10"]>0]))
+        P(_ev_line("ev earn","run-up into report was negative",[r for r in earn if r["pre10"]<=0]))
+        for lab,fn in (("reaction >+5%",lambda r:r["day"]>.05),("reaction +2..+5%",lambda r:.02<r["day"]<=.05),("reaction -2..+2%",lambda r:-.02<=r["day"]<=.02),
+                       ("reaction -5..-2%",lambda r:-.05<=r["day"]<-.02),("reaction <-5%",lambda r:r["day"]<-.05)):
+            g=[r for r in earn if fn(r)]
+            P(_ev_line("ev earn post",lab,g))
+            P(_ev_line("ev earn post",lab+" & strong close (top 30% of day range)",[r for r in g if r["clv"]>=.7]))
+            P(_ev_line("ev earn post",lab+" & weak close (bottom 30%)",[r for r in g if r["clv"]<=.3]))
+        P(_ev_line("ev earn post","gap up >+2% & leader before",[r for r in earn if r["day"]>.02 and r["lead"]]))
+        # Costco monthly sales and Ford sales
+        for sym,rx,day_to in (("COST",r"(reports .*sales results|comparable sales|comp sales|monthly sales)",12),("F",r"(u\.s\.|\bus\b|quarter|monthly).*sales|sales.*(rise|fall|rose|fell|up|down|increase|decline|jump|slip)",7)):
+            df=data.get(sym)
+            if df is None: df=_yf_download_retry(sym,"10y","1d",timeout=20,attempts=2).dropna(subset=["Close"])
+            dates=_sales_release_dates(sym,rx,day_to); rows=[]
+            for ts in dates:
+                R=_reaction_index(df.index,ts)
+                if R is None: continue
+                r=_ev_returns(df,spy,R)
+                if r: rows.append(r)
+            P(f"[ev sales] {sym} releases dated from news: {len(dates)}")
+            P(_ev_line("ev sales",f"{sym} sales release",rows))
+            P(_ev_line("ev sales",f"{sym} release, reaction up",[r for r in rows if r["day"]>0]))
+            P(_ev_line("ev sales",f"{sym} release, reaction down",[r for r in rows if r["day"]<=0]))
+        for tag,lst in (("investor/analyst days",INVESTOR_DAYS),("product events",PRODUCT_EVENTS)):
+            rows=[]
+            for t,d,evening in lst:
+                df=data.get(t)
+                if df is None:
+                    try: df=_yf_download_retry(t,"10y","1d",timeout=20,attempts=2).dropna(subset=["Close"]); data[t]=df
+                    except Exception: continue
+                i=int(np.searchsorted(df.index.values,np.datetime64(pd.Timestamp(d))))+(1 if evening else 0)
+                r=_ev_returns(df,spy,i) if i<len(df) else None
+                if r: r["t"]=t; rows.append(r)
+            P(_ev_line("ev days",tag,rows))
+            P(_ev_line("ev days",tag+", run-up positive",[r for r in rows if r["pre10"]>0]))
+    except Exception as e:
+        P(f"[ev error] {e!r}")
+    finally:
+        EV_STATE["running"]=False
+
+
+@app.get("/api/backtest/events/print")
+def api_backtest_events_print():
+    if EV_STATE["running"] or time.time()-EV_STATE["last"]<600: return jsonify({"ok":True,"queued":False})
+    EV_STATE["last"]=time.time()
+    threading.Thread(target=print_event_study,daemon=True,name="bt-ev").start()
     return jsonify({"ok":True,"queued":True})
 
 
