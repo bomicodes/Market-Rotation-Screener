@@ -614,3 +614,9 @@ def test_v388_catalyst_helpers():
     r=A._ev_returns(df,spy,20)
     assert r and r["pre10"]>0 and r["post10"]>0
     assert A._reaction_index(idx,"2024-01-03T21:30:00Z")==3   # 4:30pm ET Jan 3 -> Jan 4
+
+
+def test_v3882_costco_rule_dates():
+    import app as A
+    d=A._costco_rule_dates("2025-06-01")
+    assert d[0].startswith("2025-06-04") and any(x.startswith("2025-08-06") for x in d) and any(x.startswith("2025-10-08") for x in d) and any(x.startswith("2025-11-05") for x in d)
