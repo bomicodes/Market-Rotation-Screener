@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.11"
+APP_VERSION = "38.12"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7264,6 +7264,9 @@ def rotation_strat_signal(df, sector_df, spy_df, weekly=True):
 ROT_UD_QUIET=1.4; ROT_CP_UNCROWDED=1.8
 try: ROT_BASE_HIT=float(os.environ.get("BASE_HIT_PCT") or 0.30)
 except Exception: ROT_BASE_HIT=0.30
+# v38.12: user trades slightly further OTM; backtest 11/28: ~3% OTM kept the 64% base-hit win rate and gave bigger runners
+try: ROT_OTM_PCT=float(os.environ.get("OTM_PCT") or 0.03)
+except Exception: ROT_OTM_PCT=0.03
 
 
 def _rotation_rank_score(z):
@@ -7286,8 +7289,8 @@ def _rotation_reasons(z):
 
 
 def _weekly_otm_pick(t, entry, spot, today=None):
-    """First call strike at/above the entry on the nearest expiry 7-16 days after the next session
-    (what the 11/28 options backtest used). Returns dict or None."""
+    """First call strike at/above entry*(1+OTM_PCT) (default ~3% OTM) on the nearest expiry 7-16 days
+    after the next session. Returns dict or None."""
     today=pd.Timestamp(today or pd.Timestamp.now()).normalize()
     nxt=today+pd.offsets.BDay(1)
     snaps=alpaca_option_chain(t,(nxt+pd.Timedelta(days=7)).strftime("%Y-%m-%d"),(nxt+pd.Timedelta(days=16)).strftime("%Y-%m-%d"),spot)
@@ -7295,7 +7298,7 @@ def _weekly_otm_pick(t, entry, spot, today=None):
     for sym,sn in (snaps or {}).items():
         try:
             root_len=len(sym)-15; exp=pd.Timestamp("20"+sym[root_len:root_len+6]); cp=sym[root_len+6]; k=int(sym[-8:])/1000
-            if cp!="C" or k<entry*0.995: continue
+            if cp!="C" or k<entry*(1+ROT_OTM_PCT)*0.995: continue
             q=sn.get("latestQuote") or {}; bp=_safe_float(q.get("bp")); ap=_safe_float(q.get("ap"))
             if not ap or ap<=0: continue
             mid=((bp or 0)+ap)/2 if bp else ap
@@ -7403,7 +7406,7 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
     return {"available":True,"rows":rows,"candidates":len(cands),"scanned":seen,"rejected":rejected[:15],"weekly":weekly,
             "rules":"Leader (beats its SPDR sector, above the 50-day) in a sector beating SPY and improving; weekly candle green; "
                     "STRAT 2U-1 inside bar or failed 2D on the latest bar. Buy-stop over the signal high for the next session only, "
-                    "stop at the signal low. Options: weekly OTM call; sell half at +30% premium (base hit), runner with a break-even stop; if earnings or a product/investor event falls inside the hold, sell by the close the session before. Ranked by FTFC, fresh earnings, quiet volume and uncrowded calls. Check footprint delta on the trigger bar before entering."}
+                    "stop at the signal low. Options: weekly call ~3% OTM (OTM_PCT); sell half at +30% premium (base hit), runner with a break-even stop; if earnings or a product/investor event falls inside the hold, sell by the close the session before. Ranked by FTFC, fresh earnings, quiet volume and uncrowded calls. Check footprint delta on the trigger bar before entering."}
 
 
 def _rotation_earnings_action(signal_date, next_earnings, max_hold=15):
@@ -7481,7 +7484,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v3810b:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v3812:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
