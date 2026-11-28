@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.3"
+APP_VERSION = "38.3.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7290,7 +7290,7 @@ ROTATION_BT_LIST={"XLK":"AAPL MSFT AMD ORCL CSCO ADBE QCOM TXN NVDA INTC","XLF":
 BT_STATE={"last":0.0,"running":False}
 
 
-def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16):
+def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", weekly=True, risk_usd=1000.0, max_hold=15, earn_window=16, intrabar="tv", log=None):
     """Pure. Replays the rotation STRAT rules bar by bar; one trade at a time.
     Exit B: half at +0.5R (planned risk), stop to break-even, rest at 2R or the
     15-session time stop; on any bar the stop is checked first; on the fill bar
@@ -7325,12 +7325,51 @@ def rotation_strat_backtest(df, sec, spy, earnings=None, start="2018-01-01", wee
         entry=h[i]+.01; stop=l[i]; risk=entry-stop
         j=i+1
         if risk<=0 or h[j]<entry: i+=1; continue
-        fill=max(o[j],entry)
-        if fill<=stop: i+=1; continue
         qty=int(risk_usd//risk); qty-=qty%2
         if qty<2: i+=1; continue
-        half_px=entry+.5*risk; tgt=entry+2*risk
-        q1=q2=qty//2; open1=open2=True; stp=stop; k=j; last=min(n-1,j+max_hold-1)
+        half_px=entry+.5*risk; tgt=entry+2*risk; q=qty//2
+        last=min(n-1,j+max_hold-1)
+        if intrabar=="tv":
+            # TradingView broker-emulator path: open -> nearer extreme -> farther extreme -> close
+            fill=None; open1=open2=True; stp=stop; tr=[]; k=j
+            while k<=last and (open1 or open2):
+                pts=[o[k],h[k],l[k],c[k]] if abs(h[k]-o[k])<=abs(o[k]-l[k]) else [o[k],l[k],h[k],c[k]]
+                prev=None
+                for p in pts:
+                    if prev is None:
+                        lo_=hi_=p
+                    else:
+                        lo_,hi_=min(prev,p),max(prev,p)
+                    up= prev is None or p>=prev
+                    if fill is None:
+                        if hi_>=entry and (up or prev is None):
+                            fill=max(entry,lo_) if prev is not None else max(entry,p)
+                            if prev is not None: lo_=fill
+                        else:
+                            prev=p; continue
+                    # after fill: check in path direction
+                    if up:
+                        if open1 and hi_>=half_px: tr.append(((max(half_px,lo_) if prev is not None else max(half_px,p))-fill)*q); open1=False; stp=max(stp,fill)
+                        if open2 and hi_>=tgt: tr.append(((max(tgt,lo_) if prev is not None else max(tgt,p))-fill)*q); open2=False
+                    if (not up) or prev is None:
+                        if lo_<=stp and (open1 or open2):
+                            px=min(stp,hi_) if prev is not None else min(stp,p)
+                            if open1: tr.append((px-fill)*q); open1=False
+                            if open2: tr.append((px-fill)*q); open2=False
+                    prev=p
+                    if not (open1 or open2): break
+                if fill is None: break
+                if open1 or open2: k+=1
+            if fill is None: i+=1; continue
+            k=min(k,last)
+            if open1: tr.append((c[k]-fill)*q)
+            if open2: tr.append((c[k]-fill)*q)
+            halves+=tr
+            if log is not None: log.append((str(idx[j].date()),str(idx[k].date()),round(fill,2),[round(x) for x in tr]))
+            i=k+1; continue
+        fill=max(o[j],entry)
+        if fill<=stop: i+=1; continue
+        q1=q2=q; open1=open2=True; stp=stop; k=j
         while k<=last and (open1 or open2):
             if l[k]<=stp:
                 px=min(o[k],stp) if k>j else stp
@@ -7399,8 +7438,30 @@ def print_rotation_backtest():
         BT_STATE["running"]=False
 
 
+def print_rotation_backtest_one(t, etf):
+    try:
+        d={x:_yf_download_retry(x,"10y","1d",timeout=20,attempts=2) for x in (t,etf,"SPY")}
+        for mode in ("tv","strict"):
+            lg=[]
+            r=rotation_strat_backtest(d[t],d[etf],d["SPY"],None,intrabar=mode,log=lg)
+            print(f"[bt one] {t} {etf} {mode} net {r['net']:+.0f} n {r['trades']} win {r['win']} pf {r['pf']}",flush=True)
+        lg=[]; rotation_strat_backtest(d[t],d[etf],d["SPY"],None,intrabar="tv",log=lg)
+        for z in range(0,len(lg),6):
+            print("[bt one trades] "+" ; ".join(f"{a}>{b} {f} {p}" for a,b,f,p in lg[z:z+6]),flush=True)
+    except Exception as e:
+        print(f"[bt one error] {e!r}",flush=True)
+    finally:
+        BT_STATE["running"]=False
+
+
 @app.get("/api/backtest/rotation/print")
 def api_backtest_rotation_print():
+    one=(request.args.get("ticker") or "").upper().strip()[:6]; etf=(request.args.get("etf") or "").upper().strip()[:4]
+    if one and etf and one.isalnum() and etf.isalpha():
+        if BT_STATE["running"]: return jsonify({"ok":True,"queued":False})
+        BT_STATE["running"]=True
+        threading.Thread(target=print_rotation_backtest_one,args=(one,etf),daemon=True).start()
+        return jsonify({"ok":True,"queued":True})
     if BT_STATE["running"] or time.time()-BT_STATE["last"]<600: return jsonify({"ok":True,"queued":False})
     BT_STATE["last"]=time.time()
     threading.Thread(target=print_rotation_backtest,daemon=True,name="bt-rot").start()

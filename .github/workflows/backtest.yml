@@ -4,6 +4,15 @@ name: Print rotation backtest to the server log
 # the results to its own server log. The response here contains no data, only "queued".
 on:
   workflow_dispatch:
+    inputs:
+      ticker:
+        description: "Optional single ticker (prints its trade list)"
+        required: false
+        default: ""
+      etf:
+        description: "Sector ETF for the single ticker"
+        required: false
+        default: ""
 
 jobs:
   print:
@@ -11,5 +20,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Request the backtest
+        env:
+          T: ${{ inputs.ticker }}
+          E: ${{ inputs.etf }}
         run: |
-          curl -s --max-time 90 "https://market-rotation-screener.onrender.com/api/backtest/rotation/print" | head -c 200; echo
+          q=""; if [ -n "$T" ]; then q="?ticker=$(echo "$T" | tr -cd 'A-Za-z0-9')&etf=$(echo "$E" | tr -cd 'A-Za-z')"; fi
+          curl -s --max-time 90 "https://market-rotation-screener.onrender.com/api/backtest/rotation/print$q" | head -c 200; echo
