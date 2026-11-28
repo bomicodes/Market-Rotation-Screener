@@ -14,7 +14,7 @@ on:
         required: false
         default: ""
       kind:
-        description: "rotation (stock) or options (premium replay, 2024+)"
+        description: "rotation (stock), options (premium replay, 2024+) or events (event study)"
         required: false
         default: "rotation"
 
@@ -30,5 +30,5 @@ jobs:
           K: ${{ inputs.kind }}
         run: |
           q=""; if [ -n "$T" ]; then q="?ticker=$(echo "$T" | tr -cd 'A-Za-z0-9')&etf=$(echo "$E" | tr -cd 'A-Za-z')"; fi
-          path=rotation; if [ "$K" = "options" ]; then path=options; q=""; fi
+          path=rotation; if [ "$K" = "options" ]; then path=options; q=""; fi; if [ "$K" = "events" ]; then path=events; q=""; fi
           curl -s --max-time 90 "https://market-rotation-screener.onrender.com/api/backtest/$path/print$q" | head -c 200; echo

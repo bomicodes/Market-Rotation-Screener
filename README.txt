@@ -1,3 +1,8 @@
+v38.8 — catalyst/positioning research: stock backtest split by earnings timing (post-report, run-up into a report, none),
+20-day up/down volume (accumulation) and FTFC; options backtest adds call/put volume and call-volume acceleration in the 5 days
+before the signal (2024+); event study (/api/backtest/events/print) for earnings run-ups vs post-earnings continuation/reversal,
+Costco monthly sales and Ford sales releases (dated from news headlines), investor/analyst days and product events.
+
 v38.7 — rotation setups carry VP room (R to the nearest 60-day POC / value-area high / high-volume node above the entry)
 and the 7-35 DTE call/put walls (call wall distance in R); shown in the digest, logged and sliced ("room", "cwall") to build a
 live record. Stock backtest adds VP-room filters; options backtest (weekly OTM) adds whole-position exits at stock +0.5R/+1R

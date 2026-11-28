@@ -598,3 +598,19 @@ def test_v3871_all_out_plan_closes_both():
     o=[(T("2024-03-04 09:30"),1,1,1,1,1.0),(T("2024-03-04 10:00"),1.1,1.3,1.05,1.2,1.2)]
     r=A.option_trade_replay(s,o,lv,"2024-03-20")
     assert r and [x[0] for x in r["legs"]]==["tgt","tgt"]
+
+
+def test_v388_catalyst_helpers():
+    import app as A, pandas as pd, numpy as np
+    idx=pd.bdate_range("2024-01-01", periods=40)
+    E=[idx[20]]
+    assert A._earn_bucket(idx,E,22)=="post"
+    assert A._earn_bucket(idx,E,10)=="run-up"
+    assert A._earn_bucket(idx,[idx[39]],2)=="none"
+    c=np.array([10+0.1*k*(1 if k%2 else -0.5) for k in range(40)]); v=np.full(40,100.0)
+    assert A._ud_ratio(c,v,30) is not None
+    df=pd.DataFrame({"Open":np.linspace(10,14,40),"High":np.linspace(10.2,14.2,40),"Low":np.linspace(9.8,13.8,40),"Close":np.linspace(10,14,40)},index=idx)
+    spy=pd.DataFrame({"Close":np.full(40,100.0)},index=idx)
+    r=A._ev_returns(df,spy,20)
+    assert r and r["pre10"]>0 and r["post10"]>0
+    assert A._reaction_index(idx,"2024-01-03T21:30:00Z")==3   # 4:30pm ET Jan 3 -> Jan 4
