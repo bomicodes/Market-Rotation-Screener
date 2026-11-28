@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.8.1"
+APP_VERSION = "38.8.2"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -8005,6 +8005,17 @@ def _reaction_index(idx, ts):
 _MONTHS_RX=r"(january|february|march|april|may|june|july|august|september|october|november|december|holiday|quarter|q[1-4])"
 
 
+def _costco_rule_dates(start="2023-06-01"):
+    """Costco's recent monthly sales releases (verified on 7 of 7 in 2025-26) come after the close on
+    the Wednesday after the first Sunday of the month. Returns UTC timestamps (21:00Z)."""
+    out=[]; m=pd.Timestamp(start)
+    while m<pd.Timestamp.now()-pd.Timedelta(days=10):
+        sun=m+pd.Timedelta(days=(6-m.weekday())%7)
+        out.append((sun+pd.Timedelta(days=3)).strftime("%Y-%m-%dT21:00:00Z"))
+        m=m+pd.DateOffset(months=1)
+    return out
+
+
 def _sales_release_dates(sym, rx, day_to=12, must=None):
     out=[]; mon=pd.Timestamp("2018-01-01"); seen=0
     while mon<pd.Timestamp.now():
@@ -8071,6 +8082,12 @@ def print_event_study():
             df=data.get(sym)
             if df is None: df=_yf_download_retry(sym,"10y","1d",timeout=20,attempts=2).dropna(subset=["Close"])
             dates=_sales_release_dates(sym,rx,day_to,must=must); rows=[]
+            if sym=="COST":
+                dates=sorted(set(dates)|set(_costco_rule_dates()),key=lambda x:str(x)[:10])
+                ds=[]; 
+                for x in dates:
+                    if not ds or str(x)[:10]!=str(ds[-1])[:10]: ds.append(x)
+                dates=ds
             for ts in dates:
                 R=_reaction_index(df.index,ts)
                 if R is None: continue
