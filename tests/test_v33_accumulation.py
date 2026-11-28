@@ -643,3 +643,16 @@ def test_v3810_rank_score():
     assert "fresh earnings" in A._rotation_reasons({"earn_bucket":"post"})
     lab=A._weekly_label({"weekly_pick":{"expiration":"2026-12-11","strike":24.0,"mid":0.6,"cost":60,"base_hit_at":0.78,"base_hit_pct":30}})
     assert "sell half at $0.78" in lab and "runner" in lab
+
+
+def test_v3813_spread_costs_reduce_returns():
+    import app as A, pandas as pd
+    T=lambda x: pd.Timestamp(x,tz="America/New_York")
+    lv={"entry":10.01,"stop":9.51,"fill_date":"2024-03-04"}
+    s=[(T("2024-03-04 09:30"),9.9,10.05,9.85,10.0,10.0),(T("2024-03-04 10:00"),10.0,10.3,9.98,10.2,10.2),
+       (T("2024-03-05 09:30"),10.5,11.5,10.4,11.4,11.3),(T("2024-03-05 15:30"),11.4,11.6,11.3,11.5,11.5)]
+    o=[(T("2024-03-04 09:30"),1,1,1,1,1.0),(T("2024-03-04 10:00"),1.1,1.45,1.05,1.3,1.2),
+       (T("2024-03-05 09:30"),1.8,2.6,1.7,2.5,2.4),(T("2024-03-05 15:30"),2.5,2.9,2.4,2.8,2.7)]
+    a=A.option_runner_replay(s,o,lv,"2024-03-05",base_pct=0.30)
+    b=A.option_runner_replay(s,o,lv,"2024-03-05",base_pct=0.30,hs=lambda p:0.05)
+    assert a and b and b["ret"]<a["ret"] and abs(b["ent"]-1.05)<1e-9
