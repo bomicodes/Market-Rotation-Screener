@@ -588,3 +588,13 @@ def test_v387_vp_room_and_premium_target():
     o=[(T("2024-03-04 09:30"),1,1,1,1,1.0),(T("2024-03-04 10:00"),1.1,1.4,1.05,1.3,1.2)]
     r=A.option_trade_replay(s,o,lv,"2024-03-20",prem_tgt=0.3)
     assert r and abs(r["opt_ret"]-0.3)<1e-9 and r["legs"][0][0]=="prem"
+
+
+def test_v3871_all_out_plan_closes_both():
+    import app as A, pandas as pd
+    T=lambda x: pd.Timestamp(x,tz="America/New_York")
+    lv={"entry":10.01,"stop":9.51,"half":1e12,"tgt":10.26,"fill_date":"2024-03-04"}
+    s=[(T("2024-03-04 09:30"),9.9,10.05,9.85,10.0,10.0),(T("2024-03-04 10:00"),10.0,10.3,9.98,10.2,10.2)]
+    o=[(T("2024-03-04 09:30"),1,1,1,1,1.0),(T("2024-03-04 10:00"),1.1,1.3,1.05,1.2,1.2)]
+    r=A.option_trade_replay(s,o,lv,"2024-03-20")
+    assert r and [x[0] for x in r["legs"]]==["tgt","tgt"]

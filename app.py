@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.7"
+APP_VERSION = "38.7.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7710,6 +7710,8 @@ def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
                 legs.append(("half",t,max(o,H),opx(t))); open1=False; stp=max(stp,stock_fill)
             if open2 and h>=T:
                 legs.append(("tgt",t,max(o,T),opx(t))); open2=False
+            if open1 and H>1e11 and h>=T:   # no scale-out: the whole position leaves at the target
+                legs.append(("tgt",t,max(o,T),opx(t))); open1=False
         def downs():
             nonlocal open1,open2
             if (open1 or open2) and l<=stp:
@@ -7735,8 +7737,8 @@ def option_trade_replay(sbars, obars, lv, day_cap, prem_tgt=None):
 
 OPT_BT_VARIANTS=(("weekly 7-16d OTM",7,16,"otm"),)
 OPT_BT_PLANS=(("current: half +0.5R then BE, rest 2R",0.5,2.0,None),("all out when stock hits +0.5R",None,0.5,None),
-              ("all out when stock hits +1R",None,1.0,None),("all out at premium +30%",None,99.0,0.30),
-              ("all out at premium +50%",None,99.0,0.50),("all out at premium +100%",None,99.0,1.00))
+              ("all out when stock hits +1R",None,1.0,None),("all out at premium +20%",None,99.0,0.20),("all out at premium +30%",None,99.0,0.30),
+              ("all out at premium +40%",None,99.0,0.40),("all out at premium +50%",None,99.0,0.50))
 
 
 def _expiry_candidates(fdt, min_dte, max_dte):
