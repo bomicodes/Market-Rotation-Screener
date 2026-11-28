@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.3.2"
+APP_VERSION = "38.4"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5007,6 +5007,9 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
     # v38.1: a lane can carry its own order life (rotation_strat: next bar only)
     try: max_wait=int(row.get("max_wait") or max_wait)
     except Exception: pass
+    # v38.4: a row can cap its own hold (rotation_strat: sell the session before earnings)
+    try: max_hold=int(row.get("max_hold") or max_hold)
+    except Exception: pass
     if fill!="stop":
         out=_evaluate_close_confirm(row, df, max_wait, max_hold)
         try:
@@ -7227,6 +7230,12 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
             except Exception as e: z["flow"]={"read":f"unavailable ({str(e)[:40]})","score":None,"bias":None}
             dte=z.get("days_to_earnings")
             z["earnings_in_hold"]=bool(dte is not None and 0<=int(dte)<=21)
+            # v38.4: backtest (65 stocks, 2018+): selling at the close the session before the report beat
+            # both holding through (+$184k vs +$155k) and skipping (+$164k). Skip only if there is no room.
+            ea=_rotation_earnings_action(z.get("signal_date"),z.get("next_earnings"))
+            z.update(ea)
+            if ea.get("earnings_action")=="skip":
+                rejected.append({"ticker":t,"reason":f"earnings {z.get('next_earnings')} too close to sell before"}); continue
             rows.append(z)
         except Exception as e:
             rejected.append({"ticker":t,"reason":str(e)[:80]})
@@ -7237,7 +7246,24 @@ def rotation_strat_payload(budget=250, top=8, weekly=True):
     return {"available":True,"rows":rows,"candidates":len(cands),"scanned":seen,"rejected":rejected[:15],"weekly":weekly,
             "rules":"Leader (beats its SPDR sector, above the 50-day) in a sector beating SPY and improving; weekly candle green; "
                     "STRAT 2U-1 inside bar or failed 2D on the latest bar. Buy-stop over the signal high for the next session only, "
-                    "stop at the signal low, target 2R, half at +0.5R then break-even. Check footprint delta on the trigger bar before entering."}
+                    "stop at the signal low, target 2R, half at +0.5R then break-even; if earnings fall inside the 15-day hold, sell by the close the session before the report. Check footprint delta on the trigger bar before entering."}
+
+
+def _rotation_earnings_action(signal_date, next_earnings, max_hold=15):
+    """Pure. Entry is the session after the signal. If the report falls inside the hold, cap the hold to
+    the session before the report date (sell by its close); if that leaves under 2 sessions, skip."""
+    out={"earnings_action":"none","sell_by":None,"max_hold":max_hold}
+    if not signal_date or not next_earnings: return out
+    try:
+        sd=np.datetime64(pd.Timestamp(signal_date).date()); ed=np.datetime64(pd.Timestamp(next_earnings).date())
+        entry=np.busday_offset(sd,1,roll="forward")
+        sessions=int(np.busday_count(entry,ed))   # entry day .. day before the report
+        if sessions<0 or sessions>=max_hold: return out
+        if sessions<=1: return {"earnings_action":"skip","sell_by":None,"max_hold":0}
+        sell=np.busday_offset(ed,-1,roll="backward")
+        return {"earnings_action":"sell_before","sell_by":str(sell),"max_hold":sessions}
+    except Exception:
+        return out
 
 
 def rotation_strat_log_rows(payload, date, regime=None):
@@ -7249,6 +7275,7 @@ def rotation_strat_log_rows(payload, date, regime=None):
                      "regime":regime,"parent":z.get("parent"),"signal":z.get("signal"),"half_at":z.get("half_at"),"logged_by":"nightly",
                      "flow_bias":(z.get("flow") or {}).get("bias"),"flow_score":(z.get("flow") or {}).get("score"),
                      "days_to_earnings":z.get("days_to_earnings"),"earnings_in_hold":z.get("earnings_in_hold"),
+                     "max_hold":z.get("max_hold") or 15,"sell_by":z.get("sell_by"),
                      "contract":{"label":_contract_label(zz),"cost":zz.get("cost"),"entry_premium":zz.get("entry_premium"),"symbol":(zz.get("leg") or {}).get("symbol")} if zz else None})
     return rows
 
@@ -7261,7 +7288,7 @@ def rotation_strat_lines(payload):
         out.append(f"[digest rotation {k//2+1}] "+" | ".join(
             f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
             f" · flow: {(z.get('flow') or {}).get('read')} (score {(z.get('flow') or {}).get('score')}, {(z.get('flow') or {}).get('bias')})"
-            f" · earnings {z.get('next_earnings')} ({z.get('days_to_earnings')}d){' INSIDE THE HOLD' if z.get('earnings_in_hold') else ''}"
+            f" · earnings {z.get('next_earnings')} ({z.get('days_to_earnings')}d){(' · SELL BY '+str(z.get('sell_by'))+' close') if z.get('sell_by') else ''}"
             for z in rows[k:k+2]))
     return out
 
@@ -7272,7 +7299,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v382:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v384:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 

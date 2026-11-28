@@ -525,3 +525,13 @@ def test_v3832_earnings_exit_mode_caps_hold():
     for a,b,f,p in lg:
         nxt=[e for e in E if e>pd.Timestamp(a)]
         if nxt: assert pd.Timestamp(b)<nxt[0]
+
+
+def test_v384_rotation_earnings_action():
+    import app as A
+    # signal Fri 2026-11-27 -> entry Mon 11/30
+    assert A._rotation_earnings_action("2026-11-27", None)["earnings_action"] == "none"
+    r = A._rotation_earnings_action("2026-11-27", "2026-12-18")   # 14 sessions 11/30..12/17
+    assert r["earnings_action"] == "sell_before" and r["sell_by"] == "2026-12-17" and r["max_hold"] == 14
+    assert A._rotation_earnings_action("2026-11-27", "2026-12-01")["earnings_action"] == "skip"
+    assert A._rotation_earnings_action("2026-11-27", "2027-01-27")["earnings_action"] == "none"
