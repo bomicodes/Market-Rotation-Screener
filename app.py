@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.10"
+APP_VERSION = "38.10.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -7481,7 +7481,7 @@ def api_rotation_strat():
         try: budget=int(float(request.args.get("budget") or 250))
         except Exception: budget=250
         force=request.args.get("refresh")=="1"
-        payload,stale,err=cached_refresh_safe(f"rotstrat-v3810:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v3810b:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
         return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
     except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
 
@@ -7865,7 +7865,7 @@ def _opt_positioning(t, sig, spot):
         syms=[_occ(t,exp,k,"C") for k in ks]+[_occ(t,exp,k,"P") for k in ks]
         ob=_alpaca_bars_paged(f"{ALPACA_DATA_BASE_URL}/v1beta1/options/bars",
             {"symbols":",".join(syms),"timeframe":"1Day","start":(sig-pd.Timedelta(days=35)).strftime("%Y-%m-%dT00:00:00Z"),
-             "end":(sig+pd.Timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),"limit":10000,"sort":"asc"},pages=2)
+             "end":min(pd.Timestamp(sig)+pd.Timedelta(days=1),pd.Timestamp.now(tz="UTC").tz_localize(None)-pd.Timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%SZ"),"limit":10000,"sort":"asc"},pages=2)
         days=sorted({pd.Timestamp(b["t"]).tz_convert("America/New_York").date() for arr in ob.values() for b in arr})
         days=[d for d in days if d<=sig.date()][-20:]
         if len(days)<10: return {}
