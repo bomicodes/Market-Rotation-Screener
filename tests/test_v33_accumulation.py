@@ -571,3 +571,20 @@ def test_v386_ftfc_flags():
     assert set(f)=={"D","W","M","Q"} and f["M"] and f["Q"] and f["D"]
     f2=A._ftfc_flags(idx,o,c,2)  # 9/30: close 9 < opens
     assert not any(f2.values())
+
+
+def test_v387_vp_room_and_premium_target():
+    import app as A, numpy as np, pandas as pd
+    n=60
+    # heavy volume around 105, light above 108: entry 100 -> first obstacle near 105
+    h=np.full(n,106.0); l=np.full(n,104.0); v=np.full(n,1e6)
+    h[:5]=112; l[:5]=95; v[:5]=1e4
+    r=A._vp_room(h,l,v,n-1,100.0,2.0)
+    assert r is not None and 1.5<=r<=3.0
+    assert A._vp_room(h,l,v,n-1,113.0,2.0)==9.0
+    tz="America/New_York"; T=lambda x: pd.Timestamp(x,tz=tz)
+    lv={"entry":10.01,"stop":9.51,"half":1e12,"tgt":99,"fill_date":"2024-03-04"}
+    s=[(T("2024-03-04 09:30"),9.9,10.05,9.85,10.0,10.0),(T("2024-03-04 10:00"),10.0,10.2,9.98,10.1,10.1)]
+    o=[(T("2024-03-04 09:30"),1,1,1,1,1.0),(T("2024-03-04 10:00"),1.1,1.4,1.05,1.3,1.2)]
+    r=A.option_trade_replay(s,o,lv,"2024-03-20",prem_tgt=0.3)
+    assert r and abs(r["opt_ret"]-0.3)<1e-9 and r["legs"][0][0]=="prem"
