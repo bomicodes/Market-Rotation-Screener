@@ -634,3 +634,12 @@ def test_v389_runner_replay():
     assert r and r["based"] and abs(r["base"]-1.3)<1e-9 and abs(r["run"]-2.8)<1e-9
     r2=A.option_runner_replay(s,o,lv,"2024-03-05",base_pct=0.30,runner="2r")
     assert r2 and r2["run"]<2.8
+
+
+def test_v3810_rank_score():
+    import app as A
+    assert A._rotation_rank_score({"ftfc_full":True,"earn_bucket":"post","ud":1.2,"cp5":1.5})==7
+    assert A._rotation_rank_score({"ftfc_full":False,"earn_bucket":"none","ud":2.5,"cp5":5})==0
+    assert "fresh earnings" in A._rotation_reasons({"earn_bucket":"post"})
+    lab=A._weekly_label({"weekly_pick":{"expiration":"2026-12-11","strike":24.0,"mid":0.6,"cost":60,"base_hit_at":0.78,"base_hit_pct":30}})
+    assert "sell half at $0.78" in lab and "runner" in lab

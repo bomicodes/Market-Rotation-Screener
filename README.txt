@@ -1,3 +1,8 @@
+v38.10 — rotation lane: ranked by FTFC (3), a fresh earnings report (2), quiet 20d volume (1) and uncrowded calls (1);
+weekly OTM contract pick (first strike at/above the entry, 7-16 DTE) with the base-hit + runner plan (sell half at +30% of the
+fill via BASE_HIT_PCT, runner on a break-even stop to the day before expiration); product/investor/sales events inside the hold
+set a sell-by date. v38.9: options backtest of base hit + runner exits.
+
 v38.8 — catalyst/positioning research: stock backtest split by earnings timing (post-report, run-up into a report, none),
 20-day up/down volume (accumulation) and FTFC; options backtest adds call/put volume and call-volume acceleration in the 5 days
 before the signal (2024+); event study (/api/backtest/events/print) for earnings run-ups vs post-earnings continuation/reversal,
