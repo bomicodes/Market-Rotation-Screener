@@ -1,3 +1,8 @@
+v38.1 — rotation STRAT lane for single stocks (the Vela-backtested leader rules): leader in a sector beating SPY, weekly candle green,
+STRAT 2U-1 or failed 2D on the latest bar; buy-stop over the signal high for the next session only, stop at the signal low, 2R target,
+half at +0.5R then break-even. Nightly stage "rotation strat" logs lane rotation_strat (graded next-bar-only, no failed-2U exit);
+/api/rotation-strat; [digest rotation] lines. Order flow (footprint delta) stays a live check.
+
 v38.0 — SPY/QQQ index pullback lane, the rules backtested in Vela 2018-2026 (trend setup, touch of SMA20 +/- 0.25 ATR within
 10 days, a close in the top 40% of the bar beyond the zone within 3 bars, SPY on the right side of its 50-day; half at +0.5R then
 break-even). SPY +9.6R / QQQ +4.5R; single stocks and XLP were about break-even, so the lane is index-only. Nightly stage
