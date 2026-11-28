@@ -13,6 +13,10 @@ on:
         description: "Sector ETF for the single ticker"
         required: false
         default: ""
+      kind:
+        description: "rotation (stock) or options (premium replay, 2024+)"
+        required: false
+        default: "rotation"
 
 jobs:
   print:
@@ -23,6 +27,8 @@ jobs:
         env:
           T: ${{ inputs.ticker }}
           E: ${{ inputs.etf }}
+          K: ${{ inputs.kind }}
         run: |
           q=""; if [ -n "$T" ]; then q="?ticker=$(echo "$T" | tr -cd 'A-Za-z0-9')&etf=$(echo "$E" | tr -cd 'A-Za-z')"; fi
-          curl -s --max-time 90 "https://market-rotation-screener.onrender.com/api/backtest/rotation/print$q" | head -c 200; echo
+          path=rotation; if [ "$K" = "options" ]; then path=options; q=""; fi
+          curl -s --max-time 90 "https://market-rotation-screener.onrender.com/api/backtest/$path/print$q" | head -c 200; echo
