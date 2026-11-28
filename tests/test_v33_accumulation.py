@@ -446,3 +446,35 @@ def test_v381_index_pullback_trade_closes():
     ev = r["events"][0]
     assert ev["exit"] == "target" and ev["r"] == ev["rr"] > 0   # target inside +0.5R: whole position exits there
     assert "last trade" in A.index_pullback_lines({"symbols": {"SPY": {"state": {**ev, "status": "closed"}}}})
+
+
+def test_v381_rotation_strat_signal_and_grading():
+    import app as A, pandas as pd, numpy as np
+    n = 100
+    idx = pd.bdate_range("2026-06-01", periods=n)
+    spy = pd.DataFrame({"Close": 100 + np.arange(n) * 0.05}, index=idx)
+    sec = pd.DataFrame({"Close": 50 + np.arange(n) * 0.10}, index=idx)          # sector beating SPY
+    c = 20 + np.arange(n) * 0.15                                               # stock beating the sector
+    o = c - 0.05; h = c + 0.3; l = c - 0.3
+    # bar -2 is a 2U, the last bar an inside bar inside it
+    h[-2] = h[-3] + 0.5; l[-2] = l[-3] + 0.1
+    h[-1] = h[-2] - 0.1; l[-1] = l[-2] + 0.1; c[-1] = (h[-1] + l[-1]) / 2; o[-1] = l[-1] + 0.05
+    df = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c, "Volume": 5e6}, index=idx)
+    r = A.rotation_strat_signal(df, sec, spy, weekly=False)
+    assert r["ok"] and r["signal"].startswith("2U-1"), r
+    assert r["entry"] == round(h[-1] + .01, 2) and r["stop"] == round(l[-1], 2)
+    assert abs(r["target"] - (r["entry"] + 2 * (r["entry"] - r["stop"]))) < 0.02
+    # a sector lagging SPY blocks it
+    sec_bad = pd.DataFrame({"Close": 50 - np.arange(n) * 0.10}, index=idx)
+    assert not A.rotation_strat_signal(df, sec_bad, spy, weekly=False).get("ok")
+    # grading honours next-bar-only orders and no failed-2U exit
+    gi = pd.bdate_range("2026-11-02", periods=4)
+    row = {"trade_date": "2026-11-02", "direction": "bullish", "entry": 10.0, "stop": 9.0, "target": 12.0,
+           "fill": "stop", "lane": "rotation_strat", "max_wait": 1, "no_fail_exit": True}
+    g = pd.DataFrame({"Open": [9.5, 9.6, 10.2, 11], "High": [9.9, 9.9, 10.6, 12.2],
+                      "Low": [9.3, 9.4, 10.0, 10.8], "Close": [9.6, 9.7, 10.5, 12.0]}, index=gi)
+    assert A.evaluate_setup_outcome(row, g)["status"] == "expired"          # day 1 never traded through 10
+    g2 = pd.DataFrame({"Open": [9.5, 9.8, 9.9, 10.3], "High": [9.9, 10.2, 10.4, 12.3],
+                       "Low": [9.3, 9.7, 9.6, 10.2], "Close": [9.6, 9.8, 10.2, 12.1]}, index=gi)
+    out = A.evaluate_setup_outcome(row, g2)
+    assert out["status"] == "win" and out.get("exit") is None             # closed below 10 on day 1, no failed-2U exit

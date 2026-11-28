@@ -11,7 +11,7 @@ import requests
 import yfinance as yf
 
 app = Flask(__name__)
-APP_VERSION = "38.0.1"
+APP_VERSION = "38.1"
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-change-me")
 PORT = int(os.environ.get("PORT", "8765"))
 SCREENER_PASSWORD = os.environ.get("SCREENER_PASSWORD", "").strip()
@@ -5004,6 +5004,9 @@ def evaluate_setup_outcome(row, df, max_wait=10, max_hold=15, intraday=None):
     daily-close-confirmation result is kept alongside under "close_confirm" so
     the two can be compared. Limit/pullback plans are unchanged."""
     fill=row.get("fill") or ("limit" if row.get("lane")=="pullback" else "stop")
+    # v38.1: a lane can carry its own order life (rotation_strat: next bar only)
+    try: max_wait=int(row.get("max_wait") or max_wait)
+    except Exception: pass
     if fill!="stop":
         out=_evaluate_close_confirm(row, df, max_wait, max_hold)
         try:
@@ -5068,7 +5071,7 @@ def _evaluate_partial_be(row, df, primary, max_hold=15):
                 if (hi>=target) if bull else (lo<=target):
                     return {"status":"win","r":round(.25+.5*tr,2),"partial":True,"exit":"target","closed":d}
                 continue
-            if trig and (((bull and cl<entry) or ((not bull) and cl>entry))):
+            if trig and not row.get("no_fail_exit") and (((bull and cl<entry) or ((not bull) and cl>entry))):
                 r=((cl-px) if bull else (px-cl))/risk
                 return {"status":"win" if r>0 else "loss","r":round(r,2),"partial":False,"exit":"failed 2U" if bull else "failed 2D","closed":d}
         else:
@@ -5130,7 +5133,7 @@ def _evaluate_trigger_failed2u(row, df, max_wait=10, max_hold=15, intraday=None,
         if hit_stop: return {"status":"loss","r":-1.0,**common}
         if hit_tgt: return {"status":"win","r":round(abs(target-px)/risk,2),**common}
         # v36.4 grace variant: the failed-2U/2D close exit only counts from day 2
-        if ((bull and cl<entry) or ((not bull) and cl>entry)) and not (grace and j==fill_i):
+        if ((bull and cl<entry) or ((not bull) and cl>entry)) and not (grace and j==fill_i) and not row.get("no_fail_exit"):
             r=((cl-px) if bull else (px-cl))/risk
             return {"status":"win" if r>0 else "loss","r":round(r,2),"exit":"failed 2U" if bull else "failed 2D",**common}
     last=after.iloc[min(len(after),fill_i+max_hold)-1]; close=float(last["Close"])
@@ -7130,6 +7133,138 @@ def api_put_side():
 
 
 # ---------------------------------------------------------------------------
+# v38.1 ROTATION STRAT LANE (single stocks) -- the rules backtested in Vela 11/27
+# Leader: stock/sector RS above its 20-day average and the stock above its 50-day.
+# Rotation: sector/SPY RS above its 20-day average and above its value 10 days ago.
+# Weekly continuity: the daily close above this week's open.
+# STRAT signal on the latest bar: an inside bar (1) right after a 2U, or a failed
+# 2D (2D bar closing in the top half of its range) with the stock above its 20-day.
+# Order: buy-stop 1 cent over the signal bar's high, NEXT BAR ONLY; stop at the
+# signal bar's low; target 2R; sell half at +0.5R, rest to break-even (Exit B).
+# Backtest 2018-2026 (9 stocks, half-positions): +$60k simple rotation, +$53k with
+# weekly continuity (no stock worse than PF 0.96). VP is context only; order flow
+# (footprint delta on the trigger bar) is a live check -- only 12 months of data.
+# ---------------------------------------------------------------------------
+def _strat_type(h, l, ph, pl):
+    up=h>ph; dn=l<pl
+    if up and dn: return "3"
+    if up: return "2U"
+    if dn: return "2D"
+    return "1"
+
+
+def rotation_strat_signal(df, sector_df, spy_df, weekly=True):
+    """Pure. Checks the latest bar of `df`; returns a plan dict or None."""
+    if df is None or sector_df is None or spy_df is None or len(df)<60: return None
+    d=df.dropna(subset=["Open","High","Low","Close"]).copy()
+    sec=sector_df["Close"].astype(float).reindex(d.index).ffill()
+    spy=spy_df["Close"].astype(float).reindex(d.index).ffill()
+    o=d["Open"].astype(float); h=d["High"].astype(float); l=d["Low"].astype(float); c=d["Close"].astype(float)
+    if len(c)<60 or sec.isna().iloc[-25:].any() or spy.isna().iloc[-25:].any(): return None
+    sma20=c.rolling(20).mean(); sma50=c.rolling(50).mean()
+    rs=c/sec; rs_sec=sec/spy
+    i=len(c)-1
+    leader=bool(rs.iloc[i]>rs.rolling(20).mean().iloc[i] and c.iloc[i]>sma50.iloc[i])
+    rot=bool(rs_sec.iloc[i]>rs_sec.rolling(20).mean().iloc[i] and rs_sec.iloc[i]>rs_sec.iloc[i-10])
+    wk=d.index[i].isocalendar(); wk_open=None
+    for j in range(i,-1,-1):
+        ij=d.index[j].isocalendar()
+        if (ij[0],ij[1])!=(wk[0],wk[1]): break
+        wk_open=float(o.iloc[j])
+    weekly_ok=bool(wk_open is not None and c.iloc[i]>wk_open)
+    t0=_strat_type(h.iloc[i],l.iloc[i],h.iloc[i-1],l.iloc[i-1])
+    t1=_strat_type(h.iloc[i-1],l.iloc[i-1],h.iloc[i-2],l.iloc[i-2])
+    rng=float(h.iloc[i]-l.iloc[i])
+    sig=None
+    if t0=="1" and t1=="2U": sig="2U-1 (inside bar after a 2U)"
+    elif t0=="2D" and rng>0 and c.iloc[i]>=l.iloc[i]+.5*rng and c.iloc[i]>sma20.iloc[i]: sig="failed 2D"
+    checks={"leader":leader,"rotation":rot,"weekly":weekly_ok,"signal":sig}
+    if not sig or not leader or not rot or (weekly and not weekly_ok): return {"ok":False,"checks":checks}
+    entry=round(float(h.iloc[i])+.01,2); stop=round(float(l.iloc[i]),2); risk=entry-stop
+    if risk<=0: return {"ok":False,"checks":checks}
+    r20=lambda s:float(s.iloc[i]/s.iloc[i-20]-1)*100
+    return {"ok":True,"checks":checks,"signal":sig,"signal_date":str(d.index[i])[:10],"entry":entry,"stop":stop,
+            "target":round(entry+2*risk,2),"half_at":round(entry+.5*risk,2),"rr":2.0,
+            "risk_pct":round(100*risk/entry,2),"rs_vs_sector_20d":round(r20(c)-r20(sec),1),"sector_vs_spy_20d":round(r20(sec)-r20(spy),1)}
+
+
+def rotation_strat_payload(budget=250, top=8, weekly=True):
+    memberships,data,rrg=_group_universe()
+    spy=data.get("SPY"); cands=[]; seen=0
+    for t,gl in memberships.items():
+        secs=[g for g in gl if g in SECTORS]
+        df=data.get(t)
+        if not secs or df is None or len(df)<60: continue
+        try:
+            c=df["Close"].astype(float); v=df["Volume"].astype(float)
+            if float(c.iloc[-1])<10 or float((c*v).tail(20).mean())<20e6: continue
+        except Exception: continue
+        seen+=1
+        for g in secs:
+            try: r=rotation_strat_signal(df,data.get(g),spy,weekly=weekly)
+            except Exception: r=None
+            if r and r.get("ok"):
+                cands.append({"ticker":t,"parent":g,"sector":SECTORS.get(g),**r}); break
+    cands.sort(key=lambda z:(-z["sector_vs_spy_20d"],-z["rs_vs_sector_20d"]))
+    rows=[]; rejected=[]
+    for z in cands:
+        if len(rows)>=top: break
+        t=z["ticker"]
+        try:
+            liq=contract_liquidity_gate(t,"0-30",allow_leaps=False)
+            if liq.get("liquidity") not in ("Liquid","Tradable"):
+                rejected.append({"ticker":t,"reason":"options thin"}); continue
+            st=_context_structure(t)
+            if not st or not st.get("available"): continue
+            st["put_plans"]={"bullish":{"name":"rotation_strat","entry":z["entry"],"stop":z["stop"],"target":z["target"],"rr":2.0}}
+            z["entry_plan"]=option_entry_plan(t,"bullish",budget,"rotation_strat",structure=st)
+            z["options_liquidity"]=liq.get("liquidity"); rows.append(z)
+        except Exception as e:
+            rejected.append({"ticker":t,"reason":str(e)[:80]})
+        finally:
+            if NIGHTLY.get("running"):
+                try: _nightly_free_memory(("visible-","alpaca-intraday","alpaca-hour","yf-","chart-","strat-","options-scan","options-v"))
+                except Exception: pass
+    return {"available":True,"rows":rows,"candidates":len(cands),"scanned":seen,"rejected":rejected[:15],"weekly":weekly,
+            "rules":"Leader (beats its SPDR sector, above the 50-day) in a sector beating SPY and improving; weekly candle green; "
+                    "STRAT 2U-1 inside bar or failed 2D on the latest bar. Buy-stop over the signal high for the next session only, "
+                    "stop at the signal low, target 2R, half at +0.5R then break-even. Check footprint delta on the trigger bar before entering."}
+
+
+def rotation_strat_log_rows(payload, date, regime=None):
+    rows=[]
+    for z in (payload or {}).get("rows") or []:
+        p=z.get("entry_plan") or {}; zz=p.get("single") or {}
+        rows.append({"ticker":z["ticker"],"trade_date":date,"lane":"rotation_strat","direction":"bullish","fill":"stop",
+                     "entry":z["entry"],"stop":z["stop"],"target":z["target"],"rr":2.0,"max_wait":1,"no_fail_exit":True,
+                     "regime":regime,"parent":z.get("parent"),"signal":z.get("signal"),"half_at":z.get("half_at"),"logged_by":"nightly",
+                     "contract":{"label":_contract_label(zz),"cost":zz.get("cost"),"entry_premium":zz.get("entry_premium"),"symbol":(zz.get("leg") or {}).get("symbol")} if zz else None})
+    return rows
+
+
+def rotation_strat_lines(payload):
+    rows=(payload or {}).get("rows") or []
+    if not rows: return [f"[digest rotation] no setups tonight ({(payload or {}).get('candidates',0)} signals, {(payload or {}).get('scanned',0)} stocks scanned)"]
+    out=[]
+    for k in range(0,len(rows),4):
+        out.append(f"[digest rotation {k//4+1}] "+" | ".join(
+            f"{z['ticker']} ({z['parent']} {z.get('sector_vs_spy_20d'):+}% vs SPY, stock {z.get('rs_vs_sector_20d'):+}% vs sector) {z['signal']} · buy-stop {z['entry']} stop {z['stop']} half {z['half_at']} tgt {z['target']} · {_dg_plan(z.get('entry_plan')).split(' · ')[-1]}"
+            for z in rows[k:k+4]))
+    return out
+
+
+@app.get("/api/rotation-strat")
+def api_rotation_strat():
+    try:
+        try: budget=int(float(request.args.get("budget") or 250))
+        except Exception: budget=250
+        force=request.args.get("refresh")=="1"
+        payload,stale,err=cached_refresh_safe(f"rotstrat-v381:{budget}",lambda:rotation_strat_payload(budget),force=force,ttl=6*3600)
+        return jsonify({"ok":True,**payload,"stale":stale,"refresh_error":err})
+    except Exception as e:return jsonify({"ok":False,"error":str(e)}),500
+
+
+# ---------------------------------------------------------------------------
 # v38.0 INDEX PULLBACK (SPY / QQQ) -- the backtested version
 # Backtested 2018-2026 in Vela on daily bars ("Version B + Filters 1 & 3"):
 # SPY +9.6R on ~44 setups (69% of half-positions won), QQQ +4.5R (66%); the same
@@ -7643,6 +7778,8 @@ def build_digest(kind="nightly"):
     # v38.0: SPY/QQQ pullback signal (the backtested lane)
     try: out.append(index_pullback_lines(get("/api/index-pullback"+("?refresh=1" if kind!="nightly" else "")),provisional=(kind=="midday")))
     except Exception as e: out.append(f"[digest index error] {e!r}")
+    try: out+=rotation_strat_lines(get(f"/api/rotation-strat?budget={budget}"))
+    except Exception as e: out.append(f"[digest rotation error] {e!r}")
     # v37.13: sector snapshot -- 1-day / 5-day return, RRG quadrant (fast), volume flow
     try:
         gf=(get("/api/group-flow").get("groups") or {}); secs=[]
@@ -7962,6 +8099,14 @@ def nightly_run():
             st["counts"]["index_pullback"]={t:((v or {}).get("state") or {}).get("status") for t,v in (ip.get("symbols") or {}).items()}
             st["counts"]["index_logged"]=log_setups(index_pullback_log_rows(ip,server_regime(m)))
         except Exception as e: st["errors"].append(f"index pullback: {e}")
+        st["stage"]="rotation strat"
+        try:
+            rs_=get(f"/api/rotation-strat?refresh=1&budget={budget}")
+            st["counts"]["rotation_strat"]=len(rs_.get("rows") or [])
+            _date=str((m or {}).get("asof") or _et_now().date().isoformat())[:10]
+            st["counts"]["rotation_logged"]=log_setups(rotation_strat_log_rows(rs_,_date,server_regime(m)))
+        except Exception as e: st["errors"].append(f"rotation strat: {e}")
+        _nightly_free_memory(("rotstrat-",))
         # v37.4: log the board server-side (nights nobody opens the page were missing)
         st["stage"]="log board"
         try:
